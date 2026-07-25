@@ -133,38 +133,47 @@
             <h1>Salon</h1>
             <span class="lobby-code-pill" id="lobby-code">····</span>
           </div>
-          <p class="tag" id="lobby-hint">Partage le code. Jusqu'à 6 places (joueurs + IA).</p>
+          <p class="tag" id="lobby-hint">Partage le code. Jusqu'à 6 places.</p>
         </header>
 
-        <section class="lobby-players">
+        <!-- Bande de récap : avatars des joueurs les uns à côté des autres -->
+        <section class="lobby-strip">
           <div class="lobby-section-title">
             <span>Joueurs</span>
             <span id="lobby-players-count" class="lobby-players-count">0/6</span>
           </div>
-          <ul id="lobby-slots" class="lobby-players-list"></ul>
+          <div id="lobby-strip-slots" class="lobby-strip-row"></div>
         </section>
 
+        <!-- Bloc du bas : configurateur perso façon carousel -->
         <section class="lobby-me-card" id="lobby-me-card">
-          <div class="lobby-section-title">Ta configuration</div>
+          <div class="lobby-section-title">Ton personnage</div>
+
+          <div class="lobby-carousel" id="lobby-carousel">
+            <button type="button" class="lobby-nav-btn" id="lobby-nav-prev" aria-label="Précédent">
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.5" fill="none"><path d="M15 18l-6-6 6-6"/></svg>
+            </button>
+            <div class="lobby-card-3d" id="lobby-card-3d"></div>
+            <button type="button" class="lobby-nav-btn" id="lobby-nav-next" aria-label="Suivant">
+              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.5" fill="none"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
+          </div>
+          <div id="lobby-carousel-dots" class="lobby-carousel-dots"></div>
 
           <div class="lobby-field">
             <label class="lbl2">Nom du Prophète</label>
             <input id="lobby-me-name" maxlength="20" placeholder="Ton nom" />
           </div>
 
-          <div class="lobby-field">
-            <label class="lbl2">Personnage</label>
-            <div id="lobby-leader-picker" class="lobby-leader-grid"></div>
-          </div>
-
-          <div class="lobby-field">
-            <label class="lbl2">Symbole de la religion</label>
-            <div id="lobby-icon-picker" class="lobby-icon-grid"></div>
-          </div>
-
-          <div class="lobby-field">
-            <label class="lbl2">Couleur divine</label>
-            <div id="lobby-color-picker" class="lobby-color-grid"></div>
+          <div class="lobby-pastilles">
+            <button type="button" class="lobby-pastille" id="lobby-pastille-color" title="Couleur divine">
+              <span class="lobby-pastille-swatch" id="lobby-pastille-color-swatch"></span>
+              <span class="lobby-pastille-label">Couleur</span>
+            </button>
+            <button type="button" class="lobby-pastille" id="lobby-pastille-sym" title="Symbole de religion">
+              <span class="lobby-pastille-swatch is-sym" id="lobby-pastille-sym-swatch"></span>
+              <span class="lobby-pastille-label">Symbole</span>
+            </button>
           </div>
         </section>
 
@@ -173,6 +182,17 @@
         </div>
         <p id="lobby-guest-hint" class="tag hidden">En attente que l'hôte lance la partie…</p>
         <button id="btn-lobby-leave" class="secondary-btn">Quitter le salon</button>
+      </div>
+
+      <!-- Modal de sélection (couleur ou symbole) — s'ouvre par-dessus le lobby -->
+      <div id="lobby-picker-modal" class="lobby-modal hidden">
+        <div class="lobby-modal-panel">
+          <div class="lobby-modal-header">
+            <h2 id="lobby-modal-title">Choix</h2>
+            <button type="button" id="lobby-modal-close" class="lobby-modal-close">✕</button>
+          </div>
+          <div id="lobby-modal-grid" class="lobby-modal-grid"></div>
+        </div>
       </div>
     </div>
   </div>

@@ -4223,9 +4223,24 @@ const LOBBY_LEADER_NAMES = {
 const LOBBY_LEADER_ORDER = ['monk', 'sorcerer', 'nomad', 'amazon', 'alien', 'chief'];
 const LOBBY_SYMBOLS = ['✝', '☪', '🕉', '☸', '✡', '⛩', '☯', '☬', '🔥', '👁', '🔱', '👑', '☀', '✦'];
 
+/* Données perso pour le carrousel du lobby : nom, archétype, perk, palette.
+   Mêmes valeurs que le créateur de campagne (voir progression.js LEADERS). */
+const LOBBY_LEADER_INFO = {
+  monk:     { name: 'Petit Moine',       archetype: 'Guide Spirituel',    perk: '✨ Aura d\'attraction étendue (+15%)',   color: '#ffe259', bg: 'linear-gradient(135deg, rgba(255,226,89,0.22), rgba(255,179,0,0.08))', desc: 'Un humble guide spirituel qui convertit par la paix, l\'empathie et la ferveur.' },
+  sorcerer: { name: 'Sombre Sorcier',    archetype: 'Maître des Ombrages', perk: '🔮 Siphon de peinture accru (+20%)',    color: '#c084fc', bg: 'linear-gradient(135deg, rgba(192,132,252,0.22), rgba(126,34,206,0.08))', desc: 'Un mystique encapuchonné dont la peinture violacée hante et souille la vallée.' },
+  nomad:    { name: 'Nomade du Désert',  archetype: 'Traqueur des Dunes',  perk: '⚡ Agilité du désert (+20% Vitesse)',   color: '#f97316', bg: 'linear-gradient(135deg, rgba(249,115,22,0.22), rgba(194,65,12,0.08))', desc: 'Un voyageur aguerri qui fend le sable et marque son territoire à vitesse fulgurante.' },
+  amazon:   { name: 'Guerrière Amazone', archetype: 'Conquérante',         perk: '🛡️ Impulsion de foule (+15% Ferveur)',  color: '#06b6d4', bg: 'linear-gradient(135deg, rgba(6,182,212,0.22), rgba(14,116,144,0.08))', desc: 'Une combattante indomptable qui revendique la vallée d\'un pas altier et impérieux.' },
+  alien:    { name: 'Extraterrestre',    archetype: 'Visiteur des Étoiles', perk: '👽 Aura psychique (+10% Toutes stats)', color: '#a3e635', bg: 'linear-gradient(135deg, rgba(163,230,53,0.22), rgba(77,124,15,0.08))', desc: 'Un voyageur venu d\'ailleurs, son passage laisse une empreinte étrange et déroutante.' },
+  chief:    { name: 'Chef des Nations',  archetype: 'Gardien des Ancêtres', perk: '🪶 Bénédiction ancestrale (+15% Conv.)', color: '#d97706', bg: 'linear-gradient(135deg, rgba(217,119,6,0.22), rgba(146,64,14,0.08))', desc: 'Un chef vénéré des Premières Nations, sa présence sacrée honore la terre qu\'il foule.' },
+};
+
 /* Rendu du panneau « Ton choix » : perso, couleur, nom. Les couleurs prises par
    les autres sièges sont grisées pour éviter les collisions ; le perso peut être
    choisi librement (les doublons de leader sont autorisés). */
+/* État du carrousel perso : conservé entre les rerenders pour éviter que la
+   carte revienne à la première position à chaque broadcast. */
+let lobbyCarouselIdx = 0;
+
 function renderMeCard(slots) {
   const mySid = net.state.sessionId;
   const me = (slots || []).find(s => s.sessionId === mySid) || null;
@@ -4234,70 +4249,136 @@ function renderMeCard(slots) {
   const nameEl = $('lobby-me-name');
   if (nameEl && document.activeElement !== nameEl) nameEl.value = me.name || '';
 
-  // Personnages
-  const leaderPicker = $('lobby-leader-picker');
-  leaderPicker.replaceChildren();
-  for (const k of LOBBY_LEADER_ORDER) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'lobby-leader-cell' + (me.leaderKey === k ? ' is-selected' : '');
-    btn.title = LOBBY_LEADER_NAMES[k] || k;
-    const img = document.createElement('img');
-    img.src = LOBBY_PORTRAITS[k] || LOBBY_AVATARS[k];
-    img.alt = LOBBY_LEADER_NAMES[k] || k;
-    btn.append(img);
-    btn.addEventListener('click', () => {
-      playerLeaderKey = k;
-      persistSave({ playerLeader: k });
-      net.setChoice({ leaderKey: k });
-    });
-    leaderPicker.append(btn);
+  // Aligne l'index carrousel avec le perso en cours (au premier rendu ou après
+  // choix externe). On ne réinitialise pas si le joueur navigue déjà.
+  const meIdx = LOBBY_LEADER_ORDER.indexOf(me.leaderKey || 'monk');
+  if (meIdx >= 0 && LOBBY_LEADER_ORDER[lobbyCarouselIdx] !== me.leaderKey) {
+    lobbyCarouselIdx = meIdx;
   }
+  renderLobbyCarouselCard();
 
-  // Symboles de religion
-  const iconPicker = $('lobby-icon-picker');
-  iconPicker.replaceChildren();
-  const currentSym = me.cultSym || '✦';
-  for (const sym of LOBBY_SYMBOLS) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'lobby-icon-cell' + (currentSym === sym ? ' is-selected' : '');
-    btn.textContent = sym;
-    btn.addEventListener('click', () => {
-      persistSave({ religionIcon: sym });
-      net.setChoice({ cultSym: sym });
-    });
-    iconPicker.append(btn);
+  // Pastille couleur : swatch + fond
+  const hex = '#' + ((me.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+  const csw = $('lobby-pastille-color-swatch');
+  csw.style.background = hex;
+  csw.style.color = hex;
+  csw.textContent = '';
+
+  // Pastille symbole : soit texte, soit image (data URI custom)
+  const sw = $('lobby-pastille-sym-swatch');
+  const symStr = me.cultSym || '✦';
+  if (symStr.startsWith('data:') || symStr.startsWith('http')) {
+    sw.style.backgroundImage = `url(${symStr})`;
+    sw.textContent = '';
+  } else {
+    sw.style.backgroundImage = '';
+    sw.textContent = symStr;
   }
+}
 
-  // Couleurs
-  const colorPicker = $('lobby-color-picker');
-  colorPicker.replaceChildren();
-  const cults = net.availableCults();
-  const taken = net.takenColors(mySid);
-  for (const c of cults) {
-    const hex = '#' + ((c.c >>> 0) & 0xffffff).toString(16).padStart(6, '0');
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    const isTaken = taken.has(c.c);
-    const isMine = me.cultColor === c.c;
-    btn.className = 'lobby-color-cell'
-      + (isMine ? ' is-selected' : '')
-      + (isTaken && !isMine ? ' is-taken' : '');
-    btn.style.background = hex;
-    btn.style.color = hex;
-    if (!isTaken || isMine) {
-      btn.addEventListener('click', () => {
-        const ci = CULTS.findIndex(x => x.c === c.c);
-        if (ci >= 0) playerCultIdx = ci;
-        persistSave({ playerColor: hex });
-        net.setChoice({ cultColor: c.c });
-      });
-    } else {
-      btn.disabled = true;
+/* Dessine la carte du perso courant dans le carrousel avec ses infos et
+   points d'orientation. Réutilisé à chaque changement de leader. */
+function renderLobbyCarouselCard() {
+  const k = LOBBY_LEADER_ORDER[lobbyCarouselIdx] || 'monk';
+  const info = LOBBY_LEADER_INFO[k];
+  const card = $('lobby-card-3d');
+  if (!card || !info) return;
+  card.style.setProperty('--card-bg', info.bg);
+  card.style.setProperty('--card-color', info.color);
+  card.style.background = info.bg;
+  card.innerHTML = `
+    <div class="lobby-card-archetype">‹ ${info.archetype} ›</div>
+    <div class="lobby-card-portrait" style="background-image:url('${LOBBY_PORTRAITS[k]}');"></div>
+    <div class="lobby-card-name">${info.name}</div>
+    <div class="lobby-card-perk">${info.perk}</div>
+    <div class="lobby-card-desc">${info.desc}</div>
+  `;
+
+  const dots = $('lobby-carousel-dots');
+  dots.replaceChildren();
+  LOBBY_LEADER_ORDER.forEach((_, i) => {
+    const d = document.createElement('button');
+    d.type = 'button';
+    d.className = 'dot' + (i === lobbyCarouselIdx ? ' sel' : '');
+    d.addEventListener('click', () => {
+      if (i === lobbyCarouselIdx) return;
+      lobbyCarouselIdx = i;
+      commitLobbyLeaderChoice();
+    });
+    dots.append(d);
+  });
+}
+
+/* Sauvegarde le leader courant du carrousel + diffuse au réseau. */
+function commitLobbyLeaderChoice() {
+  const k = LOBBY_LEADER_ORDER[lobbyCarouselIdx];
+  if (!k) return;
+  playerLeaderKey = k;
+  persistSave({ playerLeader: k });
+  renderLobbyCarouselCard();
+  net.setChoice({ leaderKey: k });
+}
+
+/* Ouvre le modal de sélection couleur ou symbole. `kind` = 'color' | 'sym'. */
+function openLobbyPicker(kind) {
+  const modal = $('lobby-picker-modal');
+  const title = $('lobby-modal-title');
+  const grid = $('lobby-modal-grid');
+  const mySid = net.state.sessionId;
+  const me = net.getSlots().find(s => s.sessionId === mySid);
+  if (!me) return;
+
+  grid.replaceChildren();
+  if (kind === 'color') {
+    title.textContent = 'Couleur divine';
+    const cults = net.availableCults();
+    const taken = net.takenColors(mySid);
+    for (const c of cults) {
+      const hex = '#' + ((c.c >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+      const isTaken = taken.has(c.c);
+      const isMine = me.cultColor === c.c;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'lobby-modal-cell'
+        + (isMine ? ' is-selected' : '')
+        + (isTaken && !isMine ? ' is-taken' : '');
+      btn.style.background = hex;
+      btn.style.borderRadius = '50%';
+      if (!isTaken || isMine) {
+        btn.addEventListener('click', () => {
+          const ci = CULTS.findIndex(x => x.c === c.c);
+          if (ci >= 0) playerCultIdx = ci;
+          persistSave({ playerColor: hex });
+          net.setChoice({ cultColor: c.c });
+          closeLobbyPicker();
+        });
+      } else {
+        btn.disabled = true;
+      }
+      grid.append(btn);
     }
-    colorPicker.append(btn);
+  } else {
+    title.textContent = 'Symbole de religion';
+    const cur = me.cultSym || '';
+    for (const sym of LOBBY_SYMBOLS) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'lobby-modal-cell' + (cur === sym ? ' is-selected' : '');
+      btn.textContent = sym;
+      btn.style.borderRadius = '50%';
+      btn.addEventListener('click', () => {
+        persistSave({ religionIcon: sym });
+        net.setChoice({ cultSym: sym });
+        closeLobbyPicker();
+      });
+      grid.append(btn);
+    }
   }
+  modal.classList.remove('hidden');
+}
+
+function closeLobbyPicker() {
+  $('lobby-picker-modal').classList.add('hidden');
 }
 
 /* Utilitaire : fusionner quelques champs dans le save local sans écraser le reste. */
@@ -4310,106 +4391,86 @@ function persistSave(patch) {
 }
 
 function renderLobbySlots(slots) {
-  const list = $('lobby-slots');
+  const strip = $('lobby-strip-slots');
   const code = net.getCode() || '····';
   $('lobby-code').textContent = code;
   const host = net.isHost();
   $('lobby-host-actions').classList.toggle('hidden', !host);
   $('lobby-guest-hint').classList.toggle('hidden', host);
   $('lobby-hint').textContent = host
-    ? `Partage le code, ajoute des IA ou attends d'autres joueurs, puis lance.`
+    ? `Partage le code ${code}, ajoute des IA ou attends d'autres joueurs.`
     : `En attente que l'hôte lance la partie.`;
-
-  renderMeCard(slots);
 
   const ordered = [...(slots || [])];
   const n = ordered.length;
   $('lobby-players-count').textContent = `${n}/6`;
 
-  list.replaceChildren();
-
+  strip.replaceChildren();
   for (const s of ordered) {
     const key = (s.leaderKey && LOBBY_AVATARS[s.leaderKey]) ? s.leaderKey : 'monk';
     const hex = `#${((s.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
-    const isMe = s.kind === 'human' && net.isMe(s.sessionId);
 
-    const li = document.createElement('li');
-    li.className = 'lobby-player-row'
-      + (s.isHost ? ' is-host' : '')
-      + (isMe ? ' is-me' : '');
-    li.style.setProperty('--slot-color', hex);
+    const cell = document.createElement('div');
+    cell.className = 'lobby-strip-slot';
+    cell.style.setProperty('--slot-color', hex);
 
-    const avatar = document.createElement('div');
-    avatar.className = 'lobby-player-avatar';
-    avatar.style.backgroundImage = `url('${LOBBY_AVATARS[key]}')`;
+    const av = document.createElement('div');
+    av.className = 'lobby-strip-avatar' + (s.isHost ? ' is-host' : '');
+    av.style.backgroundImage = `url('${LOBBY_AVATARS[key]}')`;
 
-    const details = document.createElement('div');
-    details.className = 'lobby-player-details';
-    const name = document.createElement('div');
-    name.className = 'lobby-player-name';
-    name.textContent = s.name || 'Joueur';
-    const sub = document.createElement('div');
-    sub.className = 'lobby-player-sub';
-    sub.textContent = s.kind === 'bot'
-      ? `IA · ${DIFF_LABEL[s.difficulty] || 'Normal'} · ${LOBBY_LEADER_NAMES[key] || key}`
-      : (LOBBY_LEADER_NAMES[key] || key);
-    details.append(name, sub);
-
-    li.append(avatar, details);
-
-    if (s.isHost) {
-      const badge = document.createElement('span');
-      badge.className = 'lobby-player-badge';
-      badge.textContent = 'HÔTE';
-      li.append(badge);
-    }
-
-    const icon = document.createElement('div');
-    icon.className = 'lobby-player-icon';
-    icon.style.backgroundColor = hex;
-    const sym = s.cultSym || '';
-    if (sym.startsWith('data:') || sym.startsWith('http')) {
-      icon.style.backgroundImage = `url(${sym})`;
+    const sym = document.createElement('div');
+    sym.className = 'lobby-strip-sym';
+    sym.style.backgroundColor = hex;
+    const symStr = s.cultSym || '';
+    if (symStr.startsWith('data:') || symStr.startsWith('http')) {
+      sym.style.backgroundImage = `url(${symStr})`;
     } else {
-      icon.textContent = sym || '✦';
+      sym.textContent = symStr || '✦';
     }
-    li.append(icon);
+    av.append(sym);
+    cell.append(av);
+
+    const nm = document.createElement('div');
+    nm.className = 'lobby-strip-name';
+    nm.textContent = s.name || 'Joueur';
+    cell.append(nm);
 
     if (host && s.kind === 'bot') {
       const actions = document.createElement('div');
-      actions.className = 'lobby-player-actions';
+      actions.className = 'lobby-strip-actions';
       const diffBtn = document.createElement('button');
-      diffBtn.className = 'lobby-btn-diff';
       diffBtn.type = 'button';
-      diffBtn.textContent = DIFF_LABEL[s.difficulty] || s.difficulty;
+      diffBtn.textContent = (DIFF_LABEL[s.difficulty] || 'Normal').slice(0, 3);
+      diffBtn.title = 'Difficulté : ' + (DIFF_LABEL[s.difficulty] || 'Normal');
       diffBtn.addEventListener('click', () => {
         const i = DIFF_CYCLE.indexOf(s.difficulty);
         const next = DIFF_CYCLE[(i + 1) % DIFF_CYCLE.length];
         net.setBotDiff(s.id, next);
       });
       const kick = document.createElement('button');
-      kick.className = 'lobby-btn-kick';
       kick.type = 'button';
+      kick.className = 'kick';
       kick.textContent = '✕';
-      kick.title = 'Retirer cette IA';
+      kick.title = 'Retirer';
       kick.addEventListener('click', () => net.removeBot(s.id));
       actions.append(diffBtn, kick);
-      li.append(actions);
+      cell.append(actions);
     }
 
-    list.append(li);
+    strip.append(cell);
   }
 
   if (host && n < 6) {
-    const add = document.createElement('li');
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'lobby-add-bot-row';
-    btn.textContent = '+  Ajouter une IA';
-    btn.addEventListener('click', () => net.addBot('normal'));
-    add.append(btn);
-    list.append(add);
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'lobby-strip-add';
+    add.textContent = '+';
+    add.title = 'Ajouter une IA';
+    add.addEventListener('click', () => net.addBot('normal'));
+    strip.append(add);
   }
+
+  renderMeCard(ordered);
 
   $('btn-lobby-start').disabled = n < 2;
   $('btn-lobby-start').textContent = n < 2
@@ -4470,9 +4531,25 @@ async function exitMultiToMenu() {
 $('btn-multi-back').addEventListener('click', leaveMultiToMenu);
 $('btn-lobby-leave').addEventListener('click', leaveMultiToMenu);
 
-/* Le bouton « + Ajouter une IA » est désormais rendu inline dans la liste des
+/* Le bouton « + Ajouter une IA » est désormais rendu inline dans la bande des
    joueurs (renderLobbySlots), pas dans un panneau d'actions séparé. */
 $('btn-lobby-start').addEventListener('click', () => net.requestStart());
+
+/* Navigation carrousel perso + pastilles ouvrant le modal de sélection. */
+$('lobby-nav-prev').addEventListener('click', () => {
+  lobbyCarouselIdx = (lobbyCarouselIdx - 1 + LOBBY_LEADER_ORDER.length) % LOBBY_LEADER_ORDER.length;
+  commitLobbyLeaderChoice();
+});
+$('lobby-nav-next').addEventListener('click', () => {
+  lobbyCarouselIdx = (lobbyCarouselIdx + 1) % LOBBY_LEADER_ORDER.length;
+  commitLobbyLeaderChoice();
+});
+$('lobby-pastille-color').addEventListener('click', () => openLobbyPicker('color'));
+$('lobby-pastille-sym').addEventListener('click', () => openLobbyPicker('sym'));
+$('lobby-modal-close').addEventListener('click', closeLobbyPicker);
+$('lobby-picker-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'lobby-picker-modal') closeLobbyPicker();
+});
 
 /* Édition du nom : on n'envoie qu'à la sortie du champ ou après une courte
    pause, pour éviter un spam de messages à chaque touche. */
