@@ -433,6 +433,20 @@ export function createNetClient() {
     setPhase('over');
   }
 
+  /* Hôte : ramène tout le monde dans le salon (post-partie) pour relancer un match
+     avec les mêmes joueurs. Les invités reçoivent phase:'lobby' et remontent au lobby. */
+  function returnToLobby() {
+    if (!state._isHost) return;
+    if (state._matchTimer) { clearTimeout(state._matchTimer); state._matchTimer = null; }
+    state._leaders = new Map();
+    state._allLeaders = [];
+    state._elapsed = 0;
+    state._tick = 0;
+    const slots = [...state._slots.values()];
+    broadcast({ type: 'phase', phase: 'lobby', slots });
+    setPhase('lobby');
+  }
+
   /* ---- Gameplay P2P ---- */
   function sendPos(x, z, dx, dz) {
     if (!state.connected || state._isHost) return;
@@ -496,6 +510,7 @@ export function createNetClient() {
     broadcastLeaders,
     sendStats,
     endMatch,
+    returnToLobby,
     addBot,
     removeBot,
     setBotDiff,

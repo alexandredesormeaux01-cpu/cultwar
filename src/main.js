@@ -3358,14 +3358,18 @@ function endGame(forced) {
   const isCamp = (conquest !== null);
   const btnBack = $('btn-end-back');
   const btnRetry = $('retry');
+  $('btn-end-lobby').classList.add('hidden');
 
   if (multiMode) {
     $('endTitle').textContent = victory ? 'Victoire en ligne !' : 'Défaite';
     $('endSub').textContent = victory
       ? 'Votre couleur domine la vallée — personne ne vous a rattrapé.'
       : `${winnerName} termine en tête de ce salon.`;
-    btnRetry.textContent = 'Retour au menu';
+    btnRetry.textContent = 'Quitter la session';
     btnBack.classList.add('hidden');
+    /* L'hôte peut relancer une partie avec les mêmes joueurs ; les invités
+       attendent son signal (retour phase:'lobby'). */
+    $('btn-end-lobby').classList.toggle('hidden', !net.isHost());
   } else if (isCamp) {
     $('endTitle').textContent = victory ? 'Zone Conquise !' : 'Défaite';
     $('endSub').textContent = victory
@@ -3622,6 +3626,19 @@ function update(dt) {
   if (multiMode && net.state.connected) {
     netStatsT -= dt;
     if (net.isHost()) {
+      /* -- Hôte : refléter les stats reçues des invités dans leurs factions
+            locales AVANT de calculer et diffuser le classement. Sinon
+            grisAbs/count restent à 0 côté hôte et le podium diverge. -- */
+      const remoteStats = net.getLeaders();
+      if (remoteStats) {
+        for (const f of factions) {
+          if (!f.remote || !f.sessionId) continue;
+          const rs = remoteStats.get(f.sessionId);
+          if (!rs) continue;
+          if (typeof rs.grisAbs === 'number') f.grisAbs = rs.grisAbs;
+          if (typeof rs.count === 'number') f.count = rs.count;
+        }
+      }
       if (netStatsT <= 0) {
         netStatsT = 1 / 20;
         const data = factions.filter(f => f.sessionId).map(f => {
@@ -3651,6 +3668,13 @@ function update(dt) {
         });
       }
     }
+    /* -- Fin de match synchronisée : seul l'hôte décide (via son chrono local).
+          L'invité attend le message `over` de l'hôte pour clôturer le match, sinon
+          chacun terminait sur son propre `elapsed` avec un classement stale et
+          les deux joueurs pouvaient se croire 1er. -- */
+    if (net.isHost() && elapsed >= MATCH_DUR && net.state.phase !== 'over') {
+      net.endMatch();
+    }
     if (net.state.phase === 'over') { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
@@ -3670,7 +3694,10 @@ function update(dt) {
 
   /* -- Le jour est le chrono : la partie s'ouvre à l'aube et se joue jusqu'à
         la nuit tombée. Aucun compteur affiché — le ciel EST l'horloge. -- */
-  if (elapsed >= MATCH_DUR) { endGame(); return; }
+  /* En multi, la fin est décidée par l'hôte (voir plus haut). L'invité n'auto-
+     termine pas sur son propre chrono, sinon les deux joueurs peuvent conclure
+     avec des classements désynchronisés. */
+  if (!multiMode && elapsed >= MATCH_DUR) { endGame(); return; }
   /* Clocher : trois coups quand il reste 30 s. */
   if (!lateBellDone && MATCH_DUR - elapsed <= 30) {
     lateBellDone = true;
@@ -3996,11 +4023,32 @@ async function startMultiGame(opts = {}) {
 
   onLobby(net.getSlots());
 
-  const started = await new Promise((res) => {
-    if (net.state.phase === 'play') return res(true);
-    net.onPhaseChange((p) => { if (p === 'play') res(true); });
+  /* Listener persistant : gère la partie initiale, mais aussi les rematches
+     (retour lobby → nouveau start) et le retour au salon après un match. */
+  let onFirstPlay;
+  const firstStart = new Promise((res) => {
+    onFirstPlay = res;
     net.onLeft(() => res(false));
   });
+  net.onPhaseChange((p) => {
+    if (p === 'play') {
+      if (state === 'menu' && onFirstPlay) {
+        const fn = onFirstPlay; onFirstPlay = null; fn(true);
+        return;
+      }
+      // Rematch : l'hôte a relancé depuis le lobby post-partie.
+      multiMode = true;
+      conquest = null;
+      $('multi-panel').classList.add('hidden');
+      $('end').classList.add('hidden');
+      startGame();
+      banner('⚔ Nouveau match !');
+    } else if (p === 'lobby' && (state === 'over' || state === 'play')) {
+      goBackToMultiLobby();
+    }
+  });
+
+  const started = net.state.phase === 'play' ? true : await firstStart;
   if (!started) {
     onStatus(null);
     return false;
@@ -4247,6 +4295,22 @@ async function leaveMultiToMenu() {
   setMultiButtonsEnabled(true);
 }
 
+/* Retour au salon multi post-partie : on garde la session P2P, on remet l'UI
+   dans l'état lobby. Utilisé quand l'hôte appelle net.returnToLobby() ou quand
+   un invité reçoit phase:'lobby' de l'hôte. */
+function goBackToMultiLobby() {
+  state = 'menu';
+  multiMode = true;
+  $('end').classList.add('hidden');
+  $('hud').classList.add('hidden');
+  $('start').classList.add('hidden');
+  $('multi-panel').classList.remove('hidden');
+  showMultiLobby();
+  renderLobbySlots(net.getSlots());
+  setMultiStatus(null);
+  setMultiButtonsEnabled(true);
+}
+
 /* Sortie d'un match en ligne (fin de partie ou abandon) : couper le réseau,
    sortir de multiMode, revenir au menu principal. Sans ça, la partie suivante
    réutiliserait la room précédente et ses IA. */
@@ -4352,6 +4416,14 @@ $('retry').addEventListener('click', () => {
     conquest = null;
     startGame();
   }
+});
+
+/* Post-partie multi : l'hôte renvoie tout le monde dans le salon pour relancer
+   une manche. Les invités écoutent phase:'lobby' (voir onPhaseChange plus bas). */
+$('btn-end-lobby').addEventListener('click', () => {
+  if (!multiMode || !net.isHost()) return;
+  net.returnToLobby();
+  goBackToMultiLobby();
 });
 
 $('btn-end-back').addEventListener('click', () => {
