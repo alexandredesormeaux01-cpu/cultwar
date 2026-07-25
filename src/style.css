@@ -1987,3 +1987,18 @@ button.btn-secondary:hover {
 
 
 
+
+/* ---- Multijoueur : salon par code ---- */
+.multi-join-row { display: flex; gap: 8px; justify-content: center; align-items: stretch; }
+#multi-code-input {
+  width: 8ch; text-align: center; font-size: 22px; font-weight: 800;
+  letter-spacing: 4px; text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08); color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 12px;
+  padding: 10px 6px; outline: none;
+}
+#multi-code-input:focus { border-color: #ffe259; }
+#multi-status {
+  font-size: 15px; font-weight: 700; color: #ffe259;
+  min-height: 1.5em; text-align: center; white-space: pre-line;
+}

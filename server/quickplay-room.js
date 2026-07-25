@@ -39,6 +39,8 @@ export class QuickplayRoom extends Room {
     this.maxClients = MAX_CLIENTS;
     // Fly peut être lent au cold-start ; défaut Colyseus = 15 s → trop court
     this.setSeatReservationTime(60);
+    this.code = String(options?.code || '').toUpperCase().slice(0, 8);
+    this.setMetadata({ code: this.code });
     this.setState(new QuickplayState());
     this.rng = createRng(Date.now() & 0xffffffff);
     this.inputs = new Map();          // sessionId → { x, z, boost }

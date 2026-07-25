@@ -110,6 +110,23 @@
     </div>
   </div>
 
+  <!-- Multijoueur : créer / rejoindre par code -->
+  <div id="multi-panel" class="overlay hidden">
+    <div class="panel">
+      <h1>Multijoueur</h1>
+      <p class="tag">Crée un salon et partage le code avec ton ami, ou entre son code pour le rejoindre.</p>
+      <div class="menu-actions">
+        <button id="btn-multi-create" class="big">Créer un salon</button>
+        <div class="multi-join-row">
+          <input id="multi-code-input" maxlength="4" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+          <button id="btn-multi-join" class="big">Rejoindre</button>
+        </div>
+        <div id="multi-status" class="hidden"></div>
+        <button id="btn-multi-back" class="secondary-btn">Retour</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Confirmation de suppression -->
   <div id="confirm-delete" class="overlay hidden">
     <div class="panel">

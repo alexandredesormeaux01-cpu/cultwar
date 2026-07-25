@@ -3527,16 +3527,10 @@ function update(dt) {
     const remoteLeaders = net.getLeaders();
     if (remoteLeaders) {
       remoteLeaders.forEach((rl, sid) => {
-        if (net.isMe(sid)) {
-          // Autorité serveur aussi pour soi (évite la dérive client)
-          const me = factions[0];
-          if (me && rl.alive) {
-            const t = Math.min(1, dt * 8);
-            me.leader.x += (rl.x - me.leader.x) * t;
-            me.leader.z += (rl.z - me.leader.z) * t;
-          }
-          return;
-        }
+        // Son propre perso reste piloté en local (sinon il fige quand le
+        // serveur ne renvoie pas encore de mouvement) ; le serveur ne sert
+        // d'autorité que pour les adversaires.
+        if (net.isMe(sid)) return;
         const f = factions.find((x) => x.sessionId === sid) || null;
         if (f && rl.alive) {
           f.isBot = false;
@@ -3846,6 +3840,7 @@ function startGame() {
 async function startMultiGame(opts = {}) {
   audioInit();
   const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
+  const code = String(opts.code || '').toUpperCase();
   onStatus('Connexion au serveur…');
 
   const CONNECT_MS = 25000;
@@ -3858,6 +3853,7 @@ async function startMultiGame(opts = {}) {
           } catch (_) { return 'Joueur'; }
         })(),
         leaderKey: playerLeaderKey,
+        code,
       }),
       new Promise((_, rej) => setTimeout(
         () => rej(new Error('Délai dépassé — le serveur met trop de temps à répondre')),
@@ -3866,32 +3862,36 @@ async function startMultiGame(opts = {}) {
     ]);
   } catch (e) {
     banner(`⚠ Serveur injoignable : ${e?.message || e}`);
-    onStatus(null);
+    onStatus(`⚠ ${e?.message || e}`);
     return false;
   }
 
   const players = () => net.getLeaders()?.size || 1;
-  const roomId = net.state.room?.roomId || '?';
-  onStatus(`Salon ${roomId} — ${players()}/2 joueurs`);
-  banner(`🌐 Salon ${roomId} — en attente (${players()}/2)`);
+  const label = code ? `Code : ${code}` : 'Partie rapide';
+  const waitMsg = () => `${label}\n${players()}/2 joueurs — partage le code !`;
+  onStatus(waitMsg());
+  banner(`🌐 ${label} — en attente (${players()}/2)`);
 
   net.onLeadersUpdate(() => {
     const n = players();
     if (net.state.phase === 'lobby') {
-      onStatus(n < 2
-        ? `Salon ${roomId} — ${n}/2 joueurs (même salon requis)`
-        : `Joueurs prêts (${n}) — démarrage…`);
+      onStatus(n < 2 ? waitMsg() : `${label}\n${n} joueurs — démarrage…`);
       banner(n < 2
-        ? `🌐 Salon ${roomId} — en attente (${n}/2)`
-        : `🌐 ${n} joueurs dans ${roomId} — ça démarre…`);
+        ? `🌐 ${label} — en attente (${n}/2)`
+        : `🌐 ${n} joueurs — la partie démarre…`);
     }
   });
 
-  // Attendre le passage en phase 'play' (≥2 joueurs + 5 s côté serveur)
-  await new Promise(res => {
-    if (net.state.phase === 'play') return res();
-    net.onPhaseChange(p => { if (p === 'play') res(); });
+  // Attendre 'play' (≥2 joueurs + 5 s côté serveur) — annulable via Retour (leave)
+  const started = await new Promise(res => {
+    if (net.state.phase === 'play') return res(true);
+    net.onPhaseChange(p => { if (p === 'play') res(true); });
+    net.onLeft(() => res(false));
   });
+  if (!started) {
+    onStatus(null);
+    return false;
+  }
   if (players() < 2) {
     banner('⚠ Pas assez de joueurs dans le salon — réessaie');
     await net.leave();
@@ -3968,24 +3968,60 @@ $('btn-new-game').addEventListener('click', () => {
   });
 });
 
-$('btn-multi').addEventListener('click', async () => {
-  const btn = $('btn-multi');
-  btn.disabled = true;
-  const setLabel = (t) => { btn.textContent = t || 'Multijoueur en ligne'; };
-  setLabel('Connexion…');
+/* ---- Multijoueur par code : un joueur crée le salon, l'autre entre le code ---- */
+function genRoomCode() {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sans I/L/O/0/1 (lisibilité)
+  let c = '';
+  for (let i = 0; i < 4; i++) c += chars[(Math.random() * chars.length) | 0];
+  return c;
+}
+
+function setMultiStatus(msg) {
+  const el = $('multi-status');
+  if (!msg) { el.classList.add('hidden'); el.textContent = ''; return; }
+  el.classList.remove('hidden');
+  el.textContent = msg;
+}
+
+function setMultiButtonsEnabled(on) {
+  $('btn-multi-create').disabled = !on;
+  $('btn-multi-join').disabled = !on;
+}
+
+$('btn-multi').addEventListener('click', () => {
+  $('start').classList.add('hidden');
+  $('multi-panel').classList.remove('hidden');
+  setMultiStatus(null);
+});
+
+$('btn-multi-back').addEventListener('click', async () => {
+  await net.leave();
+  $('multi-panel').classList.add('hidden');
+  $('start').classList.remove('hidden');
+  setMultiStatus(null);
+  setMultiButtonsEnabled(true);
+});
+
+async function launchMulti(code) {
+  setMultiButtonsEnabled(false);
   try {
-    const ok = await startMultiGame({
-      onStatus: (msg) => { if (msg) setLabel(msg); },
-    });
-    if (!ok) {
-      btn.disabled = false;
-      setLabel(null);
+    const ok = await startMultiGame({ code, onStatus: setMultiStatus });
+    if (ok) {
+      $('multi-panel').classList.add('hidden');
+    } else {
+      setMultiButtonsEnabled(true);
     }
   } catch (e) {
-    banner(`⚠ Multi : ${e?.message || e}`);
-    btn.disabled = false;
-    setLabel(null);
+    setMultiStatus(`⚠ ${e?.message || e}`);
+    setMultiButtonsEnabled(true);
   }
+}
+
+$('btn-multi-create').addEventListener('click', () => launchMulti(genRoomCode()));
+$('btn-multi-join').addEventListener('click', () => {
+  const code = ($('multi-code-input').value || '').trim().toUpperCase();
+  if (code.length !== 4) { setMultiStatus('Entre le code à 4 caractères'); return; }
+  launchMulti(code);
 });
 
 $('btn-delete-game').addEventListener('click', () => {

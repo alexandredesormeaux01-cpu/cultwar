@@ -35,7 +35,8 @@ const gameServer = new Server({
   transport: new WebSocketTransport({ server: httpServer }),
 });
 
-gameServer.define('quickplay', QuickplayRoom);
+// filterBy('code') : les joueurs qui donnent le même code partagent le même salon
+gameServer.define('quickplay', QuickplayRoom).filterBy(['code']);
 
 gameServer.listen(PORT).then(() => {
   console.log(`cult-io server listening on :${PORT}`);
