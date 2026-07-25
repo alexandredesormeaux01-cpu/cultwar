@@ -11,6 +11,7 @@
     "sim:test": "node scripts/sim-smoke-test.mjs",
     "server:smoke-test": "node scripts/server-smoke-test.mjs",
     "build:admin1": "node scripts/build-admin1.mjs",
+    "android:icons": "node scripts/build-android-icons.mjs",
     "android:sync": "npm run build && npx cap sync android",
     "android:open": "npx cap open android",
     "android:run": "npm run android:sync && npx cap run android",
@@ -29,6 +30,7 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.2",
+    "sharp": "^0.35.3",
     "vite": "^5.4.0"
   }
 }
