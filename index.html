@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#0b1020" />
+  <meta name="color-scheme" content="dark" />
+  <title>Cult War</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <!-- Top Bar Bandoulière : minimap | Rang + % | boule peinture -->
+    <div id="hud-top-bar">
+      <button id="btn-concede" class="hud-concede-btn" title="Céder la victoire aux rivaux (défaite immédiate)">Céder la victoire</button>
+
+      <div id="hud-minimap-container">
+        <canvas id="map" width="300" height="300"></canvas>
+      </div>
+
+      <div id="hud-stats-container">
+        <div class="hud-stat-box">
+          <span id="rank-val" class="stat-value">1ᵉ</span>
+          <span class="stat-label">Rang</span>
+        </div>
+        <div class="hud-stat-sep"></div>
+        <div class="hud-stat-box">
+          <span id="pct-val" class="stat-value">0%</span>
+          <span class="stat-label"><span class="lbl-full">Vallée</span><span class="lbl-short">Val.</span></span>
+        </div>
+      </div>
+
+      <!-- Boule de verre : peinture / fuel disponible -->
+      <div id="hud-paint-orb" class="paint-orb" aria-label="Peinture disponible" title="Peinture disponible">
+        <div class="paint-orb-glass">
+          <div class="paint-orb-liquid" id="paint-orb-liquid" style="--fill: 100%; --paint: #00c8ff;">
+            <div class="paint-orb-bubbles" aria-hidden="true">
+              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+            </div>
+            <div class="paint-orb-meniscus"></div>
+          </div>
+          <div class="paint-orb-shine"></div>
+          <div class="paint-orb-rim"></div>
+        </div>
+        <span class="paint-orb-pct" id="paint-orb-pct">100</span>
+      </div>
+    </div>
+
+    <!-- Actions buttons under the bandoulière -->
+    <div id="hud-actions-bar">
+      <button id="boost-btn" title="Sprint (Espace ou double-clic sur l'écran)">
+        <span class="ico">⚡</span><span class="lbl">Boost</span>
+        <div id="boost-cooldown-overlay" style="--cooldown-deg: 360deg;"></div>
+      </button>
+      <button id="rally" title="Resserrer la foule autour de vous">
+        <span class="ico">🛡️</span><span class="lbl">Poser un piège</span>
+      </button>
+    </div>
+
+    <!-- Disciples : cadres ronds bord droit (1 cadre = 1 disciple actif) -->
+    <div id="hud-disciples" aria-label="Disciples"></div>
+
+    <div id="banner"></div>
+    <div id="streak"></div>
+    <div id="duel" class="hidden">⚔ 1:00</div>
+
+    <div id="joy"><div id="stick"></div></div>
+  </div>
+
+  <!-- Écran Splash Poster Mobile -->
+  <div id="splash-screen" class="overlay splash-overlay">
+    <div class="splash-poster" style="background-image: url('assets/cult_war_mobile.jpg')"></div>
+    <div class="splash-content">
+      <button type="button" id="splash-enter" class="big splash-enter-btn">Toucher pour entrer</button>
+    </div>
+  </div>
+
+  <!-- Menu -->
+  <div id="start" class="overlay">
+    <div class="panel main-menu-panel">
+      <img src="assets/cult_war_logo.png" alt="Cult War" class="main-logo-img" />
+      <p class="tag">Explorez la vallée, ralliez les sceptiques à votre culte et dominez la carte.</p>
+      <!-- Campaign status info -->
+      <div id="campaign-status" class="hidden">
+        <p class="lbl2">Votre Campagne</p>
+        <div class="save-card">
+          <div id="save-leader-avatar"></div>
+          <div class="save-details">
+            <div id="save-prophet-name"></div>
+            <div id="save-rel-name"></div>
+            <div id="save-progress-stats"></div>
+          </div>
+          <div id="save-icon"></div>
+        </div>
+      </div>
+      <div class="menu-actions">
+        <button id="btn-continue" class="big hidden">Continuer la Chasse</button>
+        <button id="btn-new-game" class="big">Lancer la Chasse</button>
+        <button id="btn-delete-game" class="btn-danger hidden">Supprimer la partie</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirmation de suppression -->
+  <div id="confirm-delete" class="overlay hidden">
+    <div class="panel">
+      <h1>Supprimer la partie ?</h1>
+      <p class="tag">Toute votre progression (religion, niveaux, conquêtes) sera définitivement perdue. Cette action est irréversible.</p>
+      <div class="menu-actions">
+        <button id="btn-delete-confirm" class="btn-danger">Oui, tout supprimer</button>
+        <button id="btn-delete-cancel" class="secondary-btn">Annuler</button>
+      </div>
+    </div>
+  </div>
+
+
+
+  <!-- Fin -->
+  <div id="end" class="overlay hidden">
+    <div class="panel">
+      <h1 id="endTitle">Défaite</h1>
+      <p id="endSub" class="tag"></p>
+      <div id="stats"></div>
+      <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+        <button id="retry" class="big">Nouvelle Chasse</button>
+        <button id="btn-end-back" class="secondary-btn hidden">Retour à la Carte</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dismiss splash immédiatement (ne dépend pas du chargement de Three.js) -->
+  <script>
+    (function () {
+      var splash = document.getElementById('splash-screen');
+      if (!splash || splash.dataset.ready) return;
+      splash.dataset.ready = '1';
+      var done = false;
+      var startMenu = document.getElementById('start');
+      function dismiss() {
+        if (done) return;
+        done = true;
+        splash.classList.add('fade-out');
+        if (startMenu) startMenu.style.pointerEvents = 'none';
+        setTimeout(function () {
+          splash.classList.add('hidden');
+          if (startMenu) startMenu.style.pointerEvents = '';
+        }, 600);
+      }
+      splash.addEventListener('click', dismiss);
+      splash.addEventListener('pointerup', dismiss);
+      var btn = document.getElementById('splash-enter');
+      if (btn) btn.addEventListener('click', function (e) { e.stopPropagation(); dismiss(); });
+    })();
+  </script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

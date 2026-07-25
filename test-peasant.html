@@ -1,0 +1,219 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Test paysan</title>
+<style>body{margin:0;background:#88bb66}#info{position:fixed;top:8px;left:8px;color:#000;font:13px monospace;white-space:pre;background:rgba(255,255,255,.7);padding:6px}</style>
+</head>
+<body>
+<div id="info">chargement…</div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x88bb66);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, 1.6, 5.2);
+camera.lookAt(0, 0.6, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(3, 6, 4);
+scene.add(sun);
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(12, 12).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x77aa55 })));
+
+const info = document.getElementById('info');
+const timeU = { value: 0 };
+const VILLAGER_H = 1.05;
+const VILLAGER_POSE_T = 0.25;
+
+// ------- copies conformes de main.js -------
+function bakeSkinnedPose(gltf) {
+  let skinned = null;
+  gltf.scene.traverse((c) => { if (c.isSkinnedMesh) skinned = c; });
+  if (!skinned || !gltf.animations || !gltf.animations.length) return null;
+  const clip = THREE.AnimationClip.findByName(gltf.animations, 'Walking') || gltf.animations[0];
+  const mixer = new THREE.AnimationMixer(gltf.scene);
+  const action = mixer.clipAction(clip);
+  action.play();
+  action.time = VILLAGER_POSE_T * clip.duration;
+  mixer.update(0);
+  gltf.scene.updateMatrixWorld(true);
+  if (skinned.skeleton) skinned.skeleton.update();
+  const src = skinned.geometry;
+  const pos = new THREE.BufferAttribute(new Float32Array(src.attributes.position.count * 3), 3);
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    skinned.getVertexPosition(i, v);
+    v.applyMatrix4(skinned.matrixWorld);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', pos);
+  if (src.attributes.uv) geo.setAttribute('uv', src.attributes.uv.clone());
+  if (src.index) geo.setIndex(src.index.clone());
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function garmentMask(tex, h0, h1) {
+  if (!tex || !tex.image) return null;
+  const img = tex.image;
+  const cv = document.createElement('canvas');
+  cv.width = img.width; cv.height = img.height;
+  const ctx = cv.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const d = ctx.getImageData(0, 0, cv.width, cv.height);
+  const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  let sum = 0, n = 0;
+  for (let i = 0; i < d.data.length; i += 4) {
+    const r = d.data[i] / 255, g = d.data[i + 1] / 255, b = d.data[i + 2] / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), c = max - min;
+    const l = (max + min) / 2;
+    const sat = c === 0 ? 0 : c / (1 - Math.abs(2 * l - 1));
+    let h = 0;
+    if (c > 0) {
+      if (max === r) h = ((g - b) / c + 6) % 6;
+      else if (max === g) h = (b - r) / c + 2;
+      else h = (r - g) / c + 4;
+      h *= 60;
+    }
+    const inHue = h0 <= h1 ? (h >= h0 && h <= h1) : (h >= h0 || h <= h1);
+    const on = c > 0.05 && sat > 0.25 && inHue;
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = on ? 255 : 0;
+    d.data[i + 3] = 255;
+    if (on) { sum += 0.2126 * toLinear(r) + 0.7152 * toLinear(g) + 0.0722 * toLinear(b); n++; }
+  }
+  ctx.putImageData(d, 0, 0);
+  const m = new THREE.CanvasTexture(cv);
+  m.flipY = tex.flipY;
+  m.colorSpace = THREE.NoColorSpace;
+  m.magFilter = m.minFilter = THREE.NearestFilter;
+  m.generateMipmaps = false;
+  return { tex: m, lum: n ? sum / n : 0.35 };
+}
+
+const HAT_BAND = [0.82, 0.90];   // bande de hauteur normalisee du chapeau
+const HAT_REF_LUM = 0.5;
+function tagHatVertices(geo) {
+  geo.computeBoundingBox();
+  const top = geo.boundingBox.max.y || VILLAGER_H;
+  const pos = geo.attributes.position;
+  const hat = new Float32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    hat[i] = THREE.MathUtils.smoothstep(pos.getY(i) / top, HAT_BAND[0], HAT_BAND[1]);
+  }
+  geo.setAttribute('aHat', new THREE.BufferAttribute(hat, 1));
+}
+
+function makeVillagerMaterial(tex, mask, opts = {}) {
+  const { tintable = false, hatTint = false } = opts;
+  const useGarment = tintable && !!mask;
+  const mat = new THREE.MeshToonMaterial({ map: tex || null });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = timeU;
+    if (useGarment) {
+      shader.uniforms.uMask = { value: mask.tex };
+      shader.uniforms.uGarmentLum = { value: Math.max(0.03, mask.lum) };
+    }
+    if (hatTint) shader.uniforms.uHatLum = { value: HAT_REF_LUM };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>',
+        '#include <common>\nuniform float uTime;\nattribute vec2 aAnim;'
+        + (hatTint ? '\nattribute float aHat;\nattribute vec3 aHatCol;\nvarying float vHat;\nvarying vec3 vHatCol;' : ''))
+      .replace('#include <begin_vertex>', [
+        '#include <begin_vertex>',
+        (hatTint ? 'vHat = aHat;\nvHatCol = aHatCol;' : ''),
+        'float vSide = position.x > 0.0 ? 1.0 : -1.0;',
+        'float vSpeed = aAnim.y;',                            // vitesse au sol lissee
+        'float vWalk = smoothstep(0.15, 1.2, vSpeed);',       // intensite du pas
+        'float vRun  = smoothstep(2.5, 6.5, vSpeed);',        // fondu marche -> course
+        'float vFreq = mix(8.0, 12.5, vRun);',
+        'float vSwing = sin(uTime * vFreq + aAnim.x);',
+        'float vArmAmp = mix(0.28, 0.46, vRun);',
+        'float vLegAmp = mix(0.17, 0.32, vRun);',
+        'float vBobAmp = mix(0.03, 0.07, vRun);',
+        'float vArm = smoothstep(0.15, 0.20, abs(position.x)) * smoothstep(0.66, 0.56, position.y);',
+        'transformed.z += vSide * vSwing * vWalk * vArmAmp * vArm * clamp(0.64 - position.y, 0.0, 0.43);',
+        'float vLeg = smoothstep(0.26, 0.02, position.y);',
+        'transformed.z += -vSide * vSwing * vWalk * vLegAmp * vLeg;',
+        'transformed.y += abs(vSwing) * vWalk * vBobAmp * vLeg;',
+        'transformed.z += vRun * vWalk * smoothstep(0.2, 1.0, position.y) * 0.06;',
+      ].join('\n'));
+    if (useGarment) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform sampler2D uMask;\nuniform float uGarmentLum;')
+        .replace('#include <color_fragment>', [
+          '#if defined( USE_INSTANCING_COLOR ) && defined( USE_MAP )',
+          '  float vGarment = texture2D( uMask, vMapUv ).r;',
+          '  float vLum = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );',
+          '  vec3 vTint = vColor * clamp( vLum / uGarmentLum, 0.55, 1.5 );',
+          '  diffuseColor.rgb = mix( diffuseColor.rgb, vTint, vGarment );',
+          '#else',
+          '  #include <color_fragment>',
+          '#endif',
+        ].join('\n'));
+    } else if (hatTint) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float uHatLum;\nvarying float vHat;\nvarying vec3 vHatCol;')
+        .replace('#include <color_fragment>', [
+          // instance BLANCHE => color_fragment laisse le corps intact ; le chapeau prend aHatCol.
+          '  #include <color_fragment>',
+          '  float vLum = dot( diffuseColor.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );',
+          '  vec3 vHatTint = vHatCol * clamp( vLum / uHatLum, 0.55, 1.6 );',
+          '  diffuseColor.rgb = mix( diffuseColor.rgb, vHatTint, vHat );',
+        ].join('\n'));
+    }
+  };
+  return mat;
+}
+// ------- fin copies -------
+
+new GLTFLoader().load('/assets/models/peasant_blocky.glb', (gltf) => {
+  let tex = null;
+  gltf.scene.traverse((c) => { if (c.isMesh && c.material && c.material.map) tex = c.material.map; });
+  const geo = bakeSkinnedPose(gltf);
+  geo.computeBoundingBox();
+  const s = VILLAGER_H / Math.max(0.001, geo.boundingBox.max.y - geo.boundingBox.min.y);
+  geo.scale(s, s, s);
+  geo.computeBoundingBox();
+  const bb = geo.boundingBox;
+  geo.translate(-(bb.min.x + bb.max.x) * 0.5, -bb.min.y, -(bb.min.z + bb.max.z) * 0.5);
+  tagHatVertices(geo);
+
+  // Trois cultes cote a cote : gris (neutre), rose, cyan — chapeau teinte, corps intact
+  const N = 3;
+  const speeds = [0, 1.0, 6.0];
+  const cols = [0x9aa2ad, 0xff2e8a, 0x22ccdd];
+  const anim = new THREE.InstancedBufferAttribute(new Float32Array(N * 2), 2);
+  const hatCol = new THREE.InstancedBufferAttribute(new Float32Array(N * 3), 3);
+  for (let i = 0; i < N; i++) { anim.setX(i, i * 1.7); anim.setY(i, speeds[i]); }
+  geo.setAttribute('aAnim', anim);
+  geo.setAttribute('aHatCol', hatCol);
+  const mesh = new THREE.InstancedMesh(geo, makeVillagerMaterial(tex, null, { hatTint: true }), N);
+  const m4 = new THREE.Matrix4();
+  const c = new THREE.Color();
+  for (let i = 0; i < N; i++) {
+    m4.makeRotationY(0).setPosition((i - 1) * 1.6, 0, 0);
+    mesh.setMatrixAt(i, m4);
+    mesh.setColorAt(i, new THREE.Color(0xffffff));   // instance BLANCHE : corps intact
+    c.set(cols[i]); hatCol.setXYZ(i, c.r, c.g, c.b);  // couleur du chapeau
+  }
+  mesh.instanceColor.needsUpdate = true;
+  scene.add(mesh);
+  info.textContent = 'paysan : corps intact, CHAPEAU teinte | gauche: gris/immobile, centre: rose/marche, droite: cyan/course';
+});
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  timeU.value = now / 1000;
+  renderer.render(scene, camera);
+  last = now;
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

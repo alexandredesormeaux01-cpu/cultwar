@@ -1,0 +1,549 @@
+﻿
+=== USER L1: les texture sur les tuile sont tres plate.
+
+=== USER L12: non... Un bruit de perlin ou autre truc du genre pourrait aider pour la texture?
+
+=== USER L18: On n'pproche. Je pense que les sorte de mont├⌐ qui doivent donner du relief doivent etre organiqu, souple, doux.   La ont a des pincement vers le cntre de la tuile... C'est non
+
+=== USER L24: On voit comme une croix sur les tuile. Peut-├¬tre le UV Map mal appliqu├⌐
+
+=== USER L31: toujour la
+
+=== USER L42: Non. Je veux la texture appliqu├⌐ a chaque tuile individuellement.  d'ailleur charge en d'autre de Poly Haven pour en avoir plusieurs. Le but est de faire un immence patchwork avec plusieurs tuile en r
+
+=== USER L62: Pas mal, il y moyen de faire des transition entre deux texture de tuile pour cr├⌐er des trasition douce?
+
+=== USER L67: Plus aucune texture
+
+=== USER L74: une facon de rendre les texture plus cartoon / cellshading?
+
+=== USER L79: non! Ca ne va pas du tout
+
+=== USER L83: Ok bon comment rendre les texture, ou le rendu plutot, cartoon. Qui irait vers un rendu cartoon. On a des site sinon qui offre des texture? Ou jouer avec les couleur pour rendre les couelur plus uni, 
+
+=== USER L87: Ok pas mal.  Maintenant les asset et visuels. Ils sont franchement laid.  On as des site qui offre des asset que tu pourrait t├⌐l├⌐charger? Arbre, roche, pierre, herbe etc..?
+
+=== USER L109: non ca ne fonctionne pas. retire tous ca
+
+=== USER L112: non ne remet pas les ancien asset. On va y aller une chose a la fois et ils n'├⌐tais pas bon. On va revenir a tuile.  pour tenter d'am├⌐liorer le style pour bien coller. Le personnage d├⌐tonne alors que 
+
+=== USER L115: non ne remet pas les ancien asset. On va y aller une chose a la fois et ils n'├⌐tais pas bon. On va revenir a tuile.  pour tenter d'am├⌐liorer le style pour bien coller. Le personnage d├⌐tonne alors que 
+
+=== USER L129: certains truc ne vont pas mais on approche
+
+=== USER L137: Non c'├⌐tais mieux avant.
+
+=== USER L141: Je pense que c'est moi qui fait fausse route.  En fait, je pense qu'il faut revenir a des couleur unis mais le look mobile va se trouver des les l├⌐g├⌐ d├⌐grad├⌐ a l'int├⌐rieur de ses alv├⌐oles. On est plus
+
+=== USER L149: Ok bon, On va essayer de travaill├⌐ la painture. ce serait cool de la rendre plus visible, plus "├⌐paise" et mettre cette sorte d'effet d'eau, reflet.
+L152: cache=null mat=true stamp=false clip=false pos=true | const paintCv = document.createElement('canvas'); paintCv.width = paintCv.height = PAINT_N; const paintCtx = paintCv.get
+L153: cache=null mat=false stamp=true clip=true pos=false | function stampPaint(f) {   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;   // Un peu plus large : flaque ┬½ ├⌐paisse
+
+=== USER L155: Cool, l'effet est trop gros par contre
+L156: cache=null mat=true stamp=false clip=false pos=false | paintMat.customProgramCacheKey = () => 'paint-water-voronoi-v2';
+
+=== USER L158: Muvement un peu trop rapide peut etre dans les nervure et peut ├¬tre encore un peu trop grande
+L159: cache=null mat=true stamp=false clip=false pos=false | paintMat.customProgramCacheKey = () => 'paint-water-voronoi-v3';
+
+=== USER L161: on peut donne du volume a la peinture?
+L163: cache=null mat=true stamp=false clip=false pos=true | /* Peinture ┬½ gel / eau ┬╗ : volume (d├┤me + ombre de contact), nervures Voronoi. */ const paintMat = new THREE.MeshBasicM
+
+=== USER L165: Il est trop surelev├⌐ je pense
+L166: cache=null mat=true stamp=false clip=false pos=true | paintMesh.position.y = 0.12; paintMesh.renderOrder = 1; scene.add(paintMesh);  /* Seconde couche : ombre douce au sol po
+L166: cache=null mat=true stamp=false clip=false pos=false | paintMat.customProgramCacheKey = () => 'paint-water-volume-v5';
+
+=== USER L168: L'ombre doit ├¬tre tres legerte. Je pense que ca trop ici
+L169: cache=null mat=true stamp=false clip=false pos=true | paintMat.customProgramCacheKey = () => 'paint-water-volume-v6'; const paintMesh = new THREE.Mesh(   new THREE.PlaneGeome
+
+=== USER L172: un truc cloche.
+L174: cache=null mat=true stamp=false clip=false pos=true |         float blurredA = aSum / wSum;         float cover = smoothstep(0.16, 0.40, blurredA);         if (cover < 0.01) 
+
+=== USER L176: On va retirer les base, les maison, les sancturaire
+
+=== USER L192: Tu peux rendre les contour ext├⌐reiur des tuile avec des angle en courbe de bazier pour avoir des contour de carte organique, doux
+
+=== USER L200: non ca ne fonctionne pas du tout. remet comme avant. Je veux juste que les angle ext├⌐rieur, dans le vide, soit plus douce, legerement moins pinc├⌐. C'ets tout
+
+=== USER L210: Les angle concave n'on pas l'effet et les angla convexe sont trop arrondis. On cherche juste un leger effet,.
+
+=== USER L213: La peinture depasse les tuile et reste dans le vide
+L216: cache=null mat=true stamp=false clip=true pos=false | let paintClip = null; let paintMaskTex = null;  function rebuildPaintMask() {   const half = PAINT_N / 2, k = PAINT_N / 
+L217: cache=null mat=true stamp=false clip=false pos=false | paintMat.onBeforeCompile = (shader) => {   paintMat.userData.shader = shader;   shader.uniforms.uTime = monkTimeU;   sha
+L218: cache=null mat=true stamp=false clip=true pos=false | let paintClip = null; let paintMaskTex = (() => {   const cv = document.createElement('canvas');   cv.width = cv.height 
+L218: cache=null mat=false stamp=true clip=true pos=false | function stampPaint(f) {   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;   const r = Math.max(1.4, crowdRadius(f.c
+L219: cache=null mat=false stamp=true clip=true pos=false | function stampSplash(x, z, radius, factionIdx, colorStr) {   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;   const
+
+=== USER L221: Le liquide coupe
+L223: cache=null mat=true stamp=false clip=true pos=false | let paintClip = null; let paintMaskTex = (() => {   const cv = document.createElement('canvas');   cv.width = cv.height 
+L223: cache=null mat=true stamp=false clip=false pos=false | paintMat.customProgramCacheKey = () => 'paint-water-clip-v9';
+
+=== USER L225: j'ai des coupure dans le haut
+L227: cache=null mat=false stamp=false clip=true pos=false | let paintClip = null;  function rebuildPaintMask() {   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;   const path 
+L227: cache=null mat=true stamp=false clip=false pos=false | paintMat.onBeforeCompile = (shader) => {   paintMat.userData.shader = shader;   shader.uniforms.uTime = monkTimeU;   sha
+
+=== USER L230: Ca na pas changer
+L232: cache=null mat=false stamp=true clip=false pos=false | function drawOrganicSplat(ctx, cx, cz, r) {   // Disque doux, contenu dans le rayon (pas de satellites hors tuile)   ctx
+L232: cache=null mat=true stamp=false clip=false pos=false | paintMat.onBeforeCompile = (shader) => {   paintMat.userData.shader = shader;   shader.uniforms.uTime = monkTimeU;   sha
+
+=== USER L235: J'ai perdu l'effet qu'on a travaill├⌐
+L236: cache=null mat=false stamp=true clip=false pos=false | function drawOrganicSplat(ctx, cx, cz, r) {   // Forme organique douce, sans satellites (├⌐vite le vide)   ctx.beginPath(
+L236: cache=paint-water-gel-v12 mat=true stamp=false clip=false pos=false | paintMat.onBeforeCompile = (shader) => {   paintMat.userData.shader = shader;   shader.uniforms.uTime = monkTimeU;   sha
+L236: cache=null mat=true stamp=false clip=false pos=false | const paintMat = new THREE.MeshBasicMaterial({   map: paintTex,   transparent: true,   opacity: 0.90,   depthWrite: fals
+
+=== USER L238: J'ai perdu l'effet qu'on a travaill├⌐
+L240: cache=paint-water-gel-v12 mat=true stamp=false clip=false pos=false |     .replace('#include <map_fragment>', `       #ifdef USE_MAP         vec2 uv = vMapUv;         float t = uTime;       
+
+=== USER L243: J'ai l'impression que l'effet n'est pas celle q'on avait. Trop de fonc├⌐ sur les contour je pense. Et il foudrait adoucir. On a des encoche dans le contour. Il faudrait de la courbe de bazier, on aurai
+L248: cache=null mat=false stamp=true clip=false pos=false | /** Couleur CSS ΓåÆ rgba avec alpha (pour d├⌐grad├⌐ de bord). */ function cssAlpha(css, a) {   if (typeof css === 'string' &
+L248: cache=paint-water-gel-v13 mat=true stamp=false clip=false pos=false |     .replace('#include <map_fragment>', `       #ifdef USE_MAP         vec2 uv = vMapUv;         float t = uTime;       
+
+=== USER L252: Encore des encoche et je pense que le trais ├⌐tait plus large
+L255: cache=null mat=false stamp=true clip=false pos=false | /**  * Flaque liquide : B├⌐zier doux, c┼ôur opaque (fusionne les traces),  * feather tr├¿s court ΓÇö ├⌐vite les encoches de fl
+L255: cache=null mat=false stamp=true clip=false pos=false | function stampPaint(f) {   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;   // Trait plus large : ruban liquide sou
+L255: cache=paint-water-gel-v14 mat=true stamp=false clip=false pos=false |         vec4 tex = texture2D(map, uv);         float a = tex.a;         // Seuil plus haut : coupe le fringe semi-transp
+
+=== USER L258: Ha je pense que les encore vienne du fait que le liquide est trop bas
+L260: cache=null mat=false stamp=false clip=false pos=true | paintMesh.position.y = 0.14;
+
+=== USER L263: trop bas encore? je vois des section qui ne se remplisent pas
+
+=== USER L266: continu
+L267: cache=null mat=true stamp=false clip=false pos=true | paintMesh.position.y = 0.28; paintMesh.renderOrder = 2; paintMat.depthTest = true; paintMat.depthWrite = false;
+
+=== USER L272: non on est trop haut. le probleme ne vient pas de la. on fait fausse route.  Le proble a commenc├⌐ que je te disait que ca coupais dans le haut. Je te donne l'image pour ref
+L284: cache=null mat=false stamp=false clip=true pos=false | /* Masque de d├⌐coupe : m├¬me grille pixel que les tampons (isSolid).    Pas de texture GPU s├⌐par├⌐e ΓåÆ ├⌐vite les coupes hor
+L284: cache=null mat=false stamp=false clip=false pos=true | paintMesh.position.y = 0.05; paintMesh.renderOrder = 1; scene.add(paintMesh);
+L284: cache=null mat=false stamp=true clip=true pos=false |   if (gridChanged) {     paintCtx.save();     paintCtx.fillStyle = colorStr;     drawOrganicSplat(paintCtx, cx, cz, r); 
+L284: cache=null mat=false stamp=true clip=true pos=false |   if (gridChanged) {     paintCtx.save();     paintCtx.fillStyle = f.css;     paintCtx.globalAlpha = 1;     drawOrganicS
+L285: cache=paint-water-gel-v15 mat=true stamp=false clip=false pos=false | paintMat.customProgramCacheKey = () => 'paint-water-gel-v15';
+
+=== USER L289: ca coupe toujours dans la haut et l'effet ombr├⌐ de devrait pas ├¬tre la et plus large, le bord plus diffus
+
+
+===== CANDIDATES BEFORE L258 =====
+
+----- L236 (paint-water-gel-v12) len=3650 -----
+paintMat.onBeforeCompile = (shader) => {
+  paintMat.userData.shader = shader;
+  shader.uniforms.uTime = monkTimeU;
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+uniform float uTime;
+
+vec2 paintHash2(vec2 p) {
+  p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+  return fract(sin(p) * 43758.5453);
+}
+
+float paintVoronoiEdge(vec2 uv) {
+  vec2 n = floor(uv);
+  vec2 f = fract(uv);
+  float md = 8.0;
+  float md2 = 8.0;
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 g = vec2(float(i), float(j));
+      vec2 o = paintHash2(n + g);
+      o = 0.5 + 0.5 * sin(uTime * 0.12 + 6.2831 * o);
+      vec2 r = g + o - f;
+      float d = dot(r, r);
+      if (d < md) { md2 = md; md = d; }
+      else if (d < md2) { md2 = d; }
+    }
+  }
+  return sqrt(md2) - sqrt(md);
+}
+`)
+    .replace('#include <map_fragment>', `
+      #ifdef USE_MAP
+        vec2 uv = vMapUv;
+        float t = uTime;
+        float px = ${(1.2 / 192).toFixed(6)};
+
+        // Couverture = alpha r├⌐elle (pas de flou qui cr├⌐e un halo hors tuile)
+        vec4 tex = texture2D(map, uv);
+        float a = tex.a;
+        if (a < 0.05) discard;
+        float aa = fwidth(a) * 1.5;
+        float cover = smoothstep(0.05, 0.05 + max(aa, 0.12), a);
+
+        vec3 baseColor = tex.rgb;
+        float luma = dot(baseColor, vec3(0.299, 0.587, 0.114));
+        baseColor = mix(vec3(luma), baseColor, 1.35);
+        baseColor = mix(baseColor, vec3(1.0), 0.12);
+
+        // Volume / d├┤me ├á partir de l'alpha
+        float height = pow(smoothstep(0.08, 0.95, a), 0.7);
+        float rim = smoothstep(0.08, 0.28, a) * (1.0 - smoothstep(0.35, 0.7, a));
+
+        // Normales : voisins, mais sans inventer de couverture
+        float hL = texture2D(map, uv - vec2(px * 2.0, 0.0)).a;
+        float hR = texture2D(map, uv + vec2(px * 2.0, 0.0)).a;
+        float hD = texture2D(map, uv - vec2(0.0, px * 2.0)).a;
+        float hU = texture2D(map, uv + vec2(0.0, px * 2.0)).a;
+        vec3 nrm = normalize(vec3((hL - hR) * 4.0, (hD - hU) * 4.0, 0.25 + height * 0.5));
+
+        vec3 lightDir = normalize(vec3(0.55, 0.75, 1.0));
+        float ndl = max(0.0, dot(nrm, lightDir));
+        float wrap = ndl * 0.55 + 0.45;
+        float ao = mix(0.72, 1.0, height);
+        float spec = pow(ndl, 20.0) * (0.22 + 0.55 * height);
+        float fresnel = pow(1.0 - max(0.0, nrm.z), 2.2);
+
+        // Nervures eau (Voronoi) ΓÇö lentes
+        float cellScale = 110.0;
+        float ve = paintVoronoiEdge(uv * cellScale);
+        float vein = 1.0 - smoothstep(0.010, 0.040, ve);
+        float veinCore = 1.0 - smoothstep(0.0, 0.018, ve);
+        float veS = paintVoronoiEdge(uv * cellScale + vec2(0.22, 0.28));
+        float veinShadow = (1.0 - smoothstep(0.010, 0.055, veS)) * (1.0 - vein);
+
+        float caustic = sin(uv.x * 90.0 + uv.y * 68.0 + t * 0.55)
+                      * sin(uv.x * 55.0 - uv.y * 75.0 - t * 0.35);
+        caustic = caustic * 0.5 + 0.5;
+
+        vec3 col = baseColor * wrap * ao;
+        col *= 0.80 + 0.20 * height;
+        col *= 1.0 - rim * 0.10;
+        col = mix(col, baseColor * 1.12, height * 0.28);
+        col *= 1.0 - veinShadow * 0.14;
+        col = mix(col, vec3(1.0), vein * 0.28 + veinCore * 0.16);
+        col += baseColor * caustic * 0.05 * height;
+        col += vec3(spec * 0.42);
+        col += vec3(fresnel * rim * 0.22);
+        col += vec3(veinCore * 0.08);
+
+        diffuseColor.rgb = col;
+        diffuseColor.a *= cover * (0.68 + 0.22 * height + 0.08 * veinCore);
+      #endif
+    `);
+};
+paintMat.customProgramCacheKey = () => 'paint-water-gel-v12';
+paintMat.needsUpdate = true;
+
+----- L236 (null) len=160 -----
+const paintMat = new THREE.MeshBasicMaterial({
+  map: paintTex,
+  transparent: true,
+  opacity: 0.90,
+  depthWrite: false,
+  blending: THREE.NormalBlending,
+});
+
+----- L240 (paint-water-gel-v12) len=2695 -----
+    .replace('#include <map_fragment>', `
+      #ifdef USE_MAP
+        vec2 uv = vMapUv;
+        float t = uTime;
+        float px = ${(1.2 / 192).toFixed(6)};
+
+        // Couverture = alpha r├⌐elle (pas de flou qui cr├⌐e un halo hors tuile)
+        vec4 tex = texture2D(map, uv);
+        float a = tex.a;
+        if (a < 0.05) discard;
+        float aa = fwidth(a) * 1.5;
+        float cover = smoothstep(0.05, 0.05 + max(aa, 0.12), a);
+
+        vec3 baseColor = tex.rgb;
+        float luma = dot(baseColor, vec3(0.299, 0.587, 0.114));
+        baseColor = mix(vec3(luma), baseColor, 1.35);
+        baseColor = mix(baseColor, vec3(1.0), 0.12);
+
+        // Volume / d├┤me
+        float height = pow(smoothstep(0.08, 0.95, a), 0.7);
+        float rim = smoothstep(0.08, 0.28, a) * (1.0 - smoothstep(0.35, 0.7, a));
+
+        float hL = texture2D(map, uv - vec2(px * 2.0, 0.0)).a;
+        float hR = texture2D(map, uv + vec2(px * 2.0, 0.0)).a;
+        float hD = texture2D(map, uv - vec2(0.0, px * 2.0)).a;
+        float hU = texture2D(map, uv + vec2(0.0, px * 2.0)).a;
+        vec3 nrm = normalize(vec3((hL - hR) * 4.0, (hD - hU) * 4.0, 0.25 + height * 0.5));
+
+        vec3 lightDir = normalize(vec3(0.55, 0.75, 1.0));
+        float ndl = max(0.0, dot(nrm, lightDir));
+        float wrap = ndl * 0.55 + 0.45;
+        float ao = mix(0.72, 1.0, height);
+        float spec = pow(ndl, 20.0) * (0.22 + 0.55 * height);
+        float fresnel = pow(1.0 - max(0.0, nrm.z), 2.2);
+
+        // Nervures eau (Voronoi)
+        float cellScale = 110.0;
+        float ve = paintVoronoiEdge(uv * cellScale);
+        float vein = 1.0 - smoothstep(0.010, 0.040, ve);
+        float veinCore = 1.0 - smoothstep(0.0, 0.018, ve);
+        float veS = paintVoronoiEdge(uv * cellScale + vec2(0.22, 0.28));
+        float veinShadow = (1.0 - smoothstep(0.010, 0.055, veS)) * (1.0 - vein);
+
+        float caustic = sin(uv.x * 90.0 + uv.y * 68.0 + t * 0.55)
+                      * sin(uv.x * 55.0 - uv.y * 75.0 - t * 0.35);
+        caustic = caustic * 0.5 + 0.5;
+
+        vec3 col = baseColor * wrap * ao;
+        col *= 0.80 + 0.20 * height;
+        col *= 1.0 - rim * 0.10;
+        col = mix(col, baseColor * 1.12, height * 0.28);
+        col *= 1.0 - veinShadow * 0.14;
+        col = mix(col, vec3(1.0), vein * 0.28 + veinCore * 0.16);
+        col += baseColor * caustic * 0.05 * height;
+        col += vec3(spec * 0.42);
+        col += vec3(fresnel * rim * 0.22);
+        col += vec3(veinCore * 0.08);
+
+        diffuseColor.rgb = col;
+        diffuseColor.a *= cover * (0.68 + 0.22 * height + 0.08 * veinCore);
+      #endif
+    `);
+};
+paintMat.customProgramCacheKey = () => 'paint-water-gel-v12';
+paintMat.needsUpdate = true;
+
+----- L248 (null) len=2376 -----
+/** Couleur CSS ΓåÆ rgba avec alpha (pour d├⌐grad├⌐ de bord). */
+function cssAlpha(css, a) {
+  if (typeof css === 'string' && css[0] === '#') {
+    let h = css.slice(1);
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+  return css;
+}
+
+/**
+ * Flaque liquide : silhouette en courbes de B├⌐zier + bord adouci (alpha).
+ * Pas de satellites (├⌐vite de peindre le vide).
+ */
+function drawOrganicSplat(ctx, cx, cz, r) {
+  const n = 10;
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const angle = (i / n) * Math.PI * 2;
+    const wobble = 0.86 + 0.11 * Math.sin(i * 2.1 + cx * 0.03)
+      + 0.05 * Math.sin(i * 4.7 + cz * 0.02);
+    pts.push({
+      x: cx + Math.cos(angle) * r * wobble,
+      y: cz + Math.sin(angle) * r * wobble,
+    });
+  }
+
+  ctx.beginPath();
+  let mx = (pts[n - 1].x + pts[0].x) * 0.5;
+  let my = (pts[n - 1].y + pts[0].y) * 0.5;
+  ctx.moveTo(mx, my);
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    ctx.quadraticCurveTo(p.x, p.y, (p.x + q.x) * 0.5, (p.y + q.y) * 0.5);
+  }
+  ctx.closePath();
+
+  const css = ctx.fillStyle;
+  const grad = ctx.createRadialGradient(cx, cz, r * 0.42, cx, cz, r * 1.02);
+  grad.addColorStop(0, cssAlpha(css, 1));
+  grad.addColorStop(0.62, cssAlpha(css, 1));
+  grad.addColorStop(0.88, cssAlpha(css, 0.55));
+  grad.addColorStop(1, cssAlpha(css, 0));
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = css;
+}
+
+/** Hex flat-top aux coins en B├⌐zier (Path2D). `soft` = part dΓÇÖar├¬te absorb├⌐e par le coin. */
+function addRoundedHex(path, cx, cz, R, soft = 0.38) {
+  const s = Math.min(0.46, Math.max(0.18, soft));
+  const V = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    V.push([cx + Math.cos(a) * R, cz + Math.sin(a) * R]);
+  }
+  for (let i = 0; i < 6; i++) {
+    const v0 = V[(i + 5) % 6], v1 = V[i], v2 = V[(i + 1) % 6];
+    const pinX = v1[0] + (v0[0] - v1[0]) * s;
+    const pinY = v1[1] + (v0[1] - v1[1]) * s;
+    const poutX = v1[0] + (v2[0] - v1[0]) * s;
+    const poutY = v1[1] + (v2[1] - v1[1]) * s;
+    if (i === 0) path.moveTo(pinX, pinY);
+    else path.lineTo(pinX, pinY);
+    path.quadraticCurveTo(v1[0], v1[1], poutX, poutY);
+  }
+  path.closePath();
+}
+
+----- L248 (paint-water-gel-v13) len=2600 -----
+    .replace('#include <map_fragment>', `
+      #ifdef USE_MAP
+        vec2 uv = vMapUv;
+        float t = uTime;
+        float px = ${(1.2 / 192).toFixed(6)};
+
+        vec4 tex = texture2D(map, uv);
+        float a = tex.a;
+        if (a < 0.04) discard;
+        float aa = fwidth(a) * 1.8;
+        float cover = smoothstep(0.04, 0.04 + max(aa, 0.16), a);
+
+        vec3 baseColor = tex.rgb;
+        float luma = dot(baseColor, vec3(0.299, 0.587, 0.114));
+        baseColor = mix(vec3(luma), baseColor, 1.28);
+        baseColor = mix(baseColor, vec3(1.0), 0.10);
+
+        // Volume doux ΓÇö pas de halo sombre sur le contour
+        float height = pow(smoothstep(0.06, 0.92, a), 0.75);
+        float rim = smoothstep(0.06, 0.32, a) * (1.0 - smoothstep(0.38, 0.78, a));
+
+        float hL = texture2D(map, uv - vec2(px * 2.0, 0.0)).a;
+        float hR = texture2D(map, uv + vec2(px * 2.0, 0.0)).a;
+        float hD = texture2D(map, uv - vec2(0.0, px * 2.0)).a;
+        float hU = texture2D(map, uv + vec2(0.0, px * 2.0)).a;
+        vec3 nrm = normalize(vec3((hL - hR) * 3.2, (hD - hU) * 3.2, 0.32 + height * 0.45));
+
+        vec3 lightDir = normalize(vec3(0.55, 0.75, 1.0));
+        float ndl = max(0.0, dot(nrm, lightDir));
+        float wrap = ndl * 0.40 + 0.60;
+        float ao = mix(0.90, 1.0, height);
+        float spec = pow(ndl, 18.0) * (0.16 + 0.40 * height);
+
+        float cellScale = 110.0;
+        float ve = paintVoronoiEdge(uv * cellScale);
+        float vein = 1.0 - smoothstep(0.010, 0.040, ve);
+        float veinCore = 1.0 - smoothstep(0.0, 0.018, ve);
+        float veS = paintVoronoiEdge(uv * cellScale + vec2(0.22, 0.28));
+        float veinShadow = (1.0 - smoothstep(0.010, 0.055, veS)) * (1.0 - vein);
+
+        float caustic = sin(uv.x * 90.0 + uv.y * 68.0 + t * 0.55)
+                      * sin(uv.x * 55.0 - uv.y * 75.0 - t * 0.35);
+        caustic = caustic * 0.5 + 0.5;
+
+        vec3 col = baseColor * wrap * ao;
+        col *= 0.88 + 0.12 * height;
+        col = mix(col, baseColor * 1.08, height * 0.22);
+        // Liser├⌐ clair (gel), pas de fonc├⌐
+        col = mix(col, mix(baseColor, vec3(1.0), 0.45), rim * 0.28);
+        col *= 1.0 - veinShadow * 0.08;
+        col = mix(col, vec3(1.0), vein * 0.26 + veinCore * 0.14);
+        col += baseColor * caustic * 0.045 * height;
+        col += vec3(spec * 0.32);
+        col += vec3(veinCore * 0.07);
+
+        diffuseColor.rgb = col;
+        diffuseColor.a *= cover * (0.70 + 0.20 * height + 0.06 * veinCore);
+      #endif
+    `);
+};
+paintMat.customProgramCacheKey = () => 'paint-water-gel-v13';
+paintMat.needsUpdate = true;
+
+----- L255 (null) len=1252 -----
+/**
+ * Flaque liquide : B├⌐zier doux, c┼ôur opaque (fusionne les traces),
+ * feather tr├¿s court ΓÇö ├⌐vite les encoches de flaques semi-transparentes.
+ */
+function drawOrganicSplat(ctx, cx, cz, r) {
+  const n = 8;
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const angle = (i / n) * Math.PI * 2;
+    // Peu de wobble : trop dΓÇÖondulation = encoches entre stamps
+    const wobble = 0.96 + 0.05 * Math.sin(i * 1.7 + cx * 0.02);
+    pts.push({
+      x: cx + Math.cos(angle) * r * wobble,
+      y: cz + Math.sin(angle) * r * wobble,
+    });
+  }
+
+  ctx.beginPath();
+  ctx.moveTo((pts[n - 1].x + pts[0].x) * 0.5, (pts[n - 1].y + pts[0].y) * 0.5);
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    ctx.quadraticCurveTo(p.x, p.y, (p.x + q.x) * 0.5, (p.y + q.y) * 0.5);
+  }
+  ctx.closePath();
+
+  const css = ctx.fillStyle;
+  // C┼ôur plein jusquΓÇÖ├á ~90 %, feather court (fusion propre des chevauchements)
+  const grad = ctx.createRadialGradient(cx, cz, r * 0.72, cx, cz, r * 1.0);
+  grad.addColorStop(0, cssAlpha(css, 1));
+  grad.addColorStop(0.78, cssAlpha(css, 1));
+  grad.addColorStop(0.94, cssAlpha(css, 0.85));
+  grad.addColorStop(1, cssAlpha(css, 0));
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = css;
+}
+
+----- L255 (null) len=745 -----
+function stampPaint(f) {
+  const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;
+  // Trait plus large : ruban liquide sous la foule
+  const r = Math.max(2.1, crowdRadius(f.count, f.i) * 1.32) * k;
+  const cx = f.leader.x * k + half, cz = f.leader.z * k + half;
+  const gx0 = Math.max(0, Math.floor(cx - r * 1.25)), gx1 = Math.min(PAINT_N - 1, Math.ceil(cx + r * 1.25));
+  const gz0 = Math.max(0, Math.floor(cz - r * 1.25)), gz1 = Math.min(PAINT_N - 1, Math.ceil(cz + r * 1.25));
+  const r2 = r * r;
+  const kw = PAINT_SPAN / PAINT_N;
+
+  let gridChanged = false;
+  for (let gz = gz0; gz <= gz1; gz++) {
+    for (let gx = gx0; gx <= gx1; gx++) {
+      const dx = gx + 0.5 - cx, dz = gz + 0.5 - cz;
+      if (dx * dx + dz * dz > r2 * 1.15) continue;
+
+----- L255 (paint-water-gel-v14) len=2421 -----
+        vec4 tex = texture2D(map, uv);
+        float a = tex.a;
+        // Seuil plus haut : coupe le fringe semi-transparent (encoches / trait sombre)
+        if (a < 0.20) discard;
+        float aa = fwidth(a) * 1.4;
+        float cover = smoothstep(0.20, 0.20 + max(aa, 0.12), a);
+
+        vec3 baseColor = tex.rgb;
+        float luma = dot(baseColor, vec3(0.299, 0.587, 0.114));
+        baseColor = mix(vec3(luma), baseColor, 1.28);
+        baseColor = mix(baseColor, vec3(1.0), 0.10);
+
+        float height = pow(smoothstep(0.22, 0.95, a), 0.8);
+        float rim = smoothstep(0.22, 0.40, a) * (1.0 - smoothstep(0.45, 0.82, a));
+
+        float hL = texture2D(map, uv - vec2(px * 2.0, 0.0)).a;
+        float hR = texture2D(map, uv + vec2(px * 2.0, 0.0)).a;
+        float hD = texture2D(map, uv - vec2(0.0, px * 2.0)).a;
+        float hU = texture2D(map, uv + vec2(0.0, px * 2.0)).a;
+        vec3 nrm = normalize(vec3((hL - hR) * 2.6, (hD - hU) * 2.6, 0.38 + height * 0.4));
+
+        vec3 lightDir = normalize(vec3(0.55, 0.75, 1.0));
+        float ndl = max(0.0, dot(nrm, lightDir));
+        float wrap = ndl * 0.32 + 0.68;
+        float ao = mix(0.94, 1.0, height);
+        float spec = pow(ndl, 16.0) * (0.12 + 0.32 * height);
+
+        float cellScale = 110.0;
+        float ve = paintVoronoiEdge(uv * cellScale);
+        float vein = 1.0 - smoothstep(0.010, 0.040, ve);
+        float veinCore = 1.0 - smoothstep(0.0, 0.018, ve);
+        float veS = paintVoronoiEdge(uv * cellScale + vec2(0.22, 0.28));
+        float veinShadow = (1.0 - smoothstep(0.010, 0.055, veS)) * (1.0 - vein);
+
+        float caustic = sin(uv.x * 90.0 + uv.y * 68.0 + t * 0.55)
+                      * sin(uv.x * 55.0 - uv.y * 75.0 - t * 0.35);
+        caustic = caustic * 0.5 + 0.5;
+
+        vec3 col = baseColor * wrap * ao;
+        col *= 0.92 + 0.08 * height;
+        col = mix(col, baseColor * 1.06, height * 0.18);
+        col = mix(col, mix(baseColor, vec3(1.0), 0.35), rim * 0.16);
+        col *= 1.0 - veinShadow * 0.06;
+        col = mix(col, vec3(1.0), vein * 0.24 + veinCore * 0.12);
+        col += baseColor * caustic * 0.04 * height;
+        col += vec3(spec * 0.28);
+        col += vec3(veinCore * 0.06);
+
+        diffuseColor.rgb = col;
+        diffuseColor.a *= cover * (0.78 + 0.16 * height + 0.04 * veinCore);
+      #endif
+    `);
+};
+paintMat.customProgramCacheKey = () => 'paint-water-gel-v14';
+paintMat.needsUpdate = true;

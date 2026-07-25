@@ -1,0 +1,6 @@
+Ground textures from Poly Haven — https://polyhaven.com
+License: CC0 (public domain)
+Downloaded via https://api.polyhaven.com
+
+Asset pages (see also manifest.json):
+  https://polyhaven.com/a/<asset_id>

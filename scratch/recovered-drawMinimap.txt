@@ -1,0 +1,35 @@
+LINE 116
+===OLD===
+  rankEl.textContent = `${rank}ᵉ`;
+  followersValEl.textContent = me.grisAbs || 0;
+  pctValEl.textContent = `${mine.pct.toFixed(1)}%`;
+  knightsValEl.textContent = mine.total;
+
+  if (rank < lastRank) { sfxRankUp(); rankEl.classList.add('pulse'); setTimeout(() => rankEl.classList.remove('pulse'), 220); }
+  lastRank = rank;
+}
+
+/* ============================== Mini-map ============================== */
+const mapCv = $('map'), mctx = mapCv.getContext('2d');
+const GRAY_CSS = 'rgba(205,210,220,.5)';
+let miniGrad = null, miniGradW = 0;
+function drawMinimap() {
+  const W = mapCv.width, c = W / 2, k = W / 150, s = (c - 6 * k) / MAP_R;
+  mctx.clearRect(0, 0, W, W);
+
+  // --- Disque de fond façon radar (clip circulaire) ---
+  mctx.save();
+  mctx.beginPath(); mctx.arc(c, c, c - 2 * k, 0, 7); mctx.clip();
+
+  if (!miniGrad || miniGradW !== W) {
+    const g = mctx.createRadialGradient(c, c, 0, c, c, c);
+    g.addColorStop(0, 'rgba(18,30,52,.94)');
+    g.addColorStop(0.65, 'rgba(9,16,32,.94)');
+    g.addColorStop(1, 'rgba(3,7,16,.96)');
+    miniGrad = g; miniGradW = W;
+  }
+  mctx.fillStyle = miniGrad; mctx.fillRect(0, 0, W, W);
+
+  /* --- Silhouette de l'île : chaque tuile en hexagone plein. C'est la seule
+         lecture fiable des brèches, donc elle passe avant tout le reste. --- */
+===END OLD len=1290===
