@@ -2541,10 +2541,14 @@ function triggerEcstasy() {
 let lastPop = 0;
 let _audioReady = false;
 function audioInit() {
-  if (_audioReady) return;
+  if (_audioReady) {
+    soundEngine.ensureContext();
+    return;
+  }
   _audioReady = true;
   soundEngine.init();
   soundEngine.bindUIClicks();
+  soundEngine.ensureContext();
   const unlock = () => {
     soundEngine.ensureContext();
     window.removeEventListener('pointerdown', unlock);
@@ -4816,6 +4820,7 @@ $('btn-concede').addEventListener('click', () => {
 });
 
 updateMainMenu();
+audioInit();
 
 // Partie lancée depuis la carte de conquête : couleur = celle de la terre, retour au verdict
 setPlayHandler((ctx) => {

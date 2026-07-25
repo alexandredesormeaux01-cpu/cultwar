@@ -2,19 +2,23 @@
    Cult War — Sound Engine (SFX + musique de partie)
    ========================================================================== */
 
+/* Chemins relatifs à BASE_URL (vite `base: './'`) : obligatoire sur GitHub Pages
+   (/cultwar/) et Capacitor — un chemin absolu `/assets/...` renvoie 404. */
+const asset = (file) => `${import.meta.env.BASE_URL}assets/${file}`;
+
 const SFX = {
-  convert: '/assets/sfx_convert.mp3',
-  ui_click: '/assets/sfx_click.mp3',
-  defeat: '/assets/sfx_defeat.mp3',
-  disciple: '/assets/sfx_disciple.mp3',
-  disciple_alien: '/assets/sfx_disciple_alien.mp3',
-  bell: '/assets/sfx_bell.mp3',
-  crystal: '/assets/sfx_crystal_explode.mp3',
+  convert: asset('sfx_convert.mp3'),
+  ui_click: asset('sfx_click.mp3'),
+  defeat: asset('sfx_defeat.mp3'),
+  disciple: asset('sfx_disciple.mp3'),
+  disciple_alien: asset('sfx_disciple_alien.mp3'),
+  bell: asset('sfx_bell.mp3'),
+  crystal: asset('sfx_crystal_explode.mp3'),
 };
 
 const MUSIC = {
-  match: '/assets/music_pocket_quest.mp3',
-  pulse: '/assets/music_pocket_quest_pulse.mp3',
+  match: asset('music_pocket_quest.mp3'),
+  pulse: asset('music_pocket_quest_pulse.mp3'),
 };
 
 const MUSIC_VOL = 0.38;
