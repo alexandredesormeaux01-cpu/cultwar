@@ -3809,25 +3809,55 @@ function startGame() {
    en mode « multiMode » où les Leaders adverses sont pilotés par le serveur. */
 async function startMultiGame(opts = {}) {
   audioInit();
+  const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
+  onStatus('Connexion au serveur…');
+
+  const CONNECT_MS = 25000;
   try {
-    await net.connect({
-      name: opts.name || localStorage.getItem('cultio_progress_v3')
-        ? (JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}').playerName || 'Joueur')
-        : 'Joueur',
-      leaderKey: playerLeaderKey,
-    });
+    await Promise.race([
+      net.connect({
+        name: opts.name || (() => {
+          try {
+            return JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}').playerName || 'Joueur';
+          } catch (_) { return 'Joueur'; }
+        })(),
+        leaderKey: playerLeaderKey,
+      }),
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error('Délai dépassé — le serveur met trop de temps à répondre')),
+        CONNECT_MS,
+      )),
+    ]);
   } catch (e) {
     banner(`⚠ Serveur injoignable : ${e?.message || e}`);
+    onStatus(null);
     return false;
   }
-  banner(`🌐 Salle rejointe (${net.state.phase}) — en attente de joueurs…`);
-  // Attendre le passage en phase 'play'
+
+  const players = () => net.getLeaders()?.size || 1;
+  onStatus(`Salon rejoint — ${players()}/2 joueurs (ouvre un 2ᵉ onglet)`);
+  banner(`🌐 En attente d'un 2ᵉ joueur… (${players()}/2)`);
+
+  net.onLeadersUpdate(() => {
+    const n = players();
+    if (net.state.phase === 'lobby') {
+      onStatus(n < 2
+        ? `Salon rejoint — ${n}/2 joueurs (ouvre un 2ᵉ onglet)`
+        : `Joueurs prêts (${n}) — démarrage imminent…`);
+      banner(n < 2
+        ? `🌐 En attente d'un 2ᵉ joueur… (${n}/2)`
+        : `🌐 ${n} joueurs — la partie démarre…`);
+    }
+  });
+
+  // Attendre le passage en phase 'play' (≥2 joueurs + 5 s côté serveur)
   await new Promise(res => {
     if (net.state.phase === 'play') return res();
     net.onPhaseChange(p => { if (p === 'play') res(); });
   });
   multiMode = true;
   conquest = null;
+  onStatus(null);
   startGame();
   banner('⚔ Match en cours !');
   return true;
@@ -3898,17 +3928,20 @@ $('btn-new-game').addEventListener('click', () => {
 $('btn-multi').addEventListener('click', async () => {
   const btn = $('btn-multi');
   btn.disabled = true;
-  btn.textContent = 'Connexion…';
+  const setLabel = (t) => { btn.textContent = t || 'Multijoueur en ligne'; };
+  setLabel('Connexion…');
   try {
-    const ok = await startMultiGame();
+    const ok = await startMultiGame({
+      onStatus: (msg) => { if (msg) setLabel(msg); },
+    });
     if (!ok) {
       btn.disabled = false;
-      btn.textContent = 'Multijoueur en ligne';
+      setLabel(null);
     }
   } catch (e) {
     banner(`⚠ Multi : ${e?.message || e}`);
     btn.disabled = false;
-    btn.textContent = 'Multijoueur en ligne';
+    setLabel(null);
   }
 });
 
