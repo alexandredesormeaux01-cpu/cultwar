@@ -7,7 +7,7 @@ import Peer from 'peerjs';
 import { MATCH_DUR } from '../sim/constants.js';
 
 const PEER_PREFIX = 'cultwar-';
-const MAX_SLOTS = 6;
+const MAX_SLOTS = 5;
 const DIFFS = ['easy', 'normal', 'hard'];
 const CULTS = [
   { c: 0xff2e7e, sym: '❤' }, { c: 0x00c8ff, sym: '☾' },
@@ -118,7 +118,7 @@ export function createNetClient() {
             if (s.kind === 'bot') { state._slots.delete(id); freed = true; break; }
           }
           if (!freed) {
-            conn.send({ type: 'joinReject', reason: 'Salon complet (6 joueurs).' });
+            conn.send({ type: 'joinReject', reason: 'Salon complet (5 joueurs).' });
             return;
           }
         }

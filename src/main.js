@@ -4465,7 +4465,7 @@ function renderLobbySlots(slots) {
 
   const ordered = [...(slots || [])];
   const n = ordered.length;
-  $('lobby-players-count').textContent = `${n}/6`;
+  $('lobby-players-count').textContent = `${n}/5`;
 
   strip.replaceChildren();
   for (const s of ordered) {
@@ -4518,7 +4518,7 @@ function renderLobbySlots(slots) {
     strip.append(cell);
   }
 
-  if (host && n < 6) {
+  if (host && n < 5) {
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'lobby-strip-add';
@@ -4533,7 +4533,7 @@ function renderLobbySlots(slots) {
   $('btn-lobby-start').disabled = n < 2;
   $('btn-lobby-start').textContent = n < 2
     ? 'Il faut au moins 2 joueurs'
-    : `Lancer la partie (${n}/6)`;
+    : `Lancer la partie (${n}/5)`;
 }
 
 $('btn-multi').addEventListener('click', () => {
