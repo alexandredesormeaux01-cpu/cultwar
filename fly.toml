@@ -1,5 +1,5 @@
 # Fly.io — serveur Colyseus (multiplayer)
-app = "cult-io"
+app = "cultwar"
 primary_region = "cdg"
 
 [build]

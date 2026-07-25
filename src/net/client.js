@@ -7,7 +7,7 @@ import { Client } from 'colyseus.js';
 /* URL du serveur : dev = local, prod = fly.dev */
 const DEFAULT_URL = import.meta.env.DEV
   ? `ws://${location.hostname}:2567`
-  : 'wss://cult-io.fly.dev';
+  : 'wss://cultwar.fly.dev';
 
 export function createNetClient() {
   const state = {
