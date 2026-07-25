@@ -2090,4 +2090,121 @@ button.btn-secondary:hover {
 .lobby-card .lobby-badge { align-self: flex-start; }
 .lobby-card .lobby-slot-actions { justify-content: space-between; }
 .lobby-card.is-bot .lobby-card-frame { filter: saturate(0.85); }
-.multi-panel-inner { max-width: min(92vw, 560px); width: min(92vw, 560px); }
+.multi-panel-inner { max-width: min(96vw, 640px); width: min(96vw, 640px); }
+
+/* ============================ Lobby v2 (mobile-first) ============================ */
+.lobby-layout {
+  display: flex; flex-direction: column; gap: 14px;
+  max-height: 92vh; overflow-y: auto;
+  padding-right: 4px;
+}
+.lobby-header { text-align: left; }
+.lobby-title-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.lobby-title-row h1 {
+  font-size: clamp(24px, 6vw, 40px); margin: 0;
+  background: linear-gradient(90deg,#ffe259,#ffa751);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.lobby-code-pill {
+  font-family: 'JetBrains Mono', monospace, ui-monospace;
+  font-size: clamp(18px, 5vw, 28px); font-weight: 900;
+  padding: 6px 14px; border-radius: 12px;
+  background: rgba(255,226,89,0.14);
+  border: 1px solid rgba(255,226,89,0.45);
+  color: #ffe259; letter-spacing: 3px;
+}
+
+.lobby-me-card {
+  background: rgba(255,255,255,0.045);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px; padding: 12px; text-align: left;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.lobby-me-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  flex-wrap: wrap;
+}
+.lobby-me-label {
+  font-size: 12px; font-weight: 700; letter-spacing: 1.5px;
+  text-transform: uppercase; opacity: 0.72;
+}
+.lobby-me-name {
+  flex: 1; min-width: 140px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.14);
+  color: #fff; padding: 8px 10px; border-radius: 10px;
+  font: inherit; font-weight: 700; font-size: 14px;
+}
+.lobby-me-name:focus { outline: none; border-color: rgba(255,226,89,0.65); }
+
+.lobby-picker { display: flex; flex-direction: column; gap: 8px; }
+.lobby-picker-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
+  text-transform: uppercase; opacity: 0.62;
+}
+
+.lobby-leader-grid {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
+}
+.lobby-leader-cell {
+  aspect-ratio: 1; border-radius: 12px; overflow: hidden;
+  border: 2px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.35);
+  cursor: pointer; padding: 0;
+  transition: border-color 120ms, transform 120ms;
+  position: relative;
+}
+.lobby-leader-cell img {
+  width: 100%; height: 100%; object-fit: cover; object-position: top center;
+  display: block;
+}
+.lobby-leader-cell:active { transform: scale(0.96); }
+.lobby-leader-cell.is-selected {
+  border-color: #ffe259;
+  box-shadow: 0 0 12px rgba(255,226,89,0.4);
+}
+
+.lobby-color-grid {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
+}
+.lobby-color-cell {
+  aspect-ratio: 1; border-radius: 50%;
+  border: 3px solid rgba(255,255,255,0.10);
+  cursor: pointer; padding: 0;
+  transition: border-color 120ms, transform 120ms, filter 120ms;
+  position: relative;
+}
+.lobby-color-cell:active { transform: scale(0.92); }
+.lobby-color-cell.is-selected {
+  border-color: #fff;
+  box-shadow: 0 0 14px currentColor;
+}
+.lobby-color-cell.is-taken {
+  filter: grayscale(0.85) brightness(0.5);
+  cursor: not-allowed;
+}
+.lobby-color-cell.is-taken::after {
+  content: '✕'; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: rgba(255,255,255,0.65); font-weight: 900; font-size: 60%;
+}
+
+.lobby-players { text-align: left; }
+.lobby-players-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
+  text-transform: uppercase; opacity: 0.62; margin-bottom: 6px;
+}
+
+/* Écrans étroits : plus petits mais toujours accessibles au doigt */
+@media (max-width: 480px) {
+  .panel { padding: 16px 12px; }
+  .multi-panel-inner { max-width: 100vw; width: 100vw; border-radius: 0; }
+  .overlay { padding: 8px; }
+  .lobby-layout { max-height: 100vh; }
+  .lobby-slots { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .lobby-card-body { padding: 6px 8px 8px; }
+  .lobby-card-name { font-size: 12px; }
+  .lobby-card-perso { font-size: 10px; }
+}

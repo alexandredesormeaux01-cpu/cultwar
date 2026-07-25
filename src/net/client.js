@@ -171,7 +171,38 @@ export function createNetClient() {
         state._leaders.set(sid, l);
         break;
       }
+      case 'choice': {
+        const sid = conn._sid;
+        if (!sid || state.phase !== 'lobby') return;
+        applyChoice(sid, msg);
+        break;
+      }
     }
+  }
+
+  /* Application de la sélection perso/couleur : validation puis broadcast.
+     La couleur demandée est ignorée si un autre siège l'occupe déjà. */
+  function applyChoice(sid, msg) {
+    const slot = state._slots.get(sid);
+    if (!slot) return;
+    if (msg.leaderKey && typeof msg.leaderKey === 'string') {
+      slot.leaderKey = msg.leaderKey.slice(0, 16);
+    }
+    if (typeof msg.cultColor === 'number') {
+      const cult = CULTS.find(c => c.c === msg.cultColor);
+      if (cult) {
+        const taken = [...state._slots.values()].some(s => s.id !== sid && s.cultColor === cult.c);
+        if (!taken) {
+          slot.cultColor = cult.c;
+          slot.cultSym = cult.sym;
+        }
+      }
+    }
+    if (msg.name && typeof msg.name === 'string') {
+      slot.name = msg.name.slice(0, 20);
+    }
+    broadcast({ type: 'slotsUpdate', slots: [...state._slots.values()] });
+    notifySlots();
   }
 
   function onGuestDisconnect(conn) {
@@ -397,6 +428,27 @@ export function createNetClient() {
     notifySlots();
   }
 
+  /* Client (hôte ou invité) demande à changer perso/couleur. L'hôte applique
+     directement ; l'invité envoie au réseau et l'hôte valide/rebroadcast. */
+  function setChoice(choice) {
+    if (state.phase !== 'lobby') return;
+    if (state._isHost) {
+      applyChoice(state.sessionId, choice);
+    } else {
+      sendToHost({ type: 'choice', ...choice });
+    }
+  }
+
+  /* Liste des couleurs déjà prises (pour griser les swatches côté UI). */
+  function takenColors(exceptSid) {
+    const out = new Set();
+    for (const s of state._slots.values()) {
+      if (s.id === exceptSid) continue;
+      out.add(s.cultColor);
+    }
+    return out;
+  }
+
   function requestStart() {
     if (!state._isHost || state.phase !== 'lobby') return;
     if (state._slots.size < 2) return;
@@ -511,6 +563,9 @@ export function createNetClient() {
     sendStats,
     endMatch,
     returnToLobby,
+    setChoice,
+    takenColors,
+    availableCults: () => CULTS.slice(),
     addBot,
     removeBot,
     setBotDiff,

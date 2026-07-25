@@ -4201,6 +4201,76 @@ const LOBBY_LEADER_NAMES = {
   monk: 'Petit Moine', sorcerer: 'Sombre Sorcier', nomad: 'Nomade',
   amazon: 'Amazone', alien: 'Extraterrestre', chief: 'Chef des Nations',
 };
+const LOBBY_LEADER_ORDER = ['monk', 'sorcerer', 'nomad', 'amazon', 'alien', 'chief'];
+
+/* Rendu du panneau « Ton choix » : perso, couleur, nom. Les couleurs prises par
+   les autres sièges sont grisées pour éviter les collisions ; le perso peut être
+   choisi librement (les doublons de leader sont autorisés). */
+function renderMeCard(slots) {
+  const mySid = net.state.sessionId;
+  const me = (slots || []).find(s => s.sessionId === mySid) || null;
+  if (!me) return;
+
+  const nameEl = $('lobby-me-name');
+  if (nameEl && document.activeElement !== nameEl) nameEl.value = me.name || '';
+
+  const leaderPicker = $('lobby-leader-picker');
+  leaderPicker.replaceChildren();
+  for (const k of LOBBY_LEADER_ORDER) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lobby-leader-cell' + (me.leaderKey === k ? ' is-selected' : '');
+    btn.title = LOBBY_LEADER_NAMES[k] || k;
+    const img = document.createElement('img');
+    img.src = LOBBY_PORTRAITS[k] || LOBBY_AVATARS[k];
+    img.alt = LOBBY_LEADER_NAMES[k] || k;
+    btn.append(img);
+    btn.addEventListener('click', () => {
+      playerLeaderKey = k;
+      persistSave({ playerLeader: k });
+      net.setChoice({ leaderKey: k });
+    });
+    leaderPicker.append(btn);
+  }
+
+  const colorPicker = $('lobby-color-picker');
+  colorPicker.replaceChildren();
+  const cults = net.availableCults();
+  const taken = net.takenColors(mySid);
+  for (const c of cults) {
+    const hex = '#' + ((c.c >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    const isTaken = taken.has(c.c);
+    const isMine = me.cultColor === c.c;
+    btn.className = 'lobby-color-cell'
+      + (isMine ? ' is-selected' : '')
+      + (isTaken && !isMine ? ' is-taken' : '');
+    btn.style.background = hex;
+    btn.style.color = hex;
+    btn.title = c.sym;
+    if (!isTaken || isMine) {
+      btn.addEventListener('click', () => {
+        const ci = CULTS.findIndex(x => x.c === c.c);
+        if (ci >= 0) playerCultIdx = ci;
+        persistSave({ playerColor: hex });
+        net.setChoice({ cultColor: c.c });
+      });
+    } else {
+      btn.disabled = true;
+    }
+    colorPicker.append(btn);
+  }
+}
+
+/* Utilitaire : fusionner quelques champs dans le save local sans écraser le reste. */
+function persistSave(patch) {
+  try {
+    const save = JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}');
+    Object.assign(save, patch);
+    localStorage.setItem('cultio_progress_v3', JSON.stringify(save));
+  } catch (_) {}
+}
 
 function renderLobbySlots(slots) {
   const list = $('lobby-slots');
@@ -4210,8 +4280,10 @@ function renderLobbySlots(slots) {
   $('lobby-host-actions').classList.toggle('hidden', !host);
   $('lobby-guest-hint').classList.toggle('hidden', host);
   $('lobby-hint').textContent = host
-    ? `Code ${code} — ajoute des IA ou attends des joueurs (max 6), puis lance.`
-    : `Code ${code} — en attente que l'hôte lance la partie.`;
+    ? `Partage le code, ajoute des IA ou attends d'autres joueurs (max 6), puis lance.`
+    : `En attente que l'hôte lance la partie.`;
+
+  renderMeCard(slots);
 
   list.replaceChildren();
   const ordered = [...(slots || [])];
@@ -4350,6 +4422,25 @@ $('btn-lobby-leave').addEventListener('click', leaveMultiToMenu);
 
 $('btn-lobby-add-bot').addEventListener('click', () => net.addBot('normal'));
 $('btn-lobby-start').addEventListener('click', () => net.requestStart());
+
+/* Édition du nom : on n'envoie qu'à la sortie du champ ou après une courte
+   pause, pour éviter un spam de messages à chaque touche. */
+{
+  const nameEl = $('lobby-me-name');
+  let debounceT = 0;
+  const flush = () => {
+    const v = (nameEl.value || '').trim().slice(0, 20);
+    if (v) {
+      persistSave({ playerName: v });
+      net.setChoice({ name: v });
+    }
+  };
+  nameEl.addEventListener('input', () => {
+    clearTimeout(debounceT);
+    debounceT = setTimeout(flush, 400);
+  });
+  nameEl.addEventListener('blur', flush);
+}
 
 async function launchMulti(code, mode) {
   setMultiButtonsEnabled(false);
