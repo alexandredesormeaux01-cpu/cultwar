@@ -106,6 +106,7 @@ export class QuickplayRoom extends Room {
     this.state.elapsed = 0;
     this.state.tick = 0;
     this.lobbyStartT = null;
+    this.lock(); // personne d'autre ne crée une 2ᵉ partie en rejoignant trop tard
     console.log(`[room ${this.roomId}] match started (${this.state.leaders.size} players)`);
   }
 

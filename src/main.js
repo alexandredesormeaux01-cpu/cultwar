@@ -3110,7 +3110,7 @@ function resetGame() {
   }
   trimCrowdCounts(0);
 
-  // factions : joueur + 3 IA aux couleurs restantes
+  // factions : solo = joueur + IA ; multi = humains du salon (+ IA si places libres)
   const save = JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}');
   if (save.playerColor) {
     const hex = parseInt(save.playerColor.replace('#', ''), 16);
@@ -3120,6 +3120,13 @@ function resetGame() {
   // Choix du perso jouable (moine par défaut) ; validé contre le registre
   if (save.playerLeader && LEADERS[save.playerLeader]) playerLeaderKey = save.playerLeader;
 
+  const multiSeats = [];
+  if (multiMode && net.getLeaders()) {
+    net.getLeaders().forEach((rl, sid) => {
+      multiSeats.push({ sid, rl, isMe: net.isMe(sid) });
+    });
+    multiSeats.sort((a, b) => Number(b.isMe) - Number(a.isMe));
+  }
 
   const pool = CULTS.map(c => ({ ...c })).filter((_, i) => i !== playerCultIdx);
   const picks = [{ ...CULTS[playerCultIdx] }];
@@ -3131,14 +3138,27 @@ function resetGame() {
     }
   }
 
-  // Force la présence des religions adjacentes (touchant la zone) dans la partie
-  if (conquest && conquest.touchingOwners && Array.isArray(conquest.touchingOwners)) {
-    for (const ownerColor of conquest.touchingOwners) {
-      if (picks.length >= 3) break;
-      const ownerHex = parseInt(ownerColor.replace('#', ''), 16);
-      const idx = pool.findIndex(c => c.c === ownerHex);
-      if (idx >= 0) {
-        picks.push(pool.splice(idx, 1)[0]);
+  if (multiSeats.length) {
+    // Couleurs / noms issus du serveur pour les adversaires humains
+    for (let i = 1; i < Math.min(NB_FACTIONS, multiSeats.length); i++) {
+      const rl = multiSeats[i].rl;
+      const hex = (rl.cultColor >>> 0) & 0xffffff;
+      picks.push({
+        c: hex,
+        name: rl.playerName || `Joueur ${i + 1}`,
+        sym: rl.cultSym || '⚔',
+      });
+    }
+  } else {
+    // Force la présence des religions adjacentes (touchant la zone) dans la partie
+    if (conquest && conquest.touchingOwners && Array.isArray(conquest.touchingOwners)) {
+      for (const ownerColor of conquest.touchingOwners) {
+        if (picks.length >= 3) break;
+        const ownerHex = parseInt(ownerColor.replace('#', ''), 16);
+        const idx = pool.findIndex(c => c.c === ownerHex);
+        if (idx >= 0) {
+          picks.push(pool.splice(idx, 1)[0]);
+        }
       }
     }
   }
@@ -3147,7 +3167,7 @@ function resetGame() {
 
   // Zone non conquise : les adversaires sont des tribus barbares aux noms aléatoires,
   // SAUF s'ils font partie des religions adjacentes (touchingOwners) venues conquérir la zone.
-  if (conquest && conquest.barbarian) {
+  if (!multiMode && conquest && conquest.barbarian) {
     const names = BARBARIAN_NAMES.slice();
     for (let i = 1; i < picks.length; i++) {
       const pickColorStr = '#' + picks[i].c.toString(16).padStart(6, '0').toLowerCase();
@@ -3191,6 +3211,9 @@ function resetGame() {
     [rosterPool[s], rosterPool[j]] = [rosterPool[j], rosterPool[s]];
   }
   const factionLeaderKey = (i) => {
+    if (multiSeats[i]?.rl?.leaderKey && LEADERS[multiSeats[i].rl.leaderKey]) {
+      return multiSeats[i].rl.leaderKey;
+    }
     if (i === 0) return playerLeaderKey;
     // -1 car le joueur est l'index 0 ; modulo pour un pool plus petit que les bots
     return rosterPool.length ? rosterPool[(i - 1) % rosterPool.length] : 'monk';
@@ -3198,11 +3221,15 @@ function resetGame() {
 
   for (let i = 0; i < NB_FACTIONS; i++) {
     const teamIdx = i;   // un Leader par culte : faction i = équipe i
-    const spawnPos = spawnInFactionBase(teams[teamIdx], 0);
+    const seat = multiSeats[i];
+    const isHuman = multiMode && !!seat;
+    const spawnPos = isHuman
+      ? { x: seat.rl.x, z: seat.rl.z }
+      : spawnInFactionBase(teams[teamIdx], 0);
 
     let botAggr = 0.35 + Math.random() * 0.65;
     let botAiT = Math.random() * 0.3;
-    if (i !== 0) {
+    if (!isHuman && i !== 0) {
       if (currentDifficulty === 'easy') {
         botAggr = 0.10 + Math.random() * 0.25;
         botAiT = Math.random() * 0.6;
@@ -3216,11 +3243,13 @@ function resetGame() {
     }
     const leaderKey = factionLeaderKey(i);
     const f = createFaction(i, teamIdx, picks[teamIdx], leaderKey, spawnPos.x, spawnPos.z, {
-      isBot: i !== 0,
+      // En multi : les sièges humains ne sont PAS des bots (sinon IA locale vs joueur réel)
+      isBot: isHuman ? false : i !== 0,
       aggr: botAggr,
       aiT: botAiT,
       fuel: FUEL_MAX,
     });
+    f.sessionId = seat?.sid || null;
     // Champs vue attachés (transitoire — migrera en Phase 1c)
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
@@ -3497,18 +3526,25 @@ function update(dt) {
     net.sendInput(_leaderTickInput.x, _leaderTickInput.z, false);
     const remoteLeaders = net.getLeaders();
     if (remoteLeaders) {
-      let i = 1;
       remoteLeaders.forEach((rl, sid) => {
-        if (net.isMe(sid)) return;
-        const f = factions[i];
+        if (net.isMe(sid)) {
+          // Autorité serveur aussi pour soi (évite la dérive client)
+          const me = factions[0];
+          if (me && rl.alive) {
+            const t = Math.min(1, dt * 8);
+            me.leader.x += (rl.x - me.leader.x) * t;
+            me.leader.z += (rl.z - me.leader.z) * t;
+          }
+          return;
+        }
+        const f = factions.find((x) => x.sessionId === sid) || null;
         if (f && rl.alive) {
-          // Interpolation douce vers la position serveur (évite les téléportations)
+          f.isBot = false;
           const t = Math.min(1, dt * 12);
           f.leader.x += (rl.x - f.leader.x) * t;
           f.leader.z += (rl.z - f.leader.z) * t;
           f.leader.dx = rl.dx; f.leader.dz = rl.dz;
         }
-        i++;
       });
     }
   }
@@ -3835,18 +3871,19 @@ async function startMultiGame(opts = {}) {
   }
 
   const players = () => net.getLeaders()?.size || 1;
-  onStatus(`Salon rejoint — ${players()}/2 joueurs (ouvre un 2ᵉ onglet)`);
-  banner(`🌐 En attente d'un 2ᵉ joueur… (${players()}/2)`);
+  const roomId = net.state.room?.roomId || '?';
+  onStatus(`Salon ${roomId} — ${players()}/2 joueurs`);
+  banner(`🌐 Salon ${roomId} — en attente (${players()}/2)`);
 
   net.onLeadersUpdate(() => {
     const n = players();
     if (net.state.phase === 'lobby') {
       onStatus(n < 2
-        ? `Salon rejoint — ${n}/2 joueurs (ouvre un 2ᵉ onglet)`
-        : `Joueurs prêts (${n}) — démarrage imminent…`);
+        ? `Salon ${roomId} — ${n}/2 joueurs (même salon requis)`
+        : `Joueurs prêts (${n}) — démarrage…`);
       banner(n < 2
-        ? `🌐 En attente d'un 2ᵉ joueur… (${n}/2)`
-        : `🌐 ${n} joueurs — la partie démarre…`);
+        ? `🌐 Salon ${roomId} — en attente (${n}/2)`
+        : `🌐 ${n} joueurs dans ${roomId} — ça démarre…`);
     }
   });
 
@@ -3855,6 +3892,12 @@ async function startMultiGame(opts = {}) {
     if (net.state.phase === 'play') return res();
     net.onPhaseChange(p => { if (p === 'play') res(); });
   });
+  if (players() < 2) {
+    banner('⚠ Pas assez de joueurs dans le salon — réessaie');
+    await net.leave();
+    onStatus(null);
+    return false;
+  }
   multiMode = true;
   conquest = null;
   onStatus(null);

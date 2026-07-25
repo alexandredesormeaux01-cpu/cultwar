@@ -16,6 +16,39 @@ function defaultServerUrl() {
   return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}`;
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Rejoindre en priorité un salon qui attend déjà des joueurs (évite 1 room / joueur). */
+async function joinSharedQuickplay(client, opts) {
+  let lastErr;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      const rooms = await client.getAvailableRooms('quickplay');
+      const open = rooms
+        .filter((r) => !r.locked && r.clients < (r.maxClients || 6))
+        .sort((a, b) => {
+          // Priorité : salons déjà occupés (quelqu'un attend), puis plus remplis
+          if (a.clients === 0 && b.clients > 0) return 1;
+          if (b.clients === 0 && a.clients > 0) return -1;
+          return b.clients - a.clients;
+        });
+      if (open[0] && open[0].clients > 0) {
+        return await client.joinById(open[0].roomId, opts);
+      }
+      if (open[0]) {
+        return await client.joinById(open[0].roomId, opts);
+      }
+      return await client.create('quickplay', opts);
+    } catch (e) {
+      lastErr = e;
+      await sleep(200 + Math.random() * 300);
+    }
+  }
+  throw lastErr || new Error('Impossible de rejoindre un salon');
+}
+
 export function createNetClient() {
   const state = {
     client: null,
@@ -33,15 +66,16 @@ export function createNetClient() {
   async function connect(opts = {}) {
     if (state.connected) return state.room;
     const url = opts.url || defaultServerUrl();
+    const joinOpts = {
+      name: opts.name || 'Anonyme',
+      leaderKey: opts.leaderKey || 'monk',
+    };
     const maxAttempts = 3;
     let lastErr;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       state.client = new Client(url);
       try {
-        state.room = await state.client.joinOrCreate('quickplay', {
-          name: opts.name || 'Anonyme',
-          leaderKey: opts.leaderKey || 'monk',
-        });
+        state.room = await joinSharedQuickplay(state.client, joinOpts);
         lastErr = null;
         break;
       } catch (e) {
@@ -50,7 +84,7 @@ export function createNetClient() {
           ? 'Connexion multi interrompue (souvent 2 machines Fly). Lance: fly scale count 1 -a cultwar --yes'
           : raw;
         if (!/seat reservation/i.test(raw) || attempt === maxAttempts) break;
-        await new Promise((r) => setTimeout(r, 400 * attempt));
+        await sleep(400 * attempt);
       }
     }
     if (lastErr) {
