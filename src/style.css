@@ -2305,6 +2305,17 @@ button.btn-secondary:hover {
   background-color: rgba(255,255,255,0.05);
   box-shadow: 0 0 12px color-mix(in srgb, var(--slot-color, #ffe259) 40%, transparent);
   position: relative;
+  padding: 0;
+}
+.lobby-strip-avatar.is-clickable { cursor: pointer; transition: transform 120ms; }
+.lobby-strip-avatar.is-clickable:hover { transform: scale(1.06); }
+.lobby-strip-avatar.is-clickable:active { transform: scale(0.94); }
+.lobby-strip-ia-badge {
+  position: absolute; top: -4px; left: -4px;
+  font-size: 9px; font-weight: 900; letter-spacing: 0.5px;
+  color: #1a1a1a; background: rgba(255,255,255,0.92);
+  padding: 1px 5px; border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.35);
 }
 .lobby-strip-avatar.is-host::before {
   content: '★'; position: absolute; top: -6px; right: -6px;
@@ -2491,6 +2502,52 @@ button.btn-secondary:hover {
   display: flex; align-items: center; justify-content: center;
   color: rgba(255,255,255,0.75); font-weight: 900;
 }
+
+/* --- Vue détail d'un bot dans le modal (portrait + difficulté + retrait) --- */
+.lobby-modal-grid.is-detail {
+  display: flex; flex-direction: column; align-items: stretch;
+  gap: 10px;
+}
+.lobby-bot-portrait {
+  width: 130px; height: 130px; margin: 4px auto 0;
+  border-radius: 50%; border: 3px solid #ffe259;
+  background-size: cover; background-position: top center;
+  background-color: rgba(255,255,255,0.05);
+}
+.lobby-bot-sub {
+  text-align: center; font-size: 13px; font-weight: 700;
+  color: #fff; opacity: 0.82;
+}
+.lobby-bot-section-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 1.4px;
+  text-transform: uppercase; opacity: 0.6;
+  margin-top: 6px;
+}
+.lobby-bot-diff-row {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
+}
+.lobby-bot-diff {
+  background: rgba(255,255,255,0.06);
+  border: 1.5px solid rgba(255,255,255,0.14);
+  color: #fff; padding: 8px 10px;
+  border-radius: 10px; font-weight: 700; font-size: 13px;
+  cursor: pointer; transition: all 120ms;
+}
+.lobby-bot-diff:hover { background: rgba(255,255,255,0.14); }
+.lobby-bot-diff.is-selected {
+  background: linear-gradient(90deg, #ffe259, #ffa751);
+  border-color: transparent; color: #1a1a1a;
+  box-shadow: 0 0 12px rgba(255,226,89,0.4);
+}
+.lobby-bot-remove {
+  margin-top: 4px;
+  background: rgba(255,90,90,0.14);
+  border: 1.5px solid rgba(255,90,90,0.45);
+  color: #ff9090; padding: 10px;
+  border-radius: 12px; font-weight: 700; font-size: 13px;
+  cursor: pointer; transition: all 120ms;
+}
+.lobby-bot-remove:hover { background: rgba(255,90,90,0.22); color: #ffb0b0; }
 
 @media (max-width: 480px) {
   .panel { padding: 10px 10px; }

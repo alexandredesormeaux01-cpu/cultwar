@@ -4328,6 +4328,7 @@ function openLobbyPicker(kind) {
   const me = net.getSlots().find(s => s.sessionId === mySid);
   if (!me) return;
 
+  grid.className = 'lobby-modal-grid';
   grid.replaceChildren();
   if (kind === 'color') {
     title.textContent = 'Couleur divine';
@@ -4381,6 +4382,67 @@ function closeLobbyPicker() {
   $('lobby-picker-modal').classList.add('hidden');
 }
 
+/* Vue de gestion d'un bot (hôte uniquement) : grand portrait, sélecteur de
+   difficulté et bouton pour retirer l'IA. Ouvert en tapant sur son avatar. */
+function openLobbyBotDetail(botId) {
+  const bot = net.getSlots().find(s => s.id === botId);
+  if (!bot) return;
+  const key = (bot.leaderKey && LOBBY_AVATARS[bot.leaderKey]) ? bot.leaderKey : 'monk';
+  const hex = '#' + ((bot.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+  const modal = $('lobby-picker-modal');
+  const title = $('lobby-modal-title');
+  const grid = $('lobby-modal-grid');
+  title.textContent = bot.name || 'IA';
+  grid.className = 'lobby-modal-grid is-detail';
+  grid.replaceChildren();
+
+  const portrait = document.createElement('div');
+  portrait.className = 'lobby-bot-portrait';
+  portrait.style.borderColor = hex;
+  portrait.style.boxShadow = `0 0 18px ${hex}55`;
+  portrait.style.backgroundImage = `url('${LOBBY_PORTRAITS[key] || LOBBY_AVATARS[key]}')`;
+  grid.append(portrait);
+
+  const sub = document.createElement('div');
+  sub.className = 'lobby-bot-sub';
+  sub.textContent = LOBBY_LEADER_NAMES[key] || key;
+  grid.append(sub);
+
+  const diffLabel = document.createElement('div');
+  diffLabel.className = 'lobby-bot-section-label';
+  diffLabel.textContent = 'Difficulté';
+  grid.append(diffLabel);
+
+  const diffRow = document.createElement('div');
+  diffRow.className = 'lobby-bot-diff-row';
+  for (const d of DIFF_CYCLE) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'lobby-bot-diff' + (bot.difficulty === d ? ' is-selected' : '');
+    b.textContent = DIFF_LABEL[d];
+    b.addEventListener('click', () => {
+      net.setBotDiff(botId, d);
+      // Rafraîchit l'état sélectionné dans le modal ouvert
+      diffRow.querySelectorAll('button').forEach(x => x.classList.remove('is-selected'));
+      b.classList.add('is-selected');
+    });
+    diffRow.append(b);
+  }
+  grid.append(diffRow);
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'lobby-bot-remove';
+  remove.textContent = '✕  Retirer cette IA';
+  remove.addEventListener('click', () => {
+    net.removeBot(botId);
+    closeLobbyPicker();
+  });
+  grid.append(remove);
+
+  modal.classList.remove('hidden');
+}
+
 /* Utilitaire : fusionner quelques champs dans le save local sans écraser le reste. */
 function persistSave(patch) {
   try {
@@ -4414,10 +4476,12 @@ function renderLobbySlots(slots) {
     cell.className = 'lobby-strip-slot';
     cell.style.setProperty('--slot-color', hex);
 
-    const av = document.createElement('div');
+    const av = document.createElement('button');
+    av.type = 'button';
     av.className = 'lobby-strip-avatar' + (s.isHost ? ' is-host' : '');
     av.style.backgroundImage = `url('${LOBBY_AVATARS[key]}')`;
 
+    // Pastille symbole de religion en bas à droite
     const sym = document.createElement('div');
     sym.className = 'lobby-strip-sym';
     sym.style.backgroundColor = hex;
@@ -4428,34 +4492,28 @@ function renderLobbySlots(slots) {
       sym.textContent = symStr || '✦';
     }
     av.append(sym);
+
+    // Pastille « IA » discrète pour distinguer bots et humains sans encombrer
+    if (s.kind === 'bot') {
+      const iaBadge = document.createElement('div');
+      iaBadge.className = 'lobby-strip-ia-badge';
+      iaBadge.textContent = 'IA';
+      av.append(iaBadge);
+    }
+
+    // Sur un tap : ouvrir la vue de gestion (hôte + bots uniquement)
+    if (host && s.kind === 'bot') {
+      av.classList.add('is-clickable');
+      av.title = 'Gérer cette IA';
+      av.addEventListener('click', () => openLobbyBotDetail(s.id));
+    }
+
     cell.append(av);
 
     const nm = document.createElement('div');
     nm.className = 'lobby-strip-name';
     nm.textContent = s.name || 'Joueur';
     cell.append(nm);
-
-    if (host && s.kind === 'bot') {
-      const actions = document.createElement('div');
-      actions.className = 'lobby-strip-actions';
-      const diffBtn = document.createElement('button');
-      diffBtn.type = 'button';
-      diffBtn.textContent = (DIFF_LABEL[s.difficulty] || 'Normal').slice(0, 3);
-      diffBtn.title = 'Difficulté : ' + (DIFF_LABEL[s.difficulty] || 'Normal');
-      diffBtn.addEventListener('click', () => {
-        const i = DIFF_CYCLE.indexOf(s.difficulty);
-        const next = DIFF_CYCLE[(i + 1) % DIFF_CYCLE.length];
-        net.setBotDiff(s.id, next);
-      });
-      const kick = document.createElement('button');
-      kick.type = 'button';
-      kick.className = 'kick';
-      kick.textContent = '✕';
-      kick.title = 'Retirer';
-      kick.addEventListener('click', () => net.removeBot(s.id));
-      actions.append(diffBtn, kick);
-      cell.append(actions);
-    }
 
     strip.append(cell);
   }
