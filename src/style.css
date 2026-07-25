@@ -2282,6 +2282,35 @@ button.btn-secondary:hover {
   color: rgba(255,255,255,0.65); font-weight: 900; font-size: 60%;
 }
 
+/* --- Réglage distance caméra dans le menu principal --- */
+.menu-cam-setting {
+  margin-top: 14px; display: flex; flex-direction: column;
+  align-items: center; gap: 6px;
+}
+.menu-cam-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 1.4px;
+  text-transform: uppercase; opacity: 0.62;
+}
+.cam-dist-picker {
+  display: inline-flex; gap: 4px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 999px; padding: 3px;
+}
+.cam-dist-btn {
+  background: transparent; border: none;
+  color: rgba(255,255,255,0.7);
+  padding: 6px 14px; border-radius: 999px;
+  font-weight: 700; font-size: 12px; cursor: pointer;
+  transition: all 120ms;
+}
+.cam-dist-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
+.cam-dist-btn.is-selected {
+  background: linear-gradient(90deg, #ffe259, #ffa751);
+  color: #1a1a1a;
+  box-shadow: 0 0 10px rgba(255,226,89,0.35);
+}
+
 /* --- Lobby v4 : bande d'avatars en haut, carrousel + pastilles en bas --- */
 .lobby-strip { text-align: left; }
 .lobby-strip-row {

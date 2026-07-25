@@ -105,6 +105,13 @@ const SHARED_PARTICLE_GEO = new THREE.DodecahedronGeometry(1, 0);
 const _particleMatCache = new Map();   // couleur d'instance neutre du paysan (corps non teinté)
 let currentDifficulty = localStorage.getItem('cultio_difficulty') || 'normal';
 
+/* Distance caméra (menu) : multiplie hauteur + recul sans changer l'angle iso. */
+const CAM_DIST_MUL = { near: 0.78, mid: 1.0, far: 1.32 };
+const CAM_DIST_KEY = 'cultio_cam_dist';
+let currentCamDist = localStorage.getItem(CAM_DIST_KEY) || 'mid';
+if (!(currentCamDist in CAM_DIST_MUL)) currentCamDist = 'mid';
+let camDistMul = CAM_DIST_MUL[currentCamDist];
+
 /* ============================== Rendu ============================== */
 const isCoarse = matchMedia('(pointer: coarse)').matches;
 const renderer = new THREE.WebGLRenderer({
@@ -3888,9 +3895,11 @@ function update(dt) {
   if (hudT <= 0) { hudT = 0.25; updateHUD(); drawMinimap(); }
   updateBanner(dt);
 
-  /* -- Caméra (vue isométrique claire et équilibrée) -- */
+  /* -- Caméra (vue isométrique claire et équilibrée). Le facteur `camDistMul`
+        vient du réglage utilisateur (Proche/Standard/Éloignée) : il multiplie
+        à la fois la hauteur et le recul, préservant l'angle iso. -- */
   const me = factions[0];
-  const zoom = Math.min(26 + Math.sqrt(me.count) * 0.8, 44);
+  const zoom = Math.min(26 + Math.sqrt(me.count) * 0.8, 44) * camDistMul;
   _camTarget.set(me.leader.x, zoom * 0.88, me.leader.z + zoom * 0.68);
   camPos.lerp(_camTarget, Math.min(1, dt * CAM_RESP));
   shake = Math.max(0, shake - dt);
@@ -3940,6 +3949,30 @@ if (diffContainer) {
       localStorage.setItem('cultio_difficulty', currentDifficulty);
       diffContainer.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('sel'));
       btn.classList.add('sel');
+    });
+  });
+}
+
+/* Réglage vue caméra (Proche / Standard / Éloignée) — persistant, appliqué
+   dès la prochaine frame de partie via `camDistMul`. */
+const camDistPicker = $('cam-dist-picker');
+if (camDistPicker) {
+  const syncCamDistUI = () => {
+    camDistPicker.querySelectorAll('.cam-dist-btn').forEach((btn) => {
+      btn.classList.toggle('is-selected', btn.dataset.dist === currentCamDist);
+    });
+  };
+  syncCamDistUI();
+  camDistPicker.querySelectorAll('.cam-dist-btn').forEach((btn) => {
+    btn.addEventListener('pointerdown', () => {
+      const key = btn.dataset.dist;
+      if (!(key in CAM_DIST_MUL)) return;
+      audioInit();
+      soundEngine.playUIClick();
+      currentCamDist = key;
+      camDistMul = CAM_DIST_MUL[key];
+      localStorage.setItem(CAM_DIST_KEY, key);
+      syncCamDistUI();
     });
   });
 }
