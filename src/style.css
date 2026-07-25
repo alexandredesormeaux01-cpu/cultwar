@@ -2310,6 +2310,7 @@ button.btn-secondary:hover {
   color: #1a1a1a;
   box-shadow: 0 0 10px rgba(255,226,89,0.35);
 }
+.menu-cam-setting + .menu-cam-setting { margin-top: 10px; }
 
 /* --- Lobby v4 : bande d'avatars en haut, carrousel + pastilles en bas --- */
 .lobby-strip { text-align: left; }

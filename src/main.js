@@ -112,23 +112,53 @@ let currentCamDist = localStorage.getItem(CAM_DIST_KEY) || 'mid';
 if (!(currentCamDist in CAM_DIST_MUL)) currentCamDist = 'mid';
 let camDistMul = CAM_DIST_MUL[currentCamDist];
 
-/* ============================== Rendu ============================== */
+/* Qualité graphique (menu) : DPR + AA + ombres. Sur tactile, défaut = équilibré
+   (netteté sans ombres coûteuses) plutôt que l'ancien « tout coupé ». */
 const isCoarse = matchMedia('(pointer: coarse)').matches;
+const GRAPHICS = {
+  low:  { maxDpr: 1.0, aa: false, shadows: false },
+  mid:  { maxDpr: 1.5, aa: true,  shadows: false },
+  high: { maxDpr: 2.0, aa: true,  shadows: true },
+};
+const GRAPHICS_KEY = 'cultio_graphics';
+let currentGraphics = localStorage.getItem(GRAPHICS_KEY) || (isCoarse ? 'mid' : 'high');
+if (!(currentGraphics in GRAPHICS)) currentGraphics = isCoarse ? 'mid' : 'high';
+const gfx = () => GRAPHICS[currentGraphics];
+const gfxShadows = () => gfx().shadows;
+
+/* ============================== Rendu ============================== */
 const renderer = new THREE.WebGLRenderer({
-  antialias: !isCoarse,
+  antialias: gfx().aa,
   powerPreference: 'high-performance',
 });
-renderer.setPixelRatio(Math.min(devicePixelRatio, isCoarse ? 1.0 : 2.0));
-renderer.setSize(innerWidth, innerHeight);
-renderer.shadowMap.enabled = !isCoarse;
+/* L'antialias est figé au contexte WebGL : si l'utilisateur change de palier
+   AA, on recharge pour recréer le renderer. */
+const _bootGfxAA = gfx().aa;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.12;
 document.getElementById('app').appendChild(renderer.domElement);
 
+/** Applique DPR + ombres (l'AA est figé à la création du contexte WebGL). */
+function applyGraphicsQuality() {
+  const g = gfx();
+  renderer.setPixelRatio(Math.min(devicePixelRatio, g.maxDpr));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = g.shadows;
+  scene?.traverse?.((o) => {
+    if (!o.isMesh && !o.isInstancedMesh) return;
+    if (o.userData.forceNoShadow) return;
+    if (o.userData.shadowable) {
+      o.castShadow = g.shadows;
+      o.receiveShadow = g.shadows || o.receiveShadow;
+    }
+  });
+}
+
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fdcff);
 scene.fog = new THREE.Fog(0x9fdcff, 70, 165);
+applyGraphicsQuality();
 
 // Poignée de debug console : window.__cult.info() → draw calls / triangles ;
 // window.__cult.toggleNature() → montre/cache le décor pour isoler son coût.
@@ -223,7 +253,7 @@ scene.add(lampGlow);
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
+  applyGraphicsQuality();
 });
 
 /* ============================== Carte : archipel hexagonal par biome ============================== */
@@ -384,7 +414,8 @@ function buildMap(biomeKey = 'temperate') {
     // Manche en bois
     const shaft = new THREE.Mesh(torchGeoBase, torchMatBase);
     shaft.position.y = 0.45;
-    shaft.castShadow = !isCoarse;
+    shaft.castShadow = gfxShadows();
+    shaft.userData.shadowable = true;
     torchGrp.add(shaft);
     // Tête de torche (anneau de paille)
     const head = new THREE.Mesh(torchGeoHead, torchMatHead);
@@ -467,7 +498,8 @@ for (let v = 0; v < 3; v++) {
     slots
   );
   m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  m.castShadow = !isCoarse;
+  m.castShadow = gfxShadows();
+  m.userData.shadowable = true;
   m.frustumCulled = false;
   // par instance : x = phase de marche (fixe), y = amplitude de marche (lissée)
   const anim = new THREE.InstancedBufferAttribute(new Float32Array(slots * 2), 2);
@@ -3991,6 +4023,34 @@ if (camDistPicker) {
       camDistMul = CAM_DIST_MUL[key];
       localStorage.setItem(CAM_DIST_KEY, key);
       syncCamDistUI();
+    });
+  });
+}
+
+/* Qualité graphique (Perf. / Équilibré / Belle). DPR + ombres tout de suite ;
+   changement d'antialias → reload (contrainte WebGL). */
+const gfxPicker = $('gfx-picker');
+if (gfxPicker) {
+  const syncGfxUI = () => {
+    gfxPicker.querySelectorAll('.cam-dist-btn').forEach((btn) => {
+      btn.classList.toggle('is-selected', btn.dataset.gfx === currentGraphics);
+    });
+  };
+  syncGfxUI();
+  gfxPicker.querySelectorAll('.cam-dist-btn').forEach((btn) => {
+    btn.addEventListener('pointerdown', () => {
+      const key = btn.dataset.gfx;
+      if (!(key in GRAPHICS)) return;
+      audioInit();
+      soundEngine.playUIClick();
+      currentGraphics = key;
+      localStorage.setItem(GRAPHICS_KEY, key);
+      syncGfxUI();
+      if (GRAPHICS[key].aa !== _bootGfxAA) {
+        location.reload();
+        return;
+      }
+      applyGraphicsQuality();
     });
   });
 }
