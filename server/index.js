@@ -28,4 +28,7 @@ gameServer.define('quickplay', QuickplayRoom);
 gameServer.listen(PORT).then(() => {
   console.log(`cult-io server listening on :${PORT}`);
   console.log(`  → ws://localhost:${PORT}   (rooms: quickplay)`);
+}).catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
