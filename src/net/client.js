@@ -194,9 +194,13 @@ export function createNetClient() {
         const taken = [...state._slots.values()].some(s => s.id !== sid && s.cultColor === cult.c);
         if (!taken) {
           slot.cultColor = cult.c;
-          slot.cultSym = cult.sym;
+          // couleur seule : le symbole reste celui du joueur (custom possible)
+          if (!slot.cultSym) slot.cultSym = cult.sym;
         }
       }
+    }
+    if (msg.cultSym && typeof msg.cultSym === 'string') {
+      slot.cultSym = msg.cultSym.slice(0, 512);   // laisse la place aux data URIs
     }
     if (msg.name && typeof msg.name === 'string') {
       slot.name = msg.name.slice(0, 20);

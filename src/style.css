@@ -2092,7 +2092,7 @@ button.btn-secondary:hover {
 .lobby-card.is-bot .lobby-card-frame { filter: saturate(0.85); }
 .multi-panel-inner { max-width: min(96vw, 640px); width: min(96vw, 640px); }
 
-/* ============================ Lobby v2 (mobile-first) ============================ */
+/* ============================ Lobby v3 (mobile-first) ============================ */
 .lobby-layout {
   display: flex; flex-direction: column; gap: 14px;
   max-height: 92vh; overflow-y: auto;
@@ -2116,38 +2116,113 @@ button.btn-secondary:hover {
   color: #ffe259; letter-spacing: 3px;
 }
 
+.lobby-section-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 1.4px;
+  text-transform: uppercase; opacity: 0.68;
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px;
+}
+.lobby-players-count {
+  font-weight: 900; color: #ffe259;
+}
+
+/* ---- Liste des joueurs (haut) : style « save-card » compact ---- */
+.lobby-players { text-align: left; }
+.lobby-players-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 40vh; overflow-y: auto;
+}
+.lobby-player-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 12px;
+  background: linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+  border: 1.5px solid color-mix(in srgb, var(--slot-color, #ffe259) 45%, rgba(255,255,255,0.12));
+}
+.lobby-player-row.is-host {
+  border-color: color-mix(in srgb, var(--slot-color) 60%, #ffe259);
+  box-shadow: 0 0 12px rgba(255,226,89,0.15);
+}
+.lobby-player-row.is-me {
+  background: linear-gradient(135deg, rgba(255,226,89,0.08), rgba(255,255,255,0.02));
+}
+.lobby-player-avatar {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 2px solid var(--slot-color, #ffe259);
+  background-size: cover; background-position: center top;
+  background-color: rgba(255,255,255,0.05);
+  flex-shrink: 0;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--slot-color, #ffe259) 40%, transparent);
+}
+.lobby-player-details {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+}
+.lobby-player-name {
+  font-weight: 800; font-size: 14px; color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lobby-player-sub {
+  font-size: 11px; opacity: 0.7;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lobby-player-badge {
+  font-size: 9px; font-weight: 900; letter-spacing: 1px;
+  padding: 2px 6px; border-radius: 6px;
+  background: rgba(255,226,89,0.22); color: #ffe259;
+}
+.lobby-player-icon {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 1.5px solid #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; background-size: cover; background-position: center;
+  flex-shrink: 0;
+}
+.lobby-player-actions { display: flex; gap: 4px; }
+.lobby-btn-diff, .lobby-btn-kick {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.14);
+  color: #fff; border-radius: 8px;
+  font-size: 11px; font-weight: 700;
+  padding: 4px 8px; cursor: pointer;
+  transition: background 120ms;
+}
+.lobby-btn-diff:hover, .lobby-btn-kick:hover { background: rgba(255,255,255,0.18); }
+.lobby-btn-kick { color: #ff9090; }
+
+.lobby-add-bot-row {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 10px;
+  border-radius: 12px; cursor: pointer;
+  border: 1.5px dashed rgba(255,255,255,0.22);
+  background: rgba(255,255,255,0.02);
+  color: #ffe259; font-weight: 700; font-size: 13px;
+  transition: background 120ms, border-color 120ms;
+}
+.lobby-add-bot-row:hover { background: rgba(255,226,89,0.06); border-color: rgba(255,226,89,0.45); }
+.lobby-add-bot-row:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ---- Ma configuration (bas) ---- */
 .lobby-me-card {
   background: rgba(255,255,255,0.045);
   border: 1px solid rgba(255,255,255,0.10);
   border-radius: 14px; padding: 12px; text-align: left;
   display: flex; flex-direction: column; gap: 12px;
 }
-.lobby-me-header {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  flex-wrap: wrap;
+.lobby-field { display: flex; flex-direction: column; gap: 6px; }
+.lobby-field .lbl2 {
+  font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
+  text-transform: uppercase; opacity: 0.65;
 }
-.lobby-me-label {
-  font-size: 12px; font-weight: 700; letter-spacing: 1.5px;
-  text-transform: uppercase; opacity: 0.72;
-}
-.lobby-me-name {
-  flex: 1; min-width: 140px;
+.lobby-field input[type="text"], #lobby-me-name {
   background: rgba(0,0,0,0.35);
   border: 1px solid rgba(255,255,255,0.14);
-  color: #fff; padding: 8px 10px; border-radius: 10px;
+  color: #fff; padding: 9px 12px; border-radius: 10px;
   font: inherit; font-weight: 700; font-size: 14px;
+  width: 100%;
 }
-.lobby-me-name:focus { outline: none; border-color: rgba(255,226,89,0.65); }
+#lobby-me-name:focus { outline: none; border-color: rgba(255,226,89,0.65); }
 
-.lobby-picker { display: flex; flex-direction: column; gap: 8px; }
-.lobby-picker-label {
-  font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
-  text-transform: uppercase; opacity: 0.62;
-}
-
-.lobby-leader-grid {
-  display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
-}
+.lobby-leader-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
 .lobby-leader-cell {
   aspect-ratio: 1; border-radius: 12px; overflow: hidden;
   border: 2px solid rgba(255,255,255,0.10);
@@ -2166,9 +2241,25 @@ button.btn-secondary:hover {
   box-shadow: 0 0 12px rgba(255,226,89,0.4);
 }
 
-.lobby-color-grid {
-  display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px;
+.lobby-icon-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px;
 }
+.lobby-icon-cell {
+  aspect-ratio: 1; border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.14);
+  background: rgba(0,0,0,0.4);
+  color: #fff; font-size: 15px;
+  cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 120ms, transform 120ms;
+}
+.lobby-icon-cell:active { transform: scale(0.9); }
+.lobby-icon-cell.is-selected {
+  border-color: #ffe259; background: rgba(255,226,89,0.18);
+  box-shadow: 0 0 10px rgba(255,226,89,0.35);
+}
+
+.lobby-color-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
 .lobby-color-cell {
   aspect-ratio: 1; border-radius: 50%;
   border: 3px solid rgba(255,255,255,0.10);
@@ -2191,20 +2282,10 @@ button.btn-secondary:hover {
   color: rgba(255,255,255,0.65); font-weight: 900; font-size: 60%;
 }
 
-.lobby-players { text-align: left; }
-.lobby-players-label {
-  font-size: 11px; font-weight: 700; letter-spacing: 1.2px;
-  text-transform: uppercase; opacity: 0.62; margin-bottom: 6px;
-}
-
-/* Écrans étroits : plus petits mais toujours accessibles au doigt */
 @media (max-width: 480px) {
-  .panel { padding: 16px 12px; }
+  .panel { padding: 14px 12px; }
   .multi-panel-inner { max-width: 100vw; width: 100vw; border-radius: 0; }
-  .overlay { padding: 8px; }
+  .overlay { padding: 6px; }
   .lobby-layout { max-height: 100vh; }
-  .lobby-slots { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
-  .lobby-card-body { padding: 6px 8px 8px; }
-  .lobby-card-name { font-size: 12px; }
-  .lobby-card-perso { font-size: 10px; }
+  .lobby-icon-grid { grid-template-columns: repeat(7, 1fr); }
 }

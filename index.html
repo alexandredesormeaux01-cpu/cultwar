@@ -136,30 +136,39 @@
           <p class="tag" id="lobby-hint">Partage le code. Jusqu'à 6 places (joueurs + IA).</p>
         </header>
 
+        <section class="lobby-players">
+          <div class="lobby-section-title">
+            <span>Joueurs</span>
+            <span id="lobby-players-count" class="lobby-players-count">0/6</span>
+          </div>
+          <ul id="lobby-slots" class="lobby-players-list"></ul>
+        </section>
+
         <section class="lobby-me-card" id="lobby-me-card">
-          <div class="lobby-me-header">
-            <span class="lobby-me-label">Ton choix</span>
-            <input id="lobby-me-name" class="lobby-me-name" maxlength="20" placeholder="Ton nom" />
+          <div class="lobby-section-title">Ta configuration</div>
+
+          <div class="lobby-field">
+            <label class="lbl2">Nom du Prophète</label>
+            <input id="lobby-me-name" maxlength="20" placeholder="Ton nom" />
           </div>
 
-          <div class="lobby-picker">
-            <div class="lobby-picker-label">Personnage</div>
+          <div class="lobby-field">
+            <label class="lbl2">Personnage</label>
             <div id="lobby-leader-picker" class="lobby-leader-grid"></div>
           </div>
 
-          <div class="lobby-picker">
-            <div class="lobby-picker-label">Couleur</div>
+          <div class="lobby-field">
+            <label class="lbl2">Symbole de la religion</label>
+            <div id="lobby-icon-picker" class="lobby-icon-grid"></div>
+          </div>
+
+          <div class="lobby-field">
+            <label class="lbl2">Couleur divine</label>
             <div id="lobby-color-picker" class="lobby-color-grid"></div>
           </div>
         </section>
 
-        <section class="lobby-players">
-          <div class="lobby-players-label">Joueurs dans le salon</div>
-          <ul id="lobby-slots" class="lobby-slots"></ul>
-        </section>
-
         <div id="lobby-host-actions" class="menu-actions hidden">
-          <button id="btn-lobby-add-bot" class="secondary-btn">+ Ajouter une IA</button>
           <button id="btn-lobby-start" class="big">Lancer la partie</button>
         </div>
         <p id="lobby-guest-hint" class="tag hidden">En attente que l'hôte lance la partie…</p>

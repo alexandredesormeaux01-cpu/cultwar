@@ -4038,6 +4038,25 @@ async function startMultiGame(opts = {}) {
     return false;
   }
 
+  /* Synchronise immédiatement les choix pré-remplis (perso, couleur, symbole,
+     nom) depuis la campagne locale vers l'hôte. Les invités s'auto-envoient
+     leur config ; l'hôte l'applique aussi à son propre siège. */
+  {
+    const save = (() => {
+      try { return JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}'); }
+      catch (_) { return {}; }
+    })();
+    const choice = {};
+    if (save.playerLeader && LEADERS[save.playerLeader]) choice.leaderKey = save.playerLeader;
+    if (save.playerColor) {
+      const hex = parseInt(save.playerColor.replace('#', ''), 16);
+      if (!isNaN(hex)) choice.cultColor = hex;
+    }
+    if (save.religionIcon) choice.cultSym = save.religionIcon;
+    if (save.playerName) choice.name = save.playerName;
+    if (Object.keys(choice).length) net.setChoice(choice);
+  }
+
   onLobby(net.getSlots());
 
   /* Listener persistant : gère la partie initiale, mais aussi les rematches
@@ -4202,6 +4221,7 @@ const LOBBY_LEADER_NAMES = {
   amazon: 'Amazone', alien: 'Extraterrestre', chief: 'Chef des Nations',
 };
 const LOBBY_LEADER_ORDER = ['monk', 'sorcerer', 'nomad', 'amazon', 'alien', 'chief'];
+const LOBBY_SYMBOLS = ['✝', '☪', '🕉', '☸', '✡', '⛩', '☯', '☬', '🔥', '👁', '🔱', '👑', '☀', '✦'];
 
 /* Rendu du panneau « Ton choix » : perso, couleur, nom. Les couleurs prises par
    les autres sièges sont grisées pour éviter les collisions ; le perso peut être
@@ -4214,6 +4234,7 @@ function renderMeCard(slots) {
   const nameEl = $('lobby-me-name');
   if (nameEl && document.activeElement !== nameEl) nameEl.value = me.name || '';
 
+  // Personnages
   const leaderPicker = $('lobby-leader-picker');
   leaderPicker.replaceChildren();
   for (const k of LOBBY_LEADER_ORDER) {
@@ -4233,6 +4254,23 @@ function renderMeCard(slots) {
     leaderPicker.append(btn);
   }
 
+  // Symboles de religion
+  const iconPicker = $('lobby-icon-picker');
+  iconPicker.replaceChildren();
+  const currentSym = me.cultSym || '✦';
+  for (const sym of LOBBY_SYMBOLS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lobby-icon-cell' + (currentSym === sym ? ' is-selected' : '');
+    btn.textContent = sym;
+    btn.addEventListener('click', () => {
+      persistSave({ religionIcon: sym });
+      net.setChoice({ cultSym: sym });
+    });
+    iconPicker.append(btn);
+  }
+
+  // Couleurs
   const colorPicker = $('lobby-color-picker');
   colorPicker.replaceChildren();
   const cults = net.availableCults();
@@ -4248,7 +4286,6 @@ function renderMeCard(slots) {
       + (isTaken && !isMine ? ' is-taken' : '');
     btn.style.background = hex;
     btn.style.color = hex;
-    btn.title = c.sym;
     if (!isTaken || isMine) {
       btn.addEventListener('click', () => {
         const ci = CULTS.findIndex(x => x.c === c.c);
@@ -4280,90 +4317,103 @@ function renderLobbySlots(slots) {
   $('lobby-host-actions').classList.toggle('hidden', !host);
   $('lobby-guest-hint').classList.toggle('hidden', host);
   $('lobby-hint').textContent = host
-    ? `Partage le code, ajoute des IA ou attends d'autres joueurs (max 6), puis lance.`
+    ? `Partage le code, ajoute des IA ou attends d'autres joueurs, puis lance.`
     : `En attente que l'hôte lance la partie.`;
 
   renderMeCard(slots);
 
-  list.replaceChildren();
   const ordered = [...(slots || [])];
+  const n = ordered.length;
+  $('lobby-players-count').textContent = `${n}/6`;
+
+  list.replaceChildren();
 
   for (const s of ordered) {
     const key = (s.leaderKey && LOBBY_AVATARS[s.leaderKey]) ? s.leaderKey : 'monk';
     const hex = `#${((s.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
+    const isMe = s.kind === 'human' && net.isMe(s.sessionId);
+
     const li = document.createElement('li');
-    li.className = 'lobby-card' + (s.isHost ? ' is-host' : '') + (s.kind === 'bot' ? ' is-bot' : '');
+    li.className = 'lobby-player-row'
+      + (s.isHost ? ' is-host' : '')
+      + (isMe ? ' is-me' : '');
     li.style.setProperty('--slot-color', hex);
 
-    const frame = document.createElement('div');
-    frame.className = 'lobby-card-frame';
-    const img = document.createElement('img');
-    img.className = 'lobby-card-portrait';
-    img.src = LOBBY_PORTRAITS[key] || LOBBY_AVATARS[key];
-    img.alt = LOBBY_LEADER_NAMES[key] || key;
-    frame.append(img);
+    const avatar = document.createElement('div');
+    avatar.className = 'lobby-player-avatar';
+    avatar.style.backgroundImage = `url('${LOBBY_AVATARS[key]}')`;
 
-    const body = document.createElement('div');
-    body.className = 'lobby-card-body';
-    const top = document.createElement('div');
-    top.className = 'lobby-card-top';
-    const avatar = document.createElement('img');
-    avatar.className = 'lobby-card-avatar';
-    avatar.src = LOBBY_AVATARS[key];
-    avatar.alt = '';
-    const titles = document.createElement('div');
-    titles.className = 'lobby-card-titles';
+    const details = document.createElement('div');
+    details.className = 'lobby-player-details';
     const name = document.createElement('div');
-    name.className = 'lobby-card-name';
-    name.textContent = `${s.cultSym || ''} ${s.name}`.trim();
-    const perso = document.createElement('div');
-    perso.className = 'lobby-card-perso';
-    perso.textContent = s.kind === 'bot'
-      ? `IA · ${LOBBY_LEADER_NAMES[key] || key}`
+    name.className = 'lobby-player-name';
+    name.textContent = s.name || 'Joueur';
+    const sub = document.createElement('div');
+    sub.className = 'lobby-player-sub';
+    sub.textContent = s.kind === 'bot'
+      ? `IA · ${DIFF_LABEL[s.difficulty] || 'Normal'} · ${LOBBY_LEADER_NAMES[key] || key}`
       : (LOBBY_LEADER_NAMES[key] || key);
-    titles.append(name, perso);
-    top.append(avatar, titles);
-    body.append(top);
+    details.append(name, sub);
+
+    li.append(avatar, details);
 
     if (s.isHost) {
       const badge = document.createElement('span');
-      badge.className = 'lobby-badge';
+      badge.className = 'lobby-player-badge';
       badge.textContent = 'HÔTE';
-      body.append(badge);
+      li.append(badge);
     }
+
+    const icon = document.createElement('div');
+    icon.className = 'lobby-player-icon';
+    icon.style.backgroundColor = hex;
+    const sym = s.cultSym || '';
+    if (sym.startsWith('data:') || sym.startsWith('http')) {
+      icon.style.backgroundImage = `url(${sym})`;
+    } else {
+      icon.textContent = sym || '✦';
+    }
+    li.append(icon);
 
     if (host && s.kind === 'bot') {
       const actions = document.createElement('div');
-      actions.className = 'lobby-slot-actions';
+      actions.className = 'lobby-player-actions';
       const diffBtn = document.createElement('button');
-      diffBtn.className = 'lobby-diff-btn';
+      diffBtn.className = 'lobby-btn-diff';
       diffBtn.type = 'button';
       diffBtn.textContent = DIFF_LABEL[s.difficulty] || s.difficulty;
-      diffBtn.title = 'Changer la difficulté';
       diffBtn.addEventListener('click', () => {
         const i = DIFF_CYCLE.indexOf(s.difficulty);
         const next = DIFF_CYCLE[(i + 1) % DIFF_CYCLE.length];
         net.setBotDiff(s.id, next);
       });
       const kick = document.createElement('button');
-      kick.className = 'lobby-kick-btn';
+      kick.className = 'lobby-btn-kick';
       kick.type = 'button';
       kick.textContent = '✕';
       kick.title = 'Retirer cette IA';
       kick.addEventListener('click', () => net.removeBot(s.id));
       actions.append(diffBtn, kick);
-      body.append(actions);
+      li.append(actions);
     }
 
-    li.append(frame, body);
     list.append(li);
   }
 
-  const n = ordered.length;
-  $('btn-lobby-add-bot').disabled = n >= 6;
+  if (host && n < 6) {
+    const add = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lobby-add-bot-row';
+    btn.textContent = '+  Ajouter une IA';
+    btn.addEventListener('click', () => net.addBot('normal'));
+    add.append(btn);
+    list.append(add);
+  }
+
   $('btn-lobby-start').disabled = n < 2;
   $('btn-lobby-start').textContent = n < 2
-    ? 'Il faut au moins 2 places'
+    ? 'Il faut au moins 2 joueurs'
     : `Lancer la partie (${n}/6)`;
 }
 
@@ -4420,7 +4470,8 @@ async function exitMultiToMenu() {
 $('btn-multi-back').addEventListener('click', leaveMultiToMenu);
 $('btn-lobby-leave').addEventListener('click', leaveMultiToMenu);
 
-$('btn-lobby-add-bot').addEventListener('click', () => net.addBot('normal'));
+/* Le bouton « + Ajouter une IA » est désormais rendu inline dans la liste des
+   joueurs (renderLobbySlots), pas dans un panneau d'actions séparé. */
 $('btn-lobby-start').addEventListener('click', () => net.requestStart());
 
 /* Édition du nom : on n'envoie qu'à la sortie du champ ou après une courte
