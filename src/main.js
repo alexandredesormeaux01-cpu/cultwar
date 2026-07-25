@@ -3686,20 +3686,14 @@ function update(dt) {
         });
       }
     }
-    /* -- Fin de match synchronisée : seul l'hôte décide (via son chrono local).
-          L'invité attend le message `over` de l'hôte pour clôturer le match, sinon
-          chacun terminait sur son propre `elapsed` avec un classement stale et
-          les deux joueurs pouvaient se croire 1er. -- */
+    /* -- Fin de match : chacun clôt sur son propre chrono (les frames étant
+          quasi identiques, le delta reste <100 ms). L'hôte diffuse aussi le
+          message `over` pour synchroniser le podium (via netRank), et
+          couvrir un client dont le chrono aurait dérivé. -- */
     if (net.isHost() && elapsed >= MATCH_DUR && net.state.phase !== 'over') {
       net.endMatch();
     }
     if (net.state.phase === 'over') { endGame(); return; }
-    /* -- Filet de sécurité invité : si le message `over` n'arrive jamais
-          (onglet hôte en arrière-plan, connexion instable, mobile en veille),
-          on termine tout de même quelques secondes après l'échéance officielle
-          pour ne pas laisser un joueur bloqué en jeu. Le netRank utilisé sera
-          celui du dernier tick reçu — cohérent avec ce que l'hôte a diffusé. -- */
-    if (!net.isHost() && elapsed >= MATCH_DUR + 3) { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
   paintUploadT -= dt;
@@ -3718,10 +3712,9 @@ function update(dt) {
 
   /* -- Le jour est le chrono : la partie s'ouvre à l'aube et se joue jusqu'à
         la nuit tombée. Aucun compteur affiché — le ciel EST l'horloge. -- */
-  /* En multi, la fin est décidée par l'hôte (voir plus haut). L'invité n'auto-
-     termine pas sur son propre chrono, sinon les deux joueurs peuvent conclure
-     avec des classements désynchronisés. */
-  if (!multiMode && elapsed >= MATCH_DUR) { endGame(); return; }
+  /* Fin sur chrono local — en multi, le HUD lit netRank (cohérent chez tous),
+     donc chacun peut clôturer sur son propre elapsed sans divergence de podium. */
+  if (elapsed >= MATCH_DUR) { endGame(); return; }
   /* Clocher : trois coups quand il reste 30 s. */
   if (!lateBellDone && MATCH_DUR - elapsed <= 30) {
     lateBellDone = true;
