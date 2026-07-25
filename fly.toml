@@ -1,4 +1,7 @@
 # Fly.io — serveur Colyseus (multiplayer)
+# IMPORTANT: Colyseus ne marche PAS avec 2 machines (matchmake ≠ WebSocket).
+# Après chaque deploy GitHub, vérifier : fly scale count 1 -a cultwar --yes
+# Déployer en CLI avec : fly deploy --ha=false
 app = "cultwar"
 primary_region = "cdg"
 
@@ -7,14 +10,15 @@ primary_region = "cdg"
 
 [env]
   PORT = "8080"
+  COLYSEUS_SEAT_RESERVATION_TIME = "60"
 
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  # 0 = s'éteint au repos (évite une machine toujours allumée facturée)
-  min_machines_running = 0
+  # 1 machine chaude = multi fiable. Remettre à 0 plus tard pour économiser.
+  min_machines_running = 1
 
   [[http_service.checks]]
     interval = "15s"
@@ -22,3 +26,7 @@ primary_region = "cdg"
     grace_period = "10s"
     method = "GET"
     path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

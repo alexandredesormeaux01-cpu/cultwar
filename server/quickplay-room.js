@@ -37,6 +37,8 @@ function serverLeaderSpeed(f) {
 export class QuickplayRoom extends Room {
   onCreate(options) {
     this.maxClients = MAX_CLIENTS;
+    // Fly peut être lent au cold-start ; défaut Colyseus = 15 s → trop court
+    this.setSeatReservationTime(60);
     this.setState(new QuickplayState());
     this.rng = createRng(Date.now() & 0xffffffff);
     this.inputs = new Map();          // sessionId → { x, z, boost }

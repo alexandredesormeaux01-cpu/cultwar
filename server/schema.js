@@ -1,8 +1,7 @@
-/* Colyseus schemas — les objets synchronisés serveur → clients.
-   Chaque changement de champ est envoyé en delta binaire. Garder au strict
-   minimum ce qui est vraiment nécessaire côté client pour rendre. */
+/* Colyseus schemas — objets synchronisés serveur → clients.
+   defineTypes (API JS) plutôt que les décorateurs TypeScript. */
 
-import { Schema, MapSchema, type } from '@colyseus/schema';
+import { Schema, MapSchema, defineTypes } from '@colyseus/schema';
 
 export class LeaderState extends Schema {
   constructor() {
@@ -24,34 +23,38 @@ export class LeaderState extends Schema {
     this.grisAbs = 0;
   }
 }
-type('string')(LeaderState.prototype, 'sessionId');
-type('string')(LeaderState.prototype, 'playerName');
-type('string')(LeaderState.prototype, 'leaderKey');
-type('uint32')(LeaderState.prototype, 'cultColor');
-type('string')(LeaderState.prototype, 'cultSym');
-type('float32')(LeaderState.prototype, 'x');
-type('float32')(LeaderState.prototype, 'z');
-type('float32')(LeaderState.prototype, 'dx');
-type('float32')(LeaderState.prototype, 'dz');
-type('float32')(LeaderState.prototype, 'face');
-type('uint16')(LeaderState.prototype, 'count');
-type('float32')(LeaderState.prototype, 'fuel');
-type('float32')(LeaderState.prototype, 'boostT');
-type('boolean')(LeaderState.prototype, 'alive');
-type('uint16')(LeaderState.prototype, 'grisAbs');
+defineTypes(LeaderState, {
+  sessionId: 'string',
+  playerName: 'string',
+  leaderKey: 'string',
+  cultColor: 'uint32',
+  cultSym: 'string',
+  x: 'float32',
+  z: 'float32',
+  dx: 'float32',
+  dz: 'float32',
+  face: 'float32',
+  count: 'uint16',
+  fuel: 'float32',
+  boostT: 'float32',
+  alive: 'boolean',
+  grisAbs: 'uint16',
+});
 
 export class QuickplayState extends Schema {
   constructor() {
     super();
-    this.leaders = new MapSchema();   // sessionId → LeaderState
+    this.leaders = new MapSchema();
     this.tick = 0;
     this.elapsed = 0;
     this.matchDur = 120;
-    this.phase = 'lobby';   // lobby | play | over
+    this.phase = 'lobby';
   }
 }
-type({ map: LeaderState })(QuickplayState.prototype, 'leaders');
-type('uint32')(QuickplayState.prototype, 'tick');
-type('float32')(QuickplayState.prototype, 'elapsed');
-type('float32')(QuickplayState.prototype, 'matchDur');
-type('string')(QuickplayState.prototype, 'phase');
+defineTypes(QuickplayState, {
+  leaders: { map: LeaderState },
+  tick: 'uint32',
+  elapsed: 'float32',
+  matchDur: 'float32',
+  phase: 'string',
+});

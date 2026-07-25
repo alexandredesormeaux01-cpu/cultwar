@@ -33,16 +33,30 @@ export function createNetClient() {
   async function connect(opts = {}) {
     if (state.connected) return state.room;
     const url = opts.url || defaultServerUrl();
-    state.client = new Client(url);
-    try {
-      state.room = await state.client.joinOrCreate('quickplay', {
-        name: opts.name || 'Anonyme',
-        leaderKey: opts.leaderKey || 'monk',
-      });
-    } catch (e) {
+    const maxAttempts = 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      state.client = new Client(url);
+      try {
+        state.room = await state.client.joinOrCreate('quickplay', {
+          name: opts.name || 'Anonyme',
+          leaderKey: opts.leaderKey || 'monk',
+        });
+        lastErr = null;
+        break;
+      } catch (e) {
+        const raw = String(e?.message || e);
+        lastErr = /seat reservation/i.test(raw)
+          ? 'Connexion multi interrompue (souvent 2 machines Fly). Lance: fly scale count 1 -a cultwar --yes'
+          : raw;
+        if (!/seat reservation/i.test(raw) || attempt === maxAttempts) break;
+        await new Promise((r) => setTimeout(r, 400 * attempt));
+      }
+    }
+    if (lastErr) {
       state.phase = 'error';
-      state.lastError = String(e?.message || e);
-      throw e;
+      state.lastError = lastErr;
+      throw new Error(lastErr);
     }
     state.connected = true;
     state.sessionId = state.room.sessionId;
