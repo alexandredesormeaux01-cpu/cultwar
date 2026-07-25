@@ -89,6 +89,11 @@ export function createFaction(i, teamIdx, cult, leaderKey, spawnX, spawnZ, opts 
       _safeX: spawnX, _safeZ: spawnZ,
     },
     isBot: opts.isBot ?? (i !== 0),
+    /* Multi : `remote` = position dictée par le serveur (humain distant ou IA
+       du salon). `netTarget` porte le dernier état reçu {x, z, dx, dz}. */
+    remote: opts.remote ?? false,
+    netTarget: null,
+    sessionId: opts.sessionId ?? null,
     aggr: opts.aggr ?? 0.5,
     aiT: opts.aiT ?? 0,
     mode: 'farm',

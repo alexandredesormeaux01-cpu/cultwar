@@ -5,6 +5,23 @@
 
 import { LEADER_RESP, FUEL_PER_UNIT, BOOST_CD } from './constants.js';
 
+/** Direction voulue par le joueur local : joystick/souris + clavier, normalisée.
+ *  Utilisée par le tick local ET par l'envoi réseau — les deux doivent lire
+ *  exactement la même chose, sinon le serveur ignore les déplacements clavier
+ *  et les autres joueurs vous voient immobile. */
+export function playerDir(input, keys) {
+  let dx = input?.x || 0;
+  let dz = input?.z || 0;
+  const k = keys || {};
+  if (k.KeyW || k.ArrowUp) dz -= 1;
+  if (k.KeyS || k.ArrowDown) dz += 1;
+  if (k.KeyA || k.ArrowLeft) dx -= 1;
+  if (k.KeyD || k.ArrowRight) dx += 1;
+  const n = Math.hypot(dx, dz);
+  if (n > 1) { dx /= n; dz /= n; }
+  return { x: dx, z: dz };
+}
+
 /** Un tick de tous les Leaders.
  *  @param {object} state {factions, island, elapsed, judgeR}
  *  @param {object} input {x, z, keys:{KeyW,KeyS,KeyA,KeyD,ArrowUp,ArrowDown,ArrowLeft,ArrowRight}}
@@ -24,6 +41,24 @@ export function stepLeaders(state, input, dt, ctx) {
     f.boostCd = Math.max(0, (f.boostCd || 0) - dt);
     f.discipleCd = Math.max(0, (f.discipleCd || 0) - dt);
     f.slowT = Math.max(0, f.slowT - dt);
+
+    const prevX = f.leader.x, prevZ = f.leader.z;
+
+    /* Multi : faction pilotée par le serveur (humain distant OU IA du salon).
+       On ne lit ni l'input local ni l'IA locale — sinon chaque client
+       simulerait sa propre version du même adversaire. */
+    if (f.remote) {
+      const t = f.netTarget;
+      if (t) {
+        const k = Math.min(1, dt * 12);
+        f.leader.x += (t.x - f.leader.x) * k;
+        f.leader.z += (t.z - f.leader.z) * k;
+        f.leader.dx = t.dx;
+        f.leader.dz = t.dz;
+      }
+      finishLeaderStep(f, prevX, prevZ, dt, state, ctx);
+      continue;
+    }
 
     let dx = 0, dz = 0;
     if (f.isBot) {
@@ -49,47 +84,50 @@ export function stepLeaders(state, input, dt, ctx) {
         f.leader.jmp = null;
       }
     } else {
-      dx = input.x; dz = input.z;
-      const k = input.keys || {};
-      if (k.KeyW || k.ArrowUp) dz -= 1;
-      if (k.KeyS || k.ArrowDown) dz += 1;
-      if (k.KeyA || k.ArrowLeft) dx -= 1;
-      if (k.KeyD || k.ArrowRight) dx += 1;
-      const n = Math.hypot(dx, dz);
-      if (n > 1) { dx /= n; dz /= n; }
+      const d = playerDir(input, input.keys);
+      dx = d.x; dz = d.z;
     }
 
     const sp = leaderSpeed(f);
     const resp = LEADER_RESP * (f.i === 0 ? skillMods.leaderRespMult : 1);
     f.leader.dx += (dx * sp - f.leader.dx) * Math.min(1, dt * resp);
     f.leader.dz += (dz * sp - f.leader.dz) * Math.min(1, dt * resp);
-    const prevX = f.leader.x, prevZ = f.leader.z;
     f.leader.x += f.leader.dx * dt;
     f.leader.z += f.leader.dz * dt;
 
-    resolveIsland(island, f.leader, f.leader.dx, f.leader.dz, dt, true);
-    resolveBaseWalls(f.leader);
-    unstickIfInWall(f.leader);
+    finishLeaderStep(f, prevX, prevZ, dt, state, ctx);
+  }
+}
 
-    if (judgeR < 999) {
-      const dc = Math.hypot(f.leader.x, f.leader.z);
-      if (dc > judgeR) {
-        f.leader.x *= judgeR / dc; f.leader.z *= judgeR / dc;
-        if (!isSolid(island, f.leader.x, f.leader.z)) resolveIsland(island, f.leader, 0, 0, dt, false);
-        resolveBaseWalls(f.leader);
-        unstickIfInWall(f.leader);
-      }
+/* Commun à tous les Leaders (local, IA locale, réseau) : collisions, anneau de
+   jugement, distance parcourue et traînée de peinture. */
+function finishLeaderStep(f, prevX, prevZ, dt, state, ctx) {
+  const { island, judgeR } = state;
+  const { resolveIsland, isSolid, resolveBaseWalls, unstickIfInWall,
+    stampPaint, stampIcon } = ctx;
+
+  resolveIsland(island, f.leader, f.leader.dx, f.leader.dz, dt, true);
+  resolveBaseWalls(f.leader);
+  unstickIfInWall(f.leader);
+
+  if (judgeR < 999) {
+    const dc = Math.hypot(f.leader.x, f.leader.z);
+    if (dc > judgeR) {
+      f.leader.x *= judgeR / dc; f.leader.z *= judgeR / dc;
+      if (!isSolid(island, f.leader.x, f.leader.z)) resolveIsland(island, f.leader, 0, 0, dt, false);
+      resolveBaseWalls(f.leader);
+      unstickIfInWall(f.leader);
     }
+  }
 
-    const moved = Math.hypot(f.leader.x - prevX, f.leader.z - prevZ);
-    f.dist = (f.dist || 0) + moved;
-    if (f.fuel > 0) {
-      const painted = stampPaint(f);
-      if (painted) {
-        f.fuel = Math.max(0, f.fuel - moved * FUEL_PER_UNIT);
-        f.iconD = (f.iconD || 0) + moved;
-        if (f.iconD > 9) { f.iconD = 0; stampIcon(f); }
-      }
+  const moved = Math.hypot(f.leader.x - prevX, f.leader.z - prevZ);
+  f.dist = (f.dist || 0) + moved;
+  if (f.fuel > 0) {
+    const painted = stampPaint(f);
+    if (painted) {
+      f.fuel = Math.max(0, f.fuel - moved * FUEL_PER_UNIT);
+      f.iconD = (f.iconD || 0) + moved;
+      if (f.iconD > 9) { f.iconD = 0; stampIcon(f); }
     }
   }
 }

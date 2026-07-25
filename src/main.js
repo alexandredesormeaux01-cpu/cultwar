@@ -49,12 +49,24 @@ import { discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac } from './s
 import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap, inOwnBase as _inOwnBase } from './sim/leader.js';
 import { effects } from './sim/effects.js';
 import { aiThink as _aiThink, paintMixAround as _paintMixAround } from './sim/ai.js';
-import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion } from './sim/leader-tick.js';
+import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion, playerDir } from './sim/leader-tick.js';
 import { stepCrowd as _stepCrowd } from './sim/crowd-tick.js';
 import { createNetClient } from './net/client.js';
+import { createRng } from './sim/rng.js';
 
 const net = createNetClient();
 let multiMode = false;   // true = partie en ligne, remote leaders overridés par le serveur
+
+/* Multi : le monde doit être IDENTIQUE sur tous les écrans. Le serveur envoie
+   une graine ; on branche Math.random sur un PRNG semé le temps de générer la
+   carte et la foule, puis on rend la main au vrai Math.random (les effets
+   visuels peuvent rester aléatoires, ils n'affectent rien de partagé). */
+function withSeededRandom(seed, fn) {
+  const rng = createRng(seed);
+  const real = Math.random;
+  Math.random = () => rng.next();
+  try { return fn(); } finally { Math.random = real; }
+}
 
 initNative();
 
@@ -810,6 +822,7 @@ let paused = false;     // partie suspendue via le bouton pause
 let elapsed = 0, respawnT = 0, hudT = 0, winT = 0;
 let conceding = false;   // la dernière IA est en train de se rendre
 let lateBellDone = false; // clocher des 30 dernières secondes (une fois / partie)
+let netStatsT = 0;        // cadence d'envoi du score au serveur (multi)
 let streak = 0, streakT = 0;      // série de conversions en cours
 let rallyCd = 0, rallyT = 0;      // Ralliement : recharge et durée restante
 let fervor = 0, ecstasyT = 0;     // jauge de Ferveur et durée d'Extase restante
@@ -3080,6 +3093,7 @@ function resetGame() {
   elapsed = 0; respawnT = 0; hudT = 0; winT = 0;
   conceding = false;
   lateBellDone = false;
+  netStatsT = 0;
   stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
   streak = 0; streakT = 0; rallyCd = 0; rallyT = 0;
   fervor = 0; ecstasyT = 0; fervorPct = -1; slowmoT = 0;
@@ -3129,6 +3143,7 @@ function resetGame() {
       for (const s of [...mine, ...others]) {
         multiSeats.push({
           sid: s.sessionId,
+          seatIndex: s.seatIndex | 0,
           isMe: s.kind === 'human' && net.isMe(s.sessionId),
           isBot: s.kind === 'bot',
           difficulty: s.difficulty || 'normal',
@@ -3206,9 +3221,17 @@ function resetGame() {
     }
   }
 
+  /* En multi, chaque client se met à l'index 0 (c'est « moi »), mais la base
+     doit rester au même endroit pour tout le monde : l'angle vient donc de la
+     place réseau (seatIndex), pas de l'index local. */
+  const seatAngle = (t) => {
+    const idx = multiSeats.length ? (multiSeats[t]?.seatIndex ?? t) : t;
+    return (idx / factionCount) * Math.PI * 2 - Math.PI / 2;
+  };
+
   teams = [];
   for (let t = 0; t < factionCount; t++) {
-    const teamAng = (t / factionCount) * Math.PI * 2 - Math.PI / 2;
+    const teamAng = seatAngle(t);
     const site = findBaseSite(teamAng);
     const gateAng = Math.atan2(-site.z, -site.x);
     const teamColor = new THREE.Color(picks[t].c);
@@ -3238,7 +3261,11 @@ function resetGame() {
   for (let i = 0; i < factionCount; i++) {
     const teamIdx = i;
     const seat = multiSeats[i];
-    const isLocalBot = !multiMode ? i !== 0 : !!(seat && seat.isBot);
+    /* En multi il n'y a AUCUNE IA locale : les IA du salon sont simulées par le
+       serveur, comme les humains distants. Sinon chaque client jouerait contre
+       ses propres IA et les parties divergeraient. */
+    const isRemote = !!(seat && !seat.isMe);
+    const isLocalBot = !multiMode && i !== 0;
     const spawnPos = (seat?.rl)
       ? { x: seat.rl.x, z: seat.rl.z }
       : spawnInFactionBase(teams[teamIdx], 0);
@@ -3260,14 +3287,18 @@ function resetGame() {
     }
     const leaderKey = factionLeaderKey(i);
     const f = createFaction(i, teamIdx, picks[teamIdx], leaderKey, spawnPos.x, spawnPos.z, {
-      // Humains distants : pas d'IA locale (positions serveur).
-      // IA du salon : IA locale avec difficulté du siège.
+      // Solo : joueur en 0, IA locales ensuite.
+      // Multi : tout ce qui n'est pas moi vient du serveur.
       isBot: isLocalBot,
+      remote: isRemote,
+      sessionId: seat?.sid || null,
       aggr: botAggr,
       aiT: botAiT,
       fuel: FUEL_MAX,
     });
-    f.sessionId = seat?.sid || null;
+    if (isRemote) {
+      f.netTarget = { x: spawnPos.x, z: spawnPos.z, dx: 0, dz: 0 };
+    }
     f.aiDifficulty = seatDiff;
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
@@ -3310,27 +3341,42 @@ function endGame(forced) {
 
   const scores = factions.map(factionScore).sort((a, b) => b.total - a.total);
   const mine = scores.find(s => s.f.i === 0);
-  const rank = scores.indexOf(mine) + 1;
+
+  /* Multi : le classement vient du serveur (chaque client y a remonté son
+     score), donc tous les écrans affichent le MÊME podium et le même vainqueur. */
+  const netRank = multiMode ? net.getLeaderList() : null;
+  const useNet = !!(netRank && netRank.length);
+  const myNetIdx = useNet ? netRank.findIndex((l) => net.isMe(l.sessionId)) : -1;
+
+  const rank = useNet && myNetIdx >= 0 ? myNetIdx + 1 : scores.indexOf(mine) + 1;
   const victory = forced === false ? false : rank === 1;
   lastVictory = victory;
   const winner = scores[0];
+  const winnerName = useNet ? (netRank[0]?.name || '—') : winner.f.cult.name;
 
   const isCamp = (conquest !== null);
   const btnBack = $('btn-end-back');
   const btnRetry = $('retry');
 
-  if (isCamp) {
+  if (multiMode) {
+    $('endTitle').textContent = victory ? 'Victoire en ligne !' : 'Défaite';
+    $('endSub').textContent = victory
+      ? 'Votre couleur domine la vallée — personne ne vous a rattrapé.'
+      : `${winnerName} termine en tête de ce salon.`;
+    btnRetry.textContent = 'Retour au menu';
+    btnBack.classList.add('hidden');
+  } else if (isCamp) {
     $('endTitle').textContent = victory ? 'Zone Conquise !' : 'Défaite';
     $('endSub').textContent = victory
       ? `Votre couleur domine « ${conquest.region.name} » — la zone est à vous.`
-      : `La Faction « ${winner.f.cult.name} » a recouvert « ${conquest.region.name} » de sa couleur.`;
+      : `La Faction « ${winnerName} » a recouvert « ${conquest.region.name} » de sa couleur.`;
     btnRetry.textContent = victory ? 'Retour à la Carte' : 'Réessayer';
     btnBack.classList.toggle('hidden', victory);
   } else {
     $('endTitle').textContent = victory ? 'Apothéose !' : 'Défaite';
     $('endSub').textContent = victory
       ? 'À la tombée de la nuit, votre couleur domine la vallée.'
-      : `À la tombée de la nuit, le Culte ${winner.f.cult.name} domine la vallée.`;
+      : `À la tombée de la nuit, le Culte ${winnerName} domine la vallée.`;
     btnRetry.textContent = 'Nouvelle Chasse';
     btnBack.classList.add('hidden');
   }
@@ -3342,18 +3388,26 @@ function endGame(forced) {
   $('endTitle').style.color = 'transparent';
 
   /* Classement final : chaque ligne montre le score total et la couverture. */
-  const podium = scores.map((s, i) => {
-    const me = s.f.i === 0;
-    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;
-        padding:3px 6px;border-radius:6px;${me ? 'background:rgba(255,255,255,.08);' : ''}">
+  const podiumRows = useNet
+    ? netRank.map((l) => ({
+      css: '#' + ((l.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
+      label: `${l.name}${l.isBot ? ' (IA)' : ''}`,
+      me: net.isMe(l.sessionId),
+      total: l.score,
+      pct: l.pct,
+    }))
+    : scores.map((s) => ({
+      css: s.f.css, label: s.f.cult.name, me: s.f.i === 0, total: s.total, pct: s.pct,
+    }));
+  const podium = podiumRows.map((r, i) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;
+        padding:3px 6px;border-radius:6px;${r.me ? 'background:rgba(255,255,255,.08);' : ''}">
       <span style="display:flex;align-items:center;gap:6px;min-width:0;">
         <b>${i + 1}.</b>
-        <span style="width:10px;height:10px;border-radius:50%;background:${s.f.css};flex:none;"></span>
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${s.f.cult.name}${me ? ' (Vous)' : ''}</span>
+        <span style="width:10px;height:10px;border-radius:50%;background:${r.css};flex:none;"></span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.label}${r.me ? ' (Vous)' : ''}</span>
       </span>
-      <span style="flex:none;"><b>${s.total}</b> pts · ${s.pct.toFixed(1)} %</span>
-    </div>`;
-  }).join('');
+      <span style="flex:none;"><b>${r.total}</b> pts · ${r.pct.toFixed(1)} %</span>
+    </div>`).join('');
 
   $('stats').innerHTML = [
     [`${mine.total} pts`, `Score final — ${rank}ᵉ place`, 'full-width'],
@@ -3537,27 +3591,58 @@ function update(dt) {
   _leaderTickState.judgeR = judgeR;
   _leaderTickInput.x = input.x; _leaderTickInput.z = input.z;
   _leaderTickInput.keys = keys;
-  _stepLeaders(_leaderTickState, _leaderTickInput, dt, _leaderTickCtx);
 
-  /* -- Multiplayer : envoyer input local + copier positions serveur sur les autres -- */
+  /* -- Multi : plus de salon = plus de match. On clôture au lieu de laisser le
+        joueur seul contre des adversaires figés. -- */
+  if (multiMode && !net.state.connected) {
+    banner('⚠ Connexion au salon perdue');
+    endGame();
+    return;
+  }
+
+  /* -- Multi : rafraîchir la cible réseau des adversaires AVANT leur tick, pour
+        qu'ils peignent bien leur traînée le long du chemin serveur. -- */
   if (multiMode && net.state.connected) {
-    net.sendInput(_leaderTickInput.x, _leaderTickInput.z, false);
     const remoteLeaders = net.getLeaders();
     if (remoteLeaders) {
-      remoteLeaders.forEach((rl, sid) => {
-        // Perso local : pilotage client. IA du salon : IA locale.
-        // Humains distants : positions serveur.
-        if (net.isMe(sid) || rl.isBot) return;
-        const f = factions.find((x) => x.sessionId === sid) || null;
-        if (f && rl.alive) {
-          f.isBot = false;
-          const t = Math.min(1, dt * 12);
-          f.leader.x += (rl.x - f.leader.x) * t;
-          f.leader.z += (rl.z - f.leader.z) * t;
-          f.leader.dx = rl.dx; f.leader.dz = rl.dz;
-        }
-      });
+      for (const f of factions) {
+        if (!f.remote || !f.sessionId) continue;
+        const rl = remoteLeaders.get(f.sessionId);
+        if (!rl) continue;
+        f.alive = !!rl.alive;
+        f.netTarget = { x: rl.x, z: rl.z, dx: rl.dx, dz: rl.dz };
+      }
     }
+  }
+
+  _stepLeaders(_leaderTickState, _leaderTickInput, dt, _leaderTickCtx);
+
+  /* -- Multi : envoyer mon input, puis mon score (et celui des IA si je suis
+        l'hôte) pour que le classement final soit le même partout. -- */
+  if (multiMode && net.state.connected) {
+    // Clavier compris : sans ça le serveur ne voyait bouger que les joysticks,
+    // et les autres joueurs vous voyaient planté sur votre spawn.
+    const dir = playerDir(input, keys);
+    net.sendInput(dir.x, dir.z, false);
+    netStatsT -= dt;
+    if (netStatsT <= 0) {
+      netStatsT = 0.5;
+      const isHost = net.isHost();
+      for (const f of factions) {
+        if (!f.sessionId) continue;
+        const seatIsBot = !!net.getLeaders()?.get(f.sessionId)?.isBot;
+        if (f.i !== 0 && !(isHost && seatIsBot)) continue;
+        const s = factionScore(f);
+        net.sendStats(f.sessionId, {
+          count: f.count | 0,
+          grisAbs: f.grisAbs | 0,
+          score: s.total,
+          pct: s.pct,
+        });
+      }
+    }
+    // La fin de match est décidée par le serveur : tout le monde s'arrête ensemble.
+    if (net.state.phase === 'over') { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
   paintUploadT -= dt;
@@ -3841,12 +3926,19 @@ function startGame() {
     MAX_AGENTS = AGENT_CAP;
     START_GRAYS = 400 * DENSITY;
   }
-  const biomeKey = conquest ? getBiomeForIso(conquest.world.iso) : randomBiomeKey();
-  buildMap(biomeKey);
+  /* Multi : biome et graine viennent du serveur — même vallée pour tout le monde. */
+  const netSeed = multiMode ? net.getSeed() : 0;
+  const biomeKey = conquest
+    ? getBiomeForIso(conquest.world.iso)
+    : ((multiMode && BIOMES[net.getBiome()]) ? net.getBiome() : randomBiomeKey());
+  if (multiMode) withSeededRandom(netSeed, () => buildMap(biomeKey));
+  else buildMap(biomeKey);
   soundEngine.startBiomeAmbient(biomeKey);
   captureDayBase();          // teinte de brouillard du biome = référence plein jour
   applyDayCycle(0);          // la partie s'ouvre à l'aube
-  resetGame();
+  // ^ 0x9e3779b9 : décale la séquence pour que la foule ne rejoue pas celle du décor
+  if (multiMode) withSeededRandom((netSeed ^ 0x9e3779b9) >>> 0, () => resetGame());
+  else resetGame();
   $('start').classList.add('hidden');
   $('end').classList.add('hidden');
   $('hud').classList.remove('hidden');
@@ -3860,6 +3952,11 @@ async function startMultiGame(opts = {}) {
   const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
   const onLobby = typeof opts.onLobby === 'function' ? opts.onLobby : () => {};
   const code = String(opts.code || '').toUpperCase();
+  const mode = opts.mode === 'create' ? 'create' : 'join';
+
+  // Toute session précédente est fermée : pas de salon zombie ni d'IA fantôme.
+  multiMode = false;
+  await net.leave();
 
   // Enregistrer les callbacks AVANT connect pour ne rater aucun onAdd
   net.onSlotsUpdate((slots) => onLobby(slots));
@@ -3868,6 +3965,7 @@ async function startMultiGame(opts = {}) {
   try {
     await Promise.race([
       net.connect({
+        mode,
         name: opts.name || (() => {
           try {
             return JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}').playerName || 'Joueur';
@@ -3882,7 +3980,8 @@ async function startMultiGame(opts = {}) {
       )),
     ]);
   } catch (e) {
-    banner(`⚠ Serveur injoignable : ${e?.message || e}`);
+    // Code introuvable / salon complet : message sec dans le panneau, pas un
+    // « serveur injoignable » trompeur.
     onStatus(`⚠ ${e?.message || e}`);
     return false;
   }
@@ -3919,6 +4018,9 @@ if (import.meta.env.DEV) {
   // essai rapide d'un perso : __leader('sorcerer') puis __play()
   window.__leader = (k) => { if (LEADERS[k]) { playerLeaderKey = k; return k; } return 'inconnu'; };
   window.__dbg = () => ({ scene, camera, factions, teams, island, agents, shrines, houses });
+  // inspection du multi : __net.getSlots(), __net.getLeaderList(), __net.state…
+  window.__net = net;
+  window.__ctl = () => ({ input, keys, multiMode, state, dir: playerDir(input, keys) });
   // avance le chrono de partie (test de l'écran de score) : __ff(160)
   window.__ff = (s) => { elapsed += s; };
   // inspecte le canvas d'encre : histogramme grossier des pixels non vides
@@ -4128,6 +4230,7 @@ $('btn-multi').addEventListener('click', () => {
 });
 
 async function leaveMultiToMenu() {
+  multiMode = false;
   await net.leave();
   $('multi-panel').classList.add('hidden');
   showMultiGate();
@@ -4136,18 +4239,36 @@ async function leaveMultiToMenu() {
   setMultiButtonsEnabled(true);
 }
 
+/* Sortie d'un match en ligne (fin de partie ou abandon) : couper le réseau,
+   sortir de multiMode, revenir au menu principal. Sans ça, la partie suivante
+   réutiliserait la room précédente et ses IA. */
+async function exitMultiToMenu() {
+  multiMode = false;
+  state = 'menu';
+  await net.leave();
+  $('end').classList.add('hidden');
+  $('hud').classList.add('hidden');
+  $('multi-panel').classList.add('hidden');
+  showMultiGate();
+  setMultiStatus(null);
+  setMultiButtonsEnabled(true);
+  $('start').classList.remove('hidden');
+  updateMainMenu();
+}
+
 $('btn-multi-back').addEventListener('click', leaveMultiToMenu);
 $('btn-lobby-leave').addEventListener('click', leaveMultiToMenu);
 
 $('btn-lobby-add-bot').addEventListener('click', () => net.addBot('normal'));
 $('btn-lobby-start').addEventListener('click', () => net.requestStart());
 
-async function launchMulti(code) {
+async function launchMulti(code, mode) {
   setMultiButtonsEnabled(false);
-  setMultiStatus('Connexion…');
+  setMultiStatus(mode === 'create' ? 'Création du salon…' : 'Recherche du salon…');
   try {
     const ok = await startMultiGame({
       code,
+      mode,
       onStatus: setMultiStatus,
       onLobby: (slots) => {
         showMultiLobby();
@@ -4168,11 +4289,11 @@ async function launchMulti(code) {
   }
 }
 
-$('btn-multi-create').addEventListener('click', () => launchMulti(genRoomCode()));
+$('btn-multi-create').addEventListener('click', () => launchMulti(genRoomCode(), 'create'));
 $('btn-multi-join').addEventListener('click', () => {
   const code = ($('multi-code-input').value || '').trim().toUpperCase();
   if (code.length !== 4) { setMultiStatus('Entre le code à 4 caractères'); return; }
-  launchMulti(code);
+  launchMulti(code, 'join');
 });
 
 $('btn-delete-game').addEventListener('click', () => {
@@ -4204,6 +4325,12 @@ if (splashEl && !splashEl.dataset.ready) {
 
 
 $('retry').addEventListener('click', () => {
+  if (multiMode) {
+    // Fin d'un match en ligne : on quitte VRAIMENT le salon avant de revenir au
+    // menu, sinon la prochaine partie hériterait de cette room (et de ses IA).
+    exitMultiToMenu();
+    return;
+  }
   if (conquest) {
     if (lastVictory) {
       const c = conquest; conquest = null;

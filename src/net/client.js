@@ -30,6 +30,7 @@ function slotsToArray(slots) {
       cultColor: s.cultColor,
       cultSym: s.cultSym,
       isHost: !!s.isHost,
+      seatIndex: s.seatIndex | 0,
     });
   });
   // Ordre stable : hôte d'abord, puis humains, puis IA
@@ -37,6 +38,20 @@ function slotsToArray(slots) {
     || (a.kind === 'human' ? 0 : 1) - (b.kind === 'human' ? 0 : 1)
     || String(a.id).localeCompare(String(b.id)));
   return out;
+}
+
+/* Traduit les erreurs de matchmaking en message lisible dans le salon. */
+function friendlyJoinError(e, mode) {
+  const raw = String(e?.message || e || '');
+  if (/seat reservation/i.test(raw)) {
+    return 'Connexion multi interrompue (souvent 2 machines Fly). Lance: fly scale count 1 -a cultwar --yes';
+  }
+  if (mode === 'join' && (e?.code === 4212 || /no rooms|not found|matchmake/i.test(raw))) {
+    // Un salon dont la partie est lancée est verrouillé : le matchmaker ne le
+    // propose plus, on retombe donc ici aussi dans ce cas.
+    return 'Aucun salon ouvert avec ce code (mauvais code, salon fermé, ou partie déjà lancée).';
+  }
+  return raw || 'Connexion impossible';
 }
 
 export function createNetClient() {
@@ -118,8 +133,16 @@ export function createNetClient() {
     });
   }
 
+  /* mode 'create' : toujours un salon neuf (jamais de reprise d'un salon zombie).
+     mode 'join'   : exige un salon existant portant ce code — sinon erreur
+                     explicite. C'est ce qui garantit que deux joueurs avec le
+                     même code finissent dans LA MÊME room. */
   async function connect(opts = {}) {
-    if (state.connected) return state.room;
+    const mode = opts.mode === 'create' ? 'create' : 'join';
+    // Toute connexion résiduelle est larguée : sinon on hériterait de l'ancien
+    // salon (et de ses IA) au lieu d'en ouvrir un propre.
+    if (state.room || state.connected) await leave();
+
     const url = opts.url || defaultServerUrl();
     const joinOpts = {
       name: opts.name || 'Anonyme',
@@ -130,19 +153,19 @@ export function createNetClient() {
     for (let attempt = 1; attempt <= 3; attempt++) {
       state.client = new Client(url);
       try {
-        state.room = await state.client.joinOrCreate('quickplay', joinOpts);
+        state.room = mode === 'create'
+          ? await state.client.create('quickplay', joinOpts)
+          : await state.client.join('quickplay', joinOpts);
         lastErr = null;
         break;
       } catch (e) {
-        const raw = String(e?.message || e);
-        lastErr = /seat reservation/i.test(raw)
-          ? 'Connexion multi interrompue (souvent 2 machines Fly). Lance: fly scale count 1 -a cultwar --yes'
-          : raw;
-        if (!/seat reservation/i.test(raw) || attempt === 3) break;
+        lastErr = friendlyJoinError(e, mode);
+        if (!/seat reservation/i.test(String(e?.message || e)) || attempt === 3) break;
         await sleep(400 * attempt);
       }
     }
     if (lastErr) {
+      state.room = null;
       state.phase = 'error';
       state.lastError = lastErr;
       throw new Error(lastErr);
@@ -159,7 +182,7 @@ export function createNetClient() {
 
   function send(type, payload = {}) {
     if (!state.connected || !state.room) return;
-    state.room.send(type, payload);
+    try { state.room.send(type, payload); } catch (_) {}
   }
 
   function sendInput(x, z, boost = false) {
@@ -168,30 +191,60 @@ export function createNetClient() {
 
   async function leave() {
     clearUnsubs();
-    if (state.room) {
-      try { await state.room.leave(); } catch (_) {}
-    }
+    const room = state.room;
+    // On coupe les callbacks AVANT de quitter : un onLeft en vol ferait réagir
+    // l'écran de salon alors qu'on est déjà passé à autre chose.
     state.connected = false;
     state.room = null;
     state.phase = 'idle';
+    if (room) {
+      try { await room.leave(); } catch (_) {}
+    }
+  }
+
+  function leaderList() {
+    const out = [];
+    state.room?.state?.leaders?.forEach((l, sid) => {
+      out.push({
+        sessionId: l.sessionId || sid,
+        name: l.playerName,
+        cultColor: l.cultColor,
+        cultSym: l.cultSym,
+        isBot: !!l.isBot,
+        seatIndex: l.seatIndex | 0,
+        score: l.score | 0,
+        pct: +l.pct || 0,
+        grisAbs: l.grisAbs | 0,
+      });
+    });
+    out.sort((a, b) => b.score - a.score || a.seatIndex - b.seatIndex);
+    return out;
   }
 
   return {
     state,
     connect,
+    create: (opts = {}) => connect({ ...opts, mode: 'create' }),
+    join: (opts = {}) => connect({ ...opts, mode: 'join' }),
     leave,
     send,
     sendInput,
+    sendStats: (sessionId, s) => send('stats', { sessionId, ...s }),
     addBot: (difficulty = 'normal') => send('addBot', { difficulty }),
     removeBot: (slotId) => send('removeBot', { slotId }),
     setBotDiff: (slotId, difficulty) => send('setBotDiff', { slotId, difficulty }),
     requestStart: () => send('startMatch'),
     getSlots: () => slotsToArray(state.room?.state?.slots),
     getLeaders() { return state.room?.state.leaders || null; },
+    getLeaderList: leaderList,
     getMyLeader() { return state.room?.state.leaders.get(state.sessionId) || null; },
     isMe(sessionId) { return sessionId === state.sessionId; },
     isHost() { return state.room?.state?.hostSessionId === state.sessionId; },
     getCode() { return state.room?.state?.code || ''; },
+    getSeed() { return (state.room?.state?.seed >>> 0) || 1; },
+    getBiome() { return state.room?.state?.biome || ''; },
+    getMatchDur() { return +state.room?.state?.matchDur || 0; },
+    getElapsed() { return +state.room?.state?.elapsed || 0; },
     onLeadersUpdate: (fn) => { state.onLeadersUpdate = fn; },
     onSlotsUpdate: (fn) => { state.onSlotsUpdate = fn; },
     onPhaseChange: (fn) => { state.onPhaseChange = fn; },

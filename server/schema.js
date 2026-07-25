@@ -14,6 +14,7 @@ export class LobbySlot extends Schema {
     this.cultColor = 0xffffff;
     this.cultSym = '❤';
     this.isHost = false;
+    this.seatIndex = 0;         // place fixe (0..5) — même base sur tous les clients
   }
 }
 defineTypes(LobbySlot, {
@@ -26,6 +27,7 @@ defineTypes(LobbySlot, {
   cultColor: 'uint32',
   cultSym: 'string',
   isHost: 'boolean',
+  seatIndex: 'uint8',
 });
 
 export class LeaderState extends Schema {
@@ -48,6 +50,12 @@ export class LeaderState extends Schema {
     this.grisAbs = 0;
     this.isBot = false;
     this.difficulty = 'normal';
+    this.seatIndex = 0;
+    /* Score remonté par le client qui simule cette faction (soi-même, ou l'hôte
+       pour les IA). Le classement final se lit ici : il est donc identique sur
+       tous les écrans. */
+    this.score = 0;
+    this.pct = 0;
   }
 }
 defineTypes(LeaderState, {
@@ -68,6 +76,9 @@ defineTypes(LeaderState, {
   grisAbs: 'uint16',
   isBot: 'boolean',
   difficulty: 'string',
+  seatIndex: 'uint8',
+  score: 'uint32',
+  pct: 'float32',
 });
 
 export class QuickplayState extends Schema {
@@ -81,6 +92,10 @@ export class QuickplayState extends Schema {
     this.elapsed = 0;
     this.matchDur = 120;
     this.phase = 'lobby';
+    /* Graine + biome décidés par le serveur : les clients génèrent alors
+       exactement la même île, la même végétation et la même foule. */
+    this.seed = 1;
+    this.biome = 'temperate';
   }
 }
 defineTypes(QuickplayState, {
@@ -92,4 +107,6 @@ defineTypes(QuickplayState, {
   elapsed: 'float32',
   matchDur: 'float32',
   phase: 'string',
+  seed: 'uint32',
+  biome: 'string',
 });

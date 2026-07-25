@@ -1,7 +1,10 @@
 /* Salon multijoueur jusqu'à 6 places (humains + IA).
    - Code partagé (filterBy) pour rejoindre le même salon.
    - L'hôte ajoute/retire des IA et règle leur difficulté.
-   - Démarrage manuel (bouton hôte), pas de compte à rebours auto. */
+   - Démarrage manuel (bouton hôte), pas de compte à rebours auto.
+   - Le serveur fait autorité sur : la graine du monde, le biome, la place de
+     chaque siège, le déplacement de TOUS les Leaders (humains distants ET IA)
+     et le classement final. */
 
 import pkg from 'colyseus';
 const { Room } = pkg;
@@ -17,6 +20,8 @@ const TICK_MS = 1000 / TICK_HZ;
 const MAX_SLOTS = 6;
 const MAX_CLIENTS = 6;
 const DIFFS = ['easy', 'normal', 'hard'];
+/* Doit rester aligné sur les clés de BIOMES dans src/biomes.js. */
+const BIOME_KEYS = ['temperate', 'desert', 'nordic', 'tropical', 'savanna', 'volcanic'];
 const CULTS = [
   { c: 0xff2e7e, sym: '❤' }, { c: 0x00c8ff, sym: '☾' },
   { c: 0xffb300, sym: '☀' }, { c: 0x22dd77, sym: '🌿' },
@@ -24,6 +29,10 @@ const CULTS = [
 ];
 const BOT_NAMES = ['IA Écarlate', 'IA Sélénie', 'IA Hélion', 'IA Sylvane', 'IA Occule', 'IA Pyrrhée'];
 const BOT_LEADERS = ['monk', 'sorcerer', 'nomad', 'amazon', 'alien', 'chief'];
+/* Délai avant de fermer une room finie : laisse le temps aux clients de lire
+   le classement, puis force la déconnexion pour qu'aucun salon zombie ne
+   traîne avec ses IA. */
+const OVER_LINGER_MS = 20000;
 
 function serverLeaderSpeed(f) {
   const t = Math.min(1, f.count / N_REF);
@@ -43,6 +52,15 @@ function nextCult(slots) {
   return CULTS.find((c) => !used.has(c.c)) || CULTS[slots.size % CULTS.length];
 }
 
+/* Première place libre : deux clients qui rejoignent ne se marchent pas dessus
+   et l'index reste stable même après le départ d'un voisin. */
+function nextSeatIndex(slots) {
+  const used = new Set();
+  for (const s of slots.values()) used.add(s.seatIndex);
+  for (let i = 0; i < MAX_SLOTS; i++) if (!used.has(i)) return i;
+  return 0;
+}
+
 export class QuickplayRoom extends Room {
   onCreate(options) {
     this.maxClients = MAX_CLIENTS;
@@ -51,10 +69,12 @@ export class QuickplayRoom extends Room {
     this.setMetadata({ code: this.code });
     this.setState(new QuickplayState());
     this.state.code = this.code;
+    this.state.matchDur = MATCH_DUR;
     this.rng = createRng(Date.now() & 0xffffffff);
     this.inputs = new Map();
     this.botTargets = new Map(); // sessionId → { x, z, retargetT }
     this.botSeq = 0;
+    this.overTimeout = null;
 
     this.onMessage('input', (client, msg) => {
       if (this.state.phase !== 'play') return;
@@ -63,6 +83,22 @@ export class QuickplayRoom extends Room {
       inp.x = Math.max(-1, Math.min(1, +msg.x || 0));
       inp.z = Math.max(-1, Math.min(1, +msg.z || 0));
       if (msg.boost) inp.wantBoost = true;
+    });
+
+    /* Score remonté par le client qui simule la faction. Chacun n'a le droit
+       que sur son propre Leader ; l'hôte fait autorité pour les IA. */
+    this.onMessage('stats', (client, msg) => {
+      if (this.state.phase !== 'play') return;
+      const sid = String(msg?.sessionId || client.sessionId);
+      const l = this.state.leaders.get(sid);
+      if (!l) return;
+      const mine = sid === client.sessionId;
+      const botAsHost = l.isBot && this.isHost(client);
+      if (!mine && !botAsHost) return;
+      l.count = Math.max(0, Math.min(65535, Math.round(+msg.count || 0)));
+      l.grisAbs = Math.max(0, Math.min(65535, Math.round(+msg.grisAbs || 0)));
+      l.score = Math.max(0, Math.min(4294967295, Math.round(+msg.score || 0)));
+      l.pct = Math.max(0, Math.min(100, +msg.pct || 0));
     });
 
     this.onMessage('addBot', (client, msg) => {
@@ -102,6 +138,12 @@ export class QuickplayRoom extends Room {
     return client.sessionId === this.state.hostSessionId;
   }
 
+  countHumanSlots() {
+    let n = 0;
+    for (const s of this.state.slots.values()) if (s.kind === 'human') n++;
+    return n;
+  }
+
   addBotSlot(difficulty = 'normal') {
     const cult = nextCult(this.state.slots);
     const id = `bot_${++this.botSeq}`;
@@ -115,29 +157,40 @@ export class QuickplayRoom extends Room {
     slot.cultColor = cult.c;
     slot.cultSym = cult.sym;
     slot.isHost = false;
+    slot.seatIndex = nextSeatIndex(this.state.slots);
     this.state.slots.set(id, slot);
     return slot;
   }
 
+  /* Un salon dont tous les humains sont partis ne doit rien garder : sinon les
+     IA restent « assises » et la place manque au joueur suivant. */
+  purgeBots() {
+    for (const [id, s] of [...this.state.slots.entries()]) {
+      if (s.kind === 'bot') {
+        this.state.slots.delete(id);
+        this.state.leaders.delete(id);
+        this.inputs.delete(id);
+        this.botTargets.delete(id);
+      }
+    }
+  }
+
   onJoin(client, options) {
     if (this.state.phase !== 'lobby') {
-      client.leave();
-      return;
+      // Throw ⇒ la promesse join() du client est rejetée avec ce message.
+      throw new Error('La partie a déjà commencé dans ce salon.');
     }
     if (this.state.slots.size >= MAX_SLOTS) {
       // libérer une IA pour faire de la place à l'humain
       let freed = false;
-      for (const [id, s] of this.state.slots) {
+      for (const [id, s] of this.state.slots.entries()) {
         if (s.kind === 'bot') {
           this.state.slots.delete(id);
           freed = true;
           break;
         }
       }
-      if (!freed) {
-        client.leave();
-        return;
-      }
+      if (!freed) throw new Error('Ce salon est complet (6 joueurs).');
     }
 
     const cult = nextCult(this.state.slots);
@@ -150,6 +203,7 @@ export class QuickplayRoom extends Room {
     slot.difficulty = 'normal';
     slot.cultColor = cult.c;
     slot.cultSym = cult.sym;
+    slot.seatIndex = nextSeatIndex(this.state.slots);
 
     if (!this.state.hostSessionId) {
       this.state.hostSessionId = client.sessionId;
@@ -178,24 +232,40 @@ export class QuickplayRoom extends Room {
       }
     }
 
-    if (this.state.phase === 'play') {
+    const humans = this.countHumanSlots();
+    if (humans === 0) {
+      /* Plus personne : on vide les IA et on remet le salon à zéro. La room est
+         de toute façon détruite par autoDispose, mais si un client la retrouve
+         entre-temps il tombe sur un salon propre, pas sur 5 IA fantômes. */
+      this.purgeBots();
+      if (this.state.phase === 'play') this.endMatch();
+    } else if (this.state.phase === 'play') {
       let humanLeaders = 0;
       for (const l of this.state.leaders.values()) {
         if (!l.isBot) humanLeaders++;
       }
-      if (humanLeaders === 0) this.state.phase = 'over';
+      if (humanLeaders === 0) this.endMatch();
     }
     console.log(`[room ${this.roomId}] -${client.sessionId} slots=${this.state.slots.size}`);
   }
 
   onDispose() {
+    if (this.overTimeout) {
+      clearTimeout(this.overTimeout);
+      this.overTimeout = null;
+    }
     console.log(`[room ${this.roomId}] disposed`);
   }
 
   startMatch() {
-    const slots = [...this.state.slots.values()];
+    /* Ordre des sièges = ordre des places, identique pour tous les clients. */
+    const slots = [...this.state.slots.values()].sort((a, b) => a.seatIndex - b.seatIndex);
     const n = slots.length;
+    this.state.seed = (Math.floor(Math.random() * 0xffffffff) >>> 0) || 1;
+    this.state.biome = BIOME_KEYS[this.rng.int(0, BIOME_KEYS.length)] || BIOME_KEYS[0];
+
     slots.forEach((slot, idx) => {
+      slot.seatIndex = idx;   // compacte 0..n-1 : les bases se répartissent bien
       const l = new LeaderState();
       l.sessionId = slot.sessionId;
       l.playerName = slot.name;
@@ -204,6 +274,7 @@ export class QuickplayRoom extends Room {
       l.cultSym = slot.cultSym;
       l.isBot = slot.kind === 'bot';
       l.difficulty = slot.difficulty;
+      l.seatIndex = idx;
       const ang = (idx / n) * Math.PI * 2 - Math.PI / 2;
       l.x = Math.cos(ang) * (MAP_R * 0.55);
       l.z = Math.sin(ang) * (MAP_R * 0.55);
@@ -219,10 +290,23 @@ export class QuickplayRoom extends Room {
     this.state.elapsed = 0;
     this.state.tick = 0;
     this.lock();
-    console.log(`[room ${this.roomId}] match started (${n} seats)`);
+    console.log(`[room ${this.roomId}] match started (${n} seats, seed=${this.state.seed}, biome=${this.state.biome})`);
+  }
+
+  endMatch() {
+    if (this.state.phase === 'over') return;
+    this.state.phase = 'over';
+    if (!this.overTimeout) {
+      this.overTimeout = setTimeout(() => {
+        this.overTimeout = null;
+        this.disconnect().catch(() => {});
+      }, OVER_LINGER_MS);
+    }
+    console.log(`[room ${this.roomId}] match over`);
   }
 
   updateBotBrain(sid, l, dt) {
+    const rand = () => this.rng.next();
     let t = this.botTargets.get(sid);
     if (!t) {
       t = { x: 0, z: 0, retargetT: 0 };
@@ -231,19 +315,19 @@ export class QuickplayRoom extends Room {
     t.retargetT -= dt;
     if (t.retargetT <= 0) {
       const interval = l.difficulty === 'easy' ? 2.2 : l.difficulty === 'hard' ? 0.7 : 1.3;
-      t.retargetT = interval * (0.7 + this.rng() * 0.6);
+      t.retargetT = interval * (0.7 + rand() * 0.6);
       // Vise un humain au hasard, sinon point aléatoire
       const humans = [];
       for (const o of this.state.leaders.values()) {
         if (!o.isBot && o.alive) humans.push(o);
       }
-      if (humans.length && this.rng() < 0.65) {
-        const h = humans[(this.rng() * humans.length) | 0];
-        t.x = h.x + (this.rng() - 0.5) * 12;
-        t.z = h.z + (this.rng() - 0.5) * 12;
+      if (humans.length && rand() < 0.65) {
+        const h = humans[(rand() * humans.length) | 0];
+        t.x = h.x + (rand() - 0.5) * 12;
+        t.z = h.z + (rand() - 0.5) * 12;
       } else {
-        const ang = this.rng() * Math.PI * 2;
-        const r = this.rng() * MAP_R * 0.7;
+        const ang = rand() * Math.PI * 2;
+        const r = rand() * MAP_R * 0.7;
         t.x = Math.cos(ang) * r;
         t.z = Math.sin(ang) * r;
       }
@@ -255,22 +339,21 @@ export class QuickplayRoom extends Room {
     if (inp) {
       inp.x = dx / len;
       inp.z = dz / len;
-      if (l.difficulty === 'hard' && this.rng() < 0.01) inp.wantBoost = true;
+      if (l.difficulty === 'hard' && rand() < 0.01) inp.wantBoost = true;
     }
   }
 
   tick(dt) {
     this.state.tick++;
-    if (this.state.phase === 'lobby') return;
     if (this.state.phase !== 'play') return;
 
     this.state.elapsed += dt;
     if (this.state.elapsed >= this.state.matchDur) {
-      this.state.phase = 'over';
+      this.endMatch();
       return;
     }
 
-    for (const [sid, l] of this.state.leaders) {
+    for (const [sid, l] of this.state.leaders.entries()) {
       if (!l.alive) continue;
       if (l.isBot) this.updateBotBrain(sid, l, dt);
 
