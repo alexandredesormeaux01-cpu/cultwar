@@ -3895,6 +3895,23 @@ $('btn-new-game').addEventListener('click', () => {
   });
 });
 
+$('btn-multi').addEventListener('click', async () => {
+  const btn = $('btn-multi');
+  btn.disabled = true;
+  btn.textContent = 'Connexion…';
+  try {
+    const ok = await startMultiGame();
+    if (!ok) {
+      btn.disabled = false;
+      btn.textContent = 'Multijoueur en ligne';
+    }
+  } catch (e) {
+    banner(`⚠ Multi : ${e?.message || e}`);
+    btn.disabled = false;
+    btn.textContent = 'Multijoueur en ligne';
+  }
+});
+
 $('btn-delete-game').addEventListener('click', () => {
   $('confirm-delete').classList.remove('hidden');
 });
