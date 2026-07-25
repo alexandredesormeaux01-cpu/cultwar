@@ -2736,17 +2736,35 @@ function showStreak() {
 function updateHUD() {
   if (typeof teams === 'undefined' || teams.length === 0) return;
 
-  const sorted = factions.map(f => ({
-    ...factionScore(f),
-    t: teams[f.team],
-    isPlayer: f.i === 0,
-  })).sort((a, b) => b.total - a.total);
-
-  const mine = sorted.find(st => st.isPlayer);
-  if (!mine) return;
-  const rank = sorted.indexOf(mine) + 1;
+  /* -- Multi : rang/couverture depuis le classement réseau (hôte authoritatif).
+        Sans ça, chaque client calcule sur SA propre texture de peinture — chacun
+        se voit 1er car il peint sur son écran ce que l'autre peint sur le sien. -- */
+  let rank = 1, pct = 0;
+  if (multiMode && net.state.connected) {
+    const list = net.getLeaderList();
+    if (list && list.length) {
+      const myIdx = list.findIndex((l) => net.isMe(l.sessionId));
+      if (myIdx >= 0) {
+        rank = myIdx + 1;
+        pct = list[myIdx].pct || 0;
+      }
+    } else {
+      const local = factionScore(factions[0]);
+      pct = local.pct;
+    }
+  } else {
+    const sorted = factions.map(f => ({
+      ...factionScore(f),
+      t: teams[f.team],
+      isPlayer: f.i === 0,
+    })).sort((a, b) => b.total - a.total);
+    const mine = sorted.find(st => st.isPlayer);
+    if (!mine) return;
+    rank = sorted.indexOf(mine) + 1;
+    pct = mine.pct;
+  }
   rankEl.textContent = `${rank}ᵉ`;
-  pctValEl.textContent = `${mine.pct.toFixed(1)}%`;
+  pctValEl.textContent = `${pct.toFixed(1)}%`;
 
   if (rank < lastRank) { sfxRankUp(); rankEl.classList.add('pulse'); setTimeout(() => rankEl.classList.remove('pulse'), 220); }
   lastRank = rank;
