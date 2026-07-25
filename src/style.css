@@ -2038,3 +2038,56 @@ button.btn-secondary:hover {
   font-family: ui-monospace, monospace; letter-spacing: 0.2em;
   color: #ffe259;
 }
+
+/* ---- Cartes joueurs du salon (portrait + avatar) ---- */
+.lobby-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 10px;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+}
+.lobby-card {
+  display: flex; flex-direction: column;
+  background: rgba(10, 14, 28, 0.72);
+  border: 1px solid color-mix(in srgb, var(--slot-color, #ffe259) 55%, rgba(255,255,255,0.15));
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.35), 0 8px 20px rgba(0,0,0,0.35);
+}
+.lobby-card.is-host {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--slot-color) 70%, #ffe259), 0 0 18px rgba(255,226,89,0.25);
+}
+.lobby-card-frame {
+  position: relative; aspect-ratio: 3 / 4;
+  background:
+    radial-gradient(circle at 50% 20%, color-mix(in srgb, var(--slot-color) 35%, transparent), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.35));
+  overflow: hidden;
+}
+.lobby-card-portrait {
+  width: 100%; height: 100%; object-fit: cover; object-position: top center;
+  display: block;
+}
+.lobby-card-body {
+  padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px;
+}
+.lobby-card-top { display: flex; align-items: center; gap: 8px; }
+.lobby-card-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 2px solid var(--slot-color, #fff);
+  object-fit: cover; flex-shrink: 0;
+  background: #1a2030;
+}
+.lobby-card-titles { min-width: 0; }
+.lobby-card-name {
+  font-weight: 800; font-size: 13px; color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lobby-card-perso {
+  font-size: 11px; opacity: 0.72;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lobby-card .lobby-badge { align-self: flex-start; }
+.lobby-card .lobby-slot-actions { justify-content: space-between; }
+.lobby-card.is-bot .lobby-card-frame { filter: saturate(0.85); }
+.multi-panel-inner { max-width: min(92vw, 560px); width: min(92vw, 560px); }

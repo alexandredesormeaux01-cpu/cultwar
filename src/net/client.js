@@ -32,6 +32,10 @@ function slotsToArray(slots) {
       isHost: !!s.isHost,
     });
   });
+  // Ordre stable : hôte d'abord, puis humains, puis IA
+  out.sort((a, b) => Number(b.isHost) - Number(a.isHost)
+    || (a.kind === 'human' ? 0 : 1) - (b.kind === 'human' ? 0 : 1)
+    || String(a.id).localeCompare(String(b.id)));
   return out;
 }
 
@@ -48,6 +52,7 @@ export function createNetClient() {
     onPhaseChange: null,
     onJoined: null,
     onLeft: null,
+    _unsubs: [],
   };
 
   function notifySlots() {
@@ -62,20 +67,50 @@ export function createNetClient() {
     }
   }
 
+  function clearUnsubs() {
+    for (const u of state._unsubs) {
+      try { u(); } catch (_) {}
+    }
+    state._unsubs = [];
+  }
+
   function wireRoom(room) {
-    room.state.slots.onAdd = () => notifySlots();
-    room.state.slots.onRemove = () => notifySlots();
-    room.state.slots.onChange = () => notifySlots();
-    room.state.leaders.onAdd = () => notifyLeaders();
-    room.state.leaders.onRemove = () => notifyLeaders();
-    room.state.leaders.onChange = () => notifyLeaders();
-    room.state.listen('phase', (v) => {
-      state.phase = v;
-      if (state.onPhaseChange) state.onPhaseChange(v);
-    });
-    room.state.listen('hostSessionId', () => notifySlots());
+    clearUnsubs();
+    // Colyseus 0.15 : onAdd/onRemove sont des MÉTHODES, pas des setters.
+    // L'ancien `map.onAdd = fn` ne reçoit jamais les ajouts suivants.
+    if (typeof room.state.slots?.onAdd === 'function') {
+      state._unsubs.push(room.state.slots.onAdd(() => notifySlots()));
+      state._unsubs.push(room.state.slots.onRemove(() => notifySlots()));
+      if (typeof room.state.slots.onChange === 'function') {
+        state._unsubs.push(room.state.slots.onChange(() => notifySlots()));
+      }
+    }
+    if (typeof room.state.leaders?.onAdd === 'function') {
+      state._unsubs.push(room.state.leaders.onAdd(() => notifyLeaders()));
+      state._unsubs.push(room.state.leaders.onRemove(() => notifyLeaders()));
+      if (typeof room.state.leaders.onChange === 'function') {
+        state._unsubs.push(room.state.leaders.onChange(() => notifyLeaders()));
+      }
+    }
+    if (typeof room.state.listen === 'function') {
+      state._unsubs.push(room.state.listen('phase', (v) => {
+        state.phase = v;
+        if (state.onPhaseChange) state.onPhaseChange(v);
+      }));
+      state._unsubs.push(room.state.listen('hostSessionId', () => notifySlots()));
+    }
+
+    // Filet de sécurité : resync le salon pendant le lobby (évite un UI figé)
+    const poll = setInterval(() => {
+      if (!state.connected || !state.room) { clearInterval(poll); return; }
+      if (state.phase === 'lobby') notifySlots();
+      else clearInterval(poll);
+    }, 500);
+    state._unsubs.push(() => clearInterval(poll));
+
     room.onLeave(() => {
       state.connected = false;
+      clearUnsubs();
       if (state.onLeft) state.onLeft();
     });
     room.onError((code, msg) => {
@@ -132,6 +167,7 @@ export function createNetClient() {
   }
 
   async function leave() {
+    clearUnsubs();
     if (state.room) {
       try { await state.room.leave(); } catch (_) {}
     }

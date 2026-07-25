@@ -23,6 +23,7 @@ const CULTS = [
   { c: 0x8b5cf6, sym: '👁' }, { c: 0xff5533, sym: '🔥' },
 ];
 const BOT_NAMES = ['IA Écarlate', 'IA Sélénie', 'IA Hélion', 'IA Sylvane', 'IA Occule', 'IA Pyrrhée'];
+const BOT_LEADERS = ['monk', 'sorcerer', 'nomad', 'amazon', 'alien', 'chief'];
 
 function serverLeaderSpeed(f) {
   const t = Math.min(1, f.count / N_REF);
@@ -109,7 +110,7 @@ export class QuickplayRoom extends Room {
     slot.kind = 'bot';
     slot.sessionId = id;
     slot.name = BOT_NAMES[(this.botSeq - 1) % BOT_NAMES.length];
-    slot.leaderKey = 'monk';
+    slot.leaderKey = BOT_LEADERS[(this.botSeq - 1) % BOT_LEADERS.length];
     slot.difficulty = difficulty;
     slot.cultColor = cult.c;
     slot.cultSym = cult.sym;

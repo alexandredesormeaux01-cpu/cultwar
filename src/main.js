@@ -3860,6 +3860,9 @@ async function startMultiGame(opts = {}) {
   const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
   const onLobby = typeof opts.onLobby === 'function' ? opts.onLobby : () => {};
   const code = String(opts.code || '').toUpperCase();
+
+  // Enregistrer les callbacks AVANT connect pour ne rater aucun onAdd
+  net.onSlotsUpdate((slots) => onLobby(slots));
   onStatus('Connexion au serveur…');
 
   try {
@@ -3885,7 +3888,6 @@ async function startMultiGame(opts = {}) {
   }
 
   onLobby(net.getSlots());
-  net.onSlotsUpdate((slots) => onLobby(slots));
 
   const started = await new Promise((res) => {
     if (net.state.phase === 'play') return res(true);
@@ -4004,6 +4006,26 @@ function showMultiLobby() {
 
 const DIFF_LABEL = { easy: 'Facile', normal: 'Normal', hard: 'Difficile' };
 const DIFF_CYCLE = ['easy', 'normal', 'hard'];
+const LOBBY_AVATARS = {
+  monk: 'assets/monk_avatar.png',
+  sorcerer: 'assets/sorcerer_avatar.png',
+  nomad: 'assets/nomad_avatar.png',
+  amazon: 'assets/amazon_avatar.png',
+  alien: 'assets/alien_avatar.png',
+  chief: 'assets/chief_avatar.png',
+};
+const LOBBY_PORTRAITS = {
+  monk: 'assets/monk_leader.png',
+  sorcerer: 'assets/sorcerer_leader.png',
+  nomad: 'assets/nomad_leader.png',
+  amazon: 'assets/amazon_leader.png',
+  alien: 'assets/alien_leader.png',
+  chief: 'assets/chief_leader.png',
+};
+const LOBBY_LEADER_NAMES = {
+  monk: 'Petit Moine', sorcerer: 'Sombre Sorcier', nomad: 'Nomade',
+  amazon: 'Amazone', alien: 'Extraterrestre', chief: 'Chef des Nations',
+};
 
 function renderLobbySlots(slots) {
   const list = $('lobby-slots');
@@ -4018,31 +4040,49 @@ function renderLobbySlots(slots) {
 
   list.replaceChildren();
   const ordered = [...(slots || [])];
-  ordered.sort((a, b) => Number(b.isHost) - Number(a.isHost) || a.kind.localeCompare(b.kind));
 
   for (const s of ordered) {
+    const key = (s.leaderKey && LOBBY_AVATARS[s.leaderKey]) ? s.leaderKey : 'monk';
+    const hex = `#${((s.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
     const li = document.createElement('li');
-    li.className = 'lobby-slot';
-    const sw = document.createElement('span');
-    sw.className = 'lobby-slot-swatch';
-    sw.style.background = `#${((s.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
-    const info = document.createElement('div');
-    info.className = 'lobby-slot-info';
+    li.className = 'lobby-card' + (s.isHost ? ' is-host' : '') + (s.kind === 'bot' ? ' is-bot' : '');
+    li.style.setProperty('--slot-color', hex);
+
+    const frame = document.createElement('div');
+    frame.className = 'lobby-card-frame';
+    const img = document.createElement('img');
+    img.className = 'lobby-card-portrait';
+    img.src = LOBBY_PORTRAITS[key] || LOBBY_AVATARS[key];
+    img.alt = LOBBY_LEADER_NAMES[key] || key;
+    frame.append(img);
+
+    const body = document.createElement('div');
+    body.className = 'lobby-card-body';
+    const top = document.createElement('div');
+    top.className = 'lobby-card-top';
+    const avatar = document.createElement('img');
+    avatar.className = 'lobby-card-avatar';
+    avatar.src = LOBBY_AVATARS[key];
+    avatar.alt = '';
+    const titles = document.createElement('div');
+    titles.className = 'lobby-card-titles';
     const name = document.createElement('div');
-    name.className = 'lobby-slot-name';
+    name.className = 'lobby-card-name';
     name.textContent = `${s.cultSym || ''} ${s.name}`.trim();
-    const meta = document.createElement('div');
-    meta.className = 'lobby-slot-meta';
-    if (s.kind === 'bot') meta.textContent = `IA · ${DIFF_LABEL[s.difficulty] || s.difficulty}`;
-    else meta.textContent = s.isHost ? 'Hôte' : 'Joueur';
-    info.append(name, meta);
-    li.append(sw, info);
+    const perso = document.createElement('div');
+    perso.className = 'lobby-card-perso';
+    perso.textContent = s.kind === 'bot'
+      ? `IA · ${LOBBY_LEADER_NAMES[key] || key}`
+      : (LOBBY_LEADER_NAMES[key] || key);
+    titles.append(name, perso);
+    top.append(avatar, titles);
+    body.append(top);
 
     if (s.isHost) {
       const badge = document.createElement('span');
       badge.className = 'lobby-badge';
       badge.textContent = 'HÔTE';
-      li.append(badge);
+      body.append(badge);
     }
 
     if (host && s.kind === 'bot') {
@@ -4065,8 +4105,10 @@ function renderLobbySlots(slots) {
       kick.title = 'Retirer cette IA';
       kick.addEventListener('click', () => net.removeBot(s.id));
       actions.append(diffBtn, kick);
-      li.append(actions);
+      body.append(actions);
     }
+
+    li.append(frame, body);
     list.append(li);
   }
 
