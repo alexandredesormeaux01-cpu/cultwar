@@ -55,9 +55,9 @@ import { createNetClient } from './net/client.js';
 import { createRng } from './sim/rng.js';
 
 const net = createNetClient();
-let multiMode = false;   // true = partie en ligne, remote leaders overridés par le serveur
+let multiMode = false;   // true = partie en ligne P2P (WebRTC via PeerJS)
 
-/* Multi : le monde doit être IDENTIQUE sur tous les écrans. Le serveur envoie
+/* Multi : le monde doit être IDENTIQUE sur tous les écrans. L'hôte envoie
    une graine ; on branche Math.random sur un PRNG semé le temps de générer la
    carte et la foule, puis on rend la main au vrai Math.random (les effets
    visuels peuvent rester aléatoires, ils n'affectent rien de partagé). */
@@ -3261,11 +3261,11 @@ function resetGame() {
   for (let i = 0; i < factionCount; i++) {
     const teamIdx = i;
     const seat = multiSeats[i];
-    /* En multi il n'y a AUCUNE IA locale : les IA du salon sont simulées par le
-       serveur, comme les humains distants. Sinon chaque client jouerait contre
-       ses propres IA et les parties divergeraient. */
-    const isRemote = !!(seat && !seat.isMe);
-    const isLocalBot = !multiMode && i !== 0;
+    /* P2P : l'hôte simule les IA localement (pas de serveur). Les invités
+       reçoivent les positions via le DataChannel. */
+    const hostRunsBot = multiMode && net.isHost() && !!seat?.isBot;
+    const isRemote = !!(seat && !seat.isMe && !hostRunsBot);
+    const isLocalBot = (!multiMode && i !== 0) || hostRunsBot;
     const spawnPos = (seat?.rl)
       ? { x: seat.rl.x, z: seat.rl.z }
       : spawnInFactionBase(teams[teamIdx], 0);
@@ -3288,7 +3288,7 @@ function resetGame() {
     const leaderKey = factionLeaderKey(i);
     const f = createFaction(i, teamIdx, picks[teamIdx], leaderKey, spawnPos.x, spawnPos.z, {
       // Solo : joueur en 0, IA locales ensuite.
-      // Multi : tout ce qui n'est pas moi vient du serveur.
+      // Multi : invités = remote ; IA = locales chez l'hôte, remote chez l'invité.
       isBot: isLocalBot,
       remote: isRemote,
       sessionId: seat?.sid || null,
@@ -3300,6 +3300,7 @@ function resetGame() {
       f.netTarget = { x: spawnPos.x, z: spawnPos.z, dx: 0, dz: 0 };
     }
     f.aiDifficulty = seatDiff;
+    f.seatIndex = seat?.seatIndex ?? i;
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
     factions.push(f);
@@ -3342,7 +3343,7 @@ function endGame(forced) {
   const scores = factions.map(factionScore).sort((a, b) => b.total - a.total);
   const mine = scores.find(s => s.f.i === 0);
 
-  /* Multi : le classement vient du serveur (chaque client y a remonté son
+  /* Multi : le classement vient de l'hôte P2P (chaque client y a remonté son
      score), donc tous les écrans affichent le MÊME podium et le même vainqueur. */
   const netRank = multiMode ? net.getLeaderList() : null;
   const useNet = !!(netRank && netRank.length);
@@ -3592,16 +3593,15 @@ function update(dt) {
   _leaderTickInput.x = input.x; _leaderTickInput.z = input.z;
   _leaderTickInput.keys = keys;
 
-  /* -- Multi : plus de salon = plus de match. On clôture au lieu de laisser le
-        joueur seul contre des adversaires figés. -- */
+  /* -- Multi : plus de connexion P2P = plus de match. -- */
   if (multiMode && !net.state.connected) {
-    banner('⚠ Connexion au salon perdue');
+    banner('⚠ Connexion P2P perdue');
     endGame();
     return;
   }
 
   /* -- Multi : rafraîchir la cible réseau des adversaires AVANT leur tick, pour
-        qu'ils peignent bien leur traînée le long du chemin serveur. -- */
+        qu'ils peignent bien leur traînée le long du chemin P2P. -- */
   if (multiMode && net.state.connected) {
     const remoteLeaders = net.getLeaders();
     if (remoteLeaders) {
@@ -3617,31 +3617,40 @@ function update(dt) {
 
   _stepLeaders(_leaderTickState, _leaderTickInput, dt, _leaderTickCtx);
 
-  /* -- Multi : envoyer mon input, puis mon score (et celui des IA si je suis
-        l'hôte) pour que le classement final soit le même partout. -- */
+  /* -- P2P : l'hôte diffuse toutes les positions à 20 Hz ; l'invité envoie
+        sa propre position et ses stats à l'hôte. -- */
   if (multiMode && net.state.connected) {
-    // Clavier compris : sans ça le serveur ne voyait bouger que les joysticks,
-    // et les autres joueurs vous voyaient planté sur votre spawn.
-    const dir = playerDir(input, keys);
-    net.sendInput(dir.x, dir.z, false);
     netStatsT -= dt;
-    if (netStatsT <= 0) {
-      netStatsT = 0.5;
-      const isHost = net.isHost();
-      for (const f of factions) {
-        if (!f.sessionId) continue;
-        const seatIsBot = !!net.getLeaders()?.get(f.sessionId)?.isBot;
-        if (f.i !== 0 && !(isHost && seatIsBot)) continue;
-        const s = factionScore(f);
-        net.sendStats(f.sessionId, {
-          count: f.count | 0,
-          grisAbs: f.grisAbs | 0,
-          score: s.total,
-          pct: s.pct,
+    if (net.isHost()) {
+      if (netStatsT <= 0) {
+        netStatsT = 1 / 20;
+        const data = factions.filter(f => f.sessionId).map(f => {
+          const s = factionScore(f);
+          return {
+            sid: f.sessionId,
+            x: f.leader.x, z: f.leader.z,
+            dx: f.leader.dx, dz: f.leader.dz,
+            alive: f.alive,
+            score: s.total, pct: s.pct,
+            grisAbs: f.grisAbs | 0, count: f.count | 0,
+            playerName: f.cult.name, cultColor: f.cult.c, cultSym: f.cult.sym,
+            isBot: f.isBot, seatIndex: f.seatIndex ?? 0,
+          };
+        });
+        net.broadcastLeaders(data, elapsed);
+      }
+    } else {
+      const me = factions[0];
+      if (me) net.sendPos(me.leader.x, me.leader.z, me.leader.dx, me.leader.dz);
+      if (netStatsT <= 0) {
+        netStatsT = 0.5;
+        const s = factionScore(me);
+        net.sendStats(me.sessionId, {
+          count: me.count | 0, grisAbs: me.grisAbs | 0,
+          score: s.total, pct: s.pct,
         });
       }
     }
-    // La fin de match est décidée par le serveur : tout le monde s'arrête ensemble.
     if (net.state.phase === 'over') { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
@@ -3926,7 +3935,7 @@ function startGame() {
     MAX_AGENTS = AGENT_CAP;
     START_GRAYS = 400 * DENSITY;
   }
-  /* Multi : biome et graine viennent du serveur — même vallée pour tout le monde. */
+  /* Multi : biome et graine viennent de l'hôte P2P — même vallée pour tout le monde. */
   const netSeed = multiMode ? net.getSeed() : 0;
   const biomeKey = conquest
     ? getBiomeForIso(conquest.world.iso)
@@ -3944,9 +3953,8 @@ function startGame() {
   $('hud').classList.remove('hidden');
   state = 'play';
 }
-/* Multi : connecte au serveur, attend le début du match, puis démarre la partie
-   en mode « multiMode » où les Leaders adverses sont pilotés par le serveur. */
-/* Multi : salon par code, liste jusqu'à 6 (humains + IA), l'hôte lance. */
+/* Multi P2P : connecte via PeerJS, attend le début du match, puis démarre la
+   partie en mode « multiMode » où les Leaders adverses sont pilotés par le réseau. */
 async function startMultiGame(opts = {}) {
   audioInit();
   const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
@@ -3960,7 +3968,7 @@ async function startMultiGame(opts = {}) {
 
   // Enregistrer les callbacks AVANT connect pour ne rater aucun onAdd
   net.onSlotsUpdate((slots) => onLobby(slots));
-  onStatus('Connexion au serveur…');
+  onStatus('Connexion P2P…');
 
   try {
     await Promise.race([
@@ -3975,7 +3983,7 @@ async function startMultiGame(opts = {}) {
         code,
       }),
       new Promise((_, rej) => setTimeout(
-        () => rej(new Error('Délai dépassé — le serveur met trop de temps à répondre')),
+        () => rej(new Error('Délai dépassé — connexion P2P impossible')),
         25000,
       )),
     ]);
