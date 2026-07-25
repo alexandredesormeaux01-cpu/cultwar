@@ -3328,6 +3328,7 @@ function resetGame() {
     f.seatIndex = seat?.seatIndex ?? i;
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
+    f.grp.position.set(spawnPos.x, 0, spawnPos.z);
     factions.push(f);
   }
 
@@ -3343,6 +3344,7 @@ function resetGame() {
     }
   }
   updateHUD();
+  snapCameraToPlayer();
 }
 
 /* ============================== Fin de partie ============================== */
@@ -3593,6 +3595,18 @@ const _cloudDecomp = new THREE.Vector3();
 const _cloudM = new THREE.Matrix4();
 const _cloudQ = new THREE.Quaternion();
 const _cloudS = new THREE.Vector3();
+
+/** Place immédiatement la caméra sur le Leader joueur (évite de démarrer sur
+    le centre de carte / une base adverse après l'orbite du menu). */
+function snapCameraToPlayer() {
+  const me = factions[0];
+  if (!me?.leader) return;
+  const zoom = Math.min(26 + Math.sqrt(me.count || 1) * 0.8, 44) * camDistMul;
+  camPos.set(me.leader.x, zoom * 0.88, me.leader.z + zoom * 0.68);
+  camLook.set(me.leader.x, 0, me.leader.z);
+  camera.position.copy(camPos);
+  camera.lookAt(camLook);
+}
 
 function update(dt) {
   elapsed += dt;
