@@ -7,6 +7,10 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
+/* Tactile : densités / outlines allégés (mode Belle plus fluide sur téléphone). */
+const _isCoarse = matchMedia('(pointer: coarse)').matches;
+const GRASS_DENSITY_MOBILE = 0.5;
+
 /* ---------------------------------------------------------------------------
    Gradient map toon partagé (3 crans) — la recette standard Three.js.
 --------------------------------------------------------------------------- */
@@ -1232,8 +1236,13 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
       spec.scale || [1, 1],
       foliage ? OUTLINE_WORLD_FOLIAGE : OUTLINE_WORLD,
     );
-    const base = Math.floor(spec.count / variants.length);
-    let extra = spec.count % variants.length;
+    /* Mobile : moitié d'herbe pour limiter draw calls + overdraw alpha. */
+    let specCount = spec.count;
+    if (_isCoarse && kind === 'grass') {
+      specCount = Math.max(8, Math.round(spec.count * GRASS_DENSITY_MOBILE));
+    }
+    const base = Math.floor(specCount / variants.length);
+    let extra = specCount % variants.length;
 
     for (const parts of variants) {
       const count = base + (extra-- > 0 ? 1 : 0);
@@ -1257,8 +1266,9 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
           }),
           count,
         );
-        inst.castShadow = spec.shadow !== false;
-        inst.receiveShadow = true;
+        /* Ombres : gros volumes seulement. Herbe/fleurs = trop cher pour rien. */
+        inst.castShadow = !foliage && spec.shadow !== false;
+        inst.receiveShadow = !foliage;
         inst.userData.sharedGeo = true;
         // décor immobile : pas de recalcul de matrice monde à chaque frame
         inst.matrixAutoUpdate = false;
@@ -1281,8 +1291,10 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
       }
       for (const inst of insts) {
         scene.add(inst);
-        // Contour cartoon : solide classique, ou silhouette alpha pour le feuillage.
-        attachCartoonOutline(inst, outlineThick, 0x080a12, { foliage });
+        // Contours feuillage : désactivés sur tactile (×2 draw calls alpha).
+        if (!(foliage && _isCoarse)) {
+          attachCartoonOutline(inst, outlineThick, 0x080a12, { foliage });
+        }
         created.push(inst);
       }
     }
@@ -1338,7 +1350,9 @@ export function buildBiomeTrees(scene, biomeKey, mapR, placer = null) {
 export function buildBiomeGrass(scene, biomeKey, mapR, placer = null) {
   const biome = BIOMES[biomeKey] || BIOMES.temperate;
   if (!grassAsset || !biome.grass || !biome.grass.count) return [];
-  const { count, color, scale } = biome.grass;
+  const { color, scale } = biome.grass;
+  let count = biome.grass.count;
+  if (_isCoarse) count = Math.max(8, Math.round(count * GRASS_DENSITY_MOBILE));
   const created = [];
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
   const UP = new THREE.Vector3(0, 1, 0);
@@ -1355,7 +1369,7 @@ export function buildBiomeGrass(scene, biomeKey, mapR, placer = null) {
     });
     const inst = new THREE.InstancedMesh(geo, mat, per);
     inst.castShadow = false;      // découpe alpha : l'ombre coûterait cher pour rien
-    inst.receiveShadow = true;
+    inst.receiveShadow = false;   // receive sur herbe = fillrate inutile
     inst.userData.sharedGeo = true;   // géométrie réutilisée : à ne pas disposer
     for (let i = 0; i < per; i++) {
       const sc = scale[0] + Math.random() * (scale[1] - scale[0]);
@@ -1373,12 +1387,14 @@ export function buildBiomeGrass(scene, biomeKey, mapR, placer = null) {
       inst.setMatrixAt(i, m);
     }
     scene.add(inst);
-    attachCartoonOutline(
-      inst,
-      localOutlineThickness(scale || [1, 1], OUTLINE_WORLD_FOLIAGE),
-      0x080a12,
-      { foliage: true },
-    );
+    if (!_isCoarse) {
+      attachCartoonOutline(
+        inst,
+        localOutlineThickness(scale || [1, 1], OUTLINE_WORLD_FOLIAGE),
+        0x080a12,
+        { foliage: true },
+      );
+    }
     created.push(inst);
   }
   return created;
@@ -1413,7 +1429,7 @@ export function buildBiomeScenery(scene, biomeKey, mapR, placer = null) {
     });
     const inst = new THREE.InstancedMesh(geo, mat, prop.count);
     inst.castShadow = !!prop.shadow;
-    inst.receiveShadow = true;
+    inst.receiveShadow = !!prop.shadow; // pas d'ombre reçue sur fleurs / touffes
     const kind = propKind(prop);
     for (let i = 0; i < prop.count; i++) {
       const sc = prop.scale[0] + Math.random() * (prop.scale[1] - prop.scale[0]);

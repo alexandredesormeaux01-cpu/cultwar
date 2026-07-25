@@ -118,7 +118,8 @@ const isCoarse = matchMedia('(pointer: coarse)').matches;
 const GRAPHICS = {
   low:  { maxDpr: 1.0, aa: false, shadows: false },
   mid:  { maxDpr: 1.5, aa: true,  shadows: false },
-  high: { maxDpr: 2.0, aa: true,  shadows: true },
+  /* Belle mobile : DPR plafonné (fillrate) — les ombres restent, allégées ailleurs. */
+  high: { maxDpr: isCoarse ? 1.4 : 2.0, aa: true, shadows: true },
 };
 const GRAPHICS_KEY = 'cultio_graphics';
 let currentGraphics = localStorage.getItem(GRAPHICS_KEY) || (isCoarse ? 'mid' : 'high');
@@ -139,26 +140,9 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.12;
 document.getElementById('app').appendChild(renderer.domElement);
 
-/** Applique DPR + ombres (l'AA est figé à la création du contexte WebGL). */
-function applyGraphicsQuality() {
-  const g = gfx();
-  renderer.setPixelRatio(Math.min(devicePixelRatio, g.maxDpr));
-  renderer.setSize(innerWidth, innerHeight);
-  renderer.shadowMap.enabled = g.shadows;
-  scene?.traverse?.((o) => {
-    if (!o.isMesh && !o.isInstancedMesh) return;
-    if (o.userData.forceNoShadow) return;
-    if (o.userData.shadowable) {
-      o.castShadow = g.shadows;
-      o.receiveShadow = g.shadows || o.receiveShadow;
-    }
-  });
-}
-
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fdcff);
 scene.fog = new THREE.Fog(0x9fdcff, 70, 165);
-applyGraphicsQuality();
 
 // Poignée de debug console : window.__cult.info() → draw calls / triangles ;
 // window.__cult.toggleNature() → montre/cache le décor pour isoler son coût.
@@ -178,16 +162,47 @@ const hemi = new THREE.HemisphereLight(0xcfefff, 0x4a7a4f, 0.95);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff2d8, 1.6);
 sun.castShadow = true;
-/* Le volume d'ombre était bien plus large que la zone visible : tout ce qu'il
-   englobe est redessiné dans la shadow map. En le resserrant à 56 unités on peut
-   passer la carte de 2048 à 1024 (4× moins de pixels) tout en gardant une densité
-   proche : 18 texels/unité contre 24 auparavant. */
-sun.shadow.mapSize.set(1024, 1024);
-sun.shadow.camera.left = -28; sun.shadow.camera.right = 28;
-sun.shadow.camera.top = 28; sun.shadow.camera.bottom = -28;
-sun.shadow.camera.far = 120;
 sun.shadow.bias = -0.0015;
 scene.add(sun, sun.target);
+
+/** Résolution + frustum d'ombre : 512 / serré sur tactile, 1024 / large sur desktop. */
+function configureSunShadow(enabled) {
+  const mobile = isCoarse;
+  const size = mobile ? 512 : 1024;
+  const half = mobile ? 20 : 28;
+  if (sun.shadow.mapSize.x !== size) {
+    sun.shadow.mapSize.set(size, size);
+    if (sun.shadow.map) {
+      sun.shadow.map.dispose();
+      sun.shadow.map = null;
+    }
+  }
+  sun.shadow.camera.left = -half;
+  sun.shadow.camera.right = half;
+  sun.shadow.camera.top = half;
+  sun.shadow.camera.bottom = -half;
+  sun.shadow.camera.far = mobile ? 90 : 120;
+  sun.shadow.camera.updateProjectionMatrix();
+  sun.castShadow = !!enabled;
+}
+
+/** Applique DPR + ombres (l'AA est figé à la création du contexte WebGL). */
+function applyGraphicsQuality() {
+  const g = gfx();
+  renderer.setPixelRatio(Math.min(devicePixelRatio, g.maxDpr));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = g.shadows;
+  configureSunShadow(g.shadows);
+  scene.traverse((o) => {
+    if (!o.isMesh && !o.isInstancedMesh) return;
+    if (o.userData.forceNoShadow) return;
+    if (o.userData.shadowable) {
+      o.castShadow = g.shadows;
+      o.receiveShadow = g.shadows || o.receiveShadow;
+    }
+  });
+}
+applyGraphicsQuality();
 
 /* ---- Éclairage personnages (Leaders + foule) ----
    Couche séparée : la pénombre du cycle jour/nuit n'assombrit que le décor.
