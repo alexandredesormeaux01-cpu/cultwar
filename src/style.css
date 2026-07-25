@@ -2550,9 +2550,12 @@ button.btn-secondary:hover {
 .lobby-bot-remove:hover { background: rgba(255,90,90,0.22); color: #ffb0b0; }
 
 @media (max-width: 480px) {
-  .panel { padding: 10px 10px; }
+  /* Scoping le padding/alignement uniquement à l'overlay multi — sinon les
+     autres overlays (splash, fin de partie, etc.) se retrouvent avec le
+     contenu décentré ou collé en haut. */
+  #multi-panel.overlay { padding: 4px; align-items: flex-start; }
+  #multi-panel .panel { padding: 10px 10px; }
   .multi-panel-inner { max-width: 100vw; width: 100vw; border-radius: 0; }
-  .overlay { padding: 4px; align-items: flex-start; }
   .lobby-layout {
     max-height: calc(100dvh - 8px);
     gap: 8px;
