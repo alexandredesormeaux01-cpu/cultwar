@@ -57,6 +57,7 @@ class SoundEngine {
   ensureContext() {
     if (this._unlocked) return;
     this._unlocked = true;
+    this._getAudioContext();
     for (const name of Object.keys(SFX)) {
       const a = this._acquire(name);
       if (!a) continue;
@@ -76,6 +77,157 @@ class SoundEngine {
         if (this._musicWanted && !this.isMuted) this._resumeLayers();
       }).catch(() => {});
     }
+  }
+
+  _getAudioContext() {
+    if (!this._audioCtx && typeof window !== 'undefined') {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) this._audioCtx = new AudioCtx();
+    }
+    if (this._audioCtx && this._audioCtx.state === 'suspended') {
+      this._audioCtx.resume().catch(() => {});
+    }
+    return this._audioCtx;
+  }
+
+  /** Bruitage : Clic/Tick cartoon de la roulette (phase spin) */
+  playEventSpinTick() {
+    if (this.isMuted) return;
+    const ctx = this._getAudioContext();
+    if (!ctx) return;
+
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const now = ctx.currentTime;
+
+      const freq = 600 + Math.random() * 400;
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.4, now + 0.04);
+
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.05);
+    } catch (_) {}
+  }
+
+  /** Bruitage : Slam d'impact cartoon quand la carte se pose */
+  playEventSlam() {
+    if (this.isMuted) return;
+    const ctx = this._getAudioContext();
+    if (!ctx) return;
+
+    try {
+      const now = ctx.currentTime;
+
+      // Sub drop impact
+      const subOsc = ctx.createOscillator();
+      const subGain = ctx.createGain();
+      subOsc.type = 'sine';
+      subOsc.frequency.setValueAtTime(190, now);
+      subOsc.frequency.exponentialRampToValueAtTime(32, now + 0.32);
+
+      subGain.gain.setValueAtTime(0.65, now);
+      subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.32);
+
+      subOsc.connect(subGain);
+      subGain.connect(ctx.destination);
+
+      subOsc.start(now);
+      subOsc.stop(now + 0.33);
+
+      // Noise pop crunch
+      const bufferSize = Math.floor(ctx.sampleRate * 0.08);
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.25));
+      }
+
+      const noise = ctx.createBufferSource();
+      noise.buffer = buffer;
+      const noiseGain = ctx.createGain();
+      noiseGain.gain.setValueAtTime(0.35, now);
+      noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+
+      noise.connect(noiseGain);
+      noiseGain.connect(ctx.destination);
+
+      noise.start(now);
+    } catch (_) {}
+  }
+
+  /** Bruitage : Fanfare cartoon selon la tonalité (good / bad / chaos) */
+  playEventReveal(tone = 'chaos') {
+    if (this.isMuted) return;
+    const ctx = this._getAudioContext();
+    if (!ctx) return;
+
+    try {
+      const now = ctx.currentTime;
+
+      if (tone === 'good') {
+        // Arpège victorieux Cartoon (Do - Mi - Sol - Do6)
+        const notes = [523.25, 659.25, 783.99, 1046.50];
+        notes.forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const startTime = now + idx * 0.075;
+
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, startTime);
+
+          gain.gain.setValueAtTime(0, startTime);
+          gain.gain.linearRampToValueAtTime(0.35, startTime + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.38);
+
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+
+          osc.start(startTime);
+          osc.stop(startTime + 0.42);
+        });
+      } else if (tone === 'bad') {
+        // Alerte danger cartoon
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(340, now);
+        osc.frequency.exponentialRampToValueAtTime(110, now + 0.42);
+
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(now);
+        osc.stop(now + 0.43);
+      } else {
+        // Zap / Magic sweep pour Chaos
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(280, now);
+        osc.frequency.exponentialRampToValueAtTime(1300, now + 0.16);
+        osc.frequency.exponentialRampToValueAtTime(420, now + 0.38);
+
+        gain.gain.setValueAtTime(0.35, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(now);
+        osc.stop(now + 0.41);
+      }
+    } catch (_) {}
   }
 
   playSFX(name, { volume = SFX_VOL, rate = 1 } = {}) {

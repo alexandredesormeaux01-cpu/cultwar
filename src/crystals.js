@@ -26,8 +26,8 @@ export const CRYSTAL_MIN = 1;
 export const CRYSTAL_MAX = 8;
 export const CRYSTAL_CAP_TOTAL = CRYSTAL_MAX * 6;   // 5 cultes + marge
 
-/* Anneau unique. Les places sont toujours réparties sur les 8 positions, donc
-   une gemme perdue laisse un trou visible : la perte se lit instantanément. */
+/* Anneau unique — DÉSACTIVÉ en jeu (les « diamants » autour du Leader n'ont
+   plus de rôle). On garde le code pour les âmes (spawnSoulBurst). */
 const RING = { slots: CRYSTAL_MAX, r: 1.7, y: 1.3, w: 0.62 };
 
 /* Position orbitale d'un cristal (repère local du Leader). */
@@ -256,36 +256,14 @@ const _hidden = new THREE.Matrix4().makeScale(0, 0, 0);
  * Anime et dessine tous les cristaux.
  * @param {number} dt
  * @param {number} t        horloge de la partie
- * @param {Array}  factions factions vivantes ; `crystals` (1..8) est le palier
- *                 visuel calculé depuis le nombre de croyants — voir crystalsFor()
+ * @param {Array}  factions (ignoré pour l'anneau — désactivé)
  */
 export function updateCrystals(dt, t, factions) {
   if (!mesh) return;
-  let n = 0;
-
-  /* -- Cristaux en orbite -- */
-  for (const f of factions) {
-    if (!f.alive) continue;
-    for (let i = 0; i < f.crystals && n < CRYSTAL_CAP_TOTAL; i++, n++) {
-      orbitPos(i, t, _p);
-      _p.x += f.leader.x;
-      _p.z += f.leader.z;
-      /* Rotation propre : chaque cristal tourne sur lui-même à une phase
-         décalée, sinon l'anneau scintille d'un seul bloc et fait clignoter. */
-      _q.setFromAxisAngle(_axis, t * 1.6 + i * 0.9);
-      _s.setScalar(1);
-      _m.compose(_p, _q, _s);
-      mesh.setMatrixAt(n, _m);
-      mesh.setColorAt(n, f.color);
-    }
-  }
-
-  // les emplacements inutilisés sont mis à l'échelle zéro : rien à dessiner
-  for (let i = n; i < CRYSTAL_CAP_TOTAL; i++) mesh.setMatrixAt(i, _hidden);
-  mesh.count = CRYSTAL_CAP_TOTAL;
+  /* Anneau orbital masqué : pas de diamants autour du Leader. */
+  for (let i = 0; i < CRYSTAL_CAP_TOTAL; i++) mesh.setMatrixAt(i, _hidden);
+  mesh.count = 0;
   mesh.instanceMatrix.needsUpdate = true;
-  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-
   updateSouls(dt);
 }
 

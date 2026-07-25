@@ -29,10 +29,13 @@ export function bakeVAT(gltf, opts = {}) {
   gltf.scene.traverse((c) => { if (c.isSkinnedMesh) skinned = c; });
   if (!skinned || !gltf.animations || !gltf.animations.length) return null;
 
-  const clips = clipNames
+  let clips = (clipNames || [])
     .map((n) => THREE.AnimationClip.findByName(gltf.animations, n))
     .filter(Boolean);
+  /* Fallback : n'importe quels clips du GLB (noms hors Walking/Running). */
+  if (!clips.length) clips = gltf.animations.slice(0, 2);
   if (!clips.length) return null;
+  if (clips.length === 1) clips = [clips[0], clips[0]];
 
   const mixer = new THREE.AnimationMixer(gltf.scene);
   const v = new THREE.Vector3();

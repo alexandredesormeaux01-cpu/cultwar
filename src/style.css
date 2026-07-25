@@ -634,6 +634,419 @@ button.big:active { transform: scale(.95); }
 }
 #banner.show { opacity: 1; }
 
+/* ---- Carte événement (roulette) ---- */
+.event-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.event-overlay.hidden { display: none; }
+
+.event-veil {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(10, 12, 28, 0.75) 0%, rgba(4, 5, 14, 0.92) 100%);
+  backdrop-filter: blur(8px) saturate(130%);
+  -webkit-backdrop-filter: blur(8px) saturate(130%);
+}
+
+/* Back Lignes de vitesse Comic / Cartoon */
+.event-speed-lines {
+  position: absolute;
+  width: 140vw;
+  height: 140vw;
+  max-width: 900px;
+  max-height: 900px;
+  background: repeating-conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0.04) 0deg 8deg,
+    transparent 8deg 16deg
+  );
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.event-card.is-spinning ~ .event-speed-lines,
+.event-overlay:not(.hidden) .event-speed-lines {
+  opacity: 1;
+  animation: speed-lines-rotate 12s linear infinite;
+}
+
+.event-stage {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  perspective: 1000px;
+}
+
+/* Onde de choc d'impact */
+.event-shockwave {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  border: 6px solid #fff;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.2);
+}
+.event-shockwave.trigger {
+  animation: shockwave-expand 0.65s cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+
+/* ---- CARTE CEL-SHADING CARTOON ---- */
+.event-card {
+  width: min(84vw, 290px);
+  aspect-ratio: 3 / 4.3;
+  border-radius: 24px;
+  transform-style: preserve-3d;
+  position: relative;
+  overflow: hidden;
+  background: #111424;
+  border: 3.5px solid #000000;
+  box-shadow:
+    0 16px 0 #000000,
+    0 24px 50px rgba(0, 0, 0, 0.8),
+    0 0 0 2px rgba(255, 255, 255, 0.25) inset;
+  transition: transform 0.2s ease;
+}
+
+/* Balayage de brillance Cel-shading */
+.event-card-shine {
+  position: absolute;
+  inset: -100%;
+  background: linear-gradient(
+    115deg,
+    transparent 40%,
+    rgba(255, 255, 255, 0.45) 50%,
+    transparent 60%
+  );
+  pointer-events: none;
+  z-index: 10;
+  opacity: 0;
+}
+.event-card.is-reveal .event-card-shine {
+  opacity: 1;
+  animation: cel-shine-sweep 0.85s cubic-bezier(0.2, 0.8, 0.4, 1) forwards;
+}
+
+/* Structure interne & Cadre */
+.event-card-frame {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 16px 18px 16px;
+  border-radius: 20px;
+  box-sizing: border-box;
+}
+
+/* Ruban Bannière Supérieure */
+.event-card-ribbon {
+  position: relative;
+  margin-top: -6px;
+  margin-bottom: 12px;
+  padding: 6px 20px;
+  border-radius: 12px;
+  border: 2.5px solid #000000;
+  box-shadow: 0 4px 0 #000000, 0 4px 12px rgba(0, 0, 0, 0.4);
+  transform: skewX(-4deg);
+  z-index: 5;
+  background: linear-gradient(180deg, #ffd700 0%, #ff8c00 100%);
+}
+.event-ribbon-text {
+  font-family: 'Cinzel', 'Segoe UI', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: #0b0700;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+  display: block;
+}
+
+.event-card-inner {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: center;
+}
+
+/* Illustration liée à l'événement */
+.event-art-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  max-height: 46%;
+  border-radius: 16px;
+  border: 3px solid #000000;
+  box-shadow:
+    0 5px 0 #000000,
+    0 0 0 2px rgba(255, 255, 255, 0.2) inset,
+    0 10px 22px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  background: #0a0d18;
+  flex-shrink: 0;
+}
+.event-art {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  image-rendering: auto;
+}
+.event-art-frame.has-art .event-icon-fallback { display: none; }
+.event-icon-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3.2rem;
+  filter: drop-shadow(2px 4px 0 #000000);
+  background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.18), rgba(0, 0, 0, 0.55));
+}
+
+/* Icône Cartoon & Circle Frame (legacy / fallback layout) */
+.event-icon-wrapper {
+  position: relative;
+  margin: 4px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.event-icon-glow {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  border-radius: 50%;
+  filter: blur(14px);
+  opacity: 0.6;
+  z-index: 1;
+}
+.event-icon-circle {
+  position: relative;
+  z-index: 2;
+  width: 90px;
+  height: 90px;
+  border-radius: 50%;
+  border: 3px solid #000000;
+  box-shadow:
+    0 6px 0 #000000,
+    0 0 0 2px rgba(255, 255, 255, 0.3) inset,
+    0 8px 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.25), rgba(0, 0, 0, 0.6));
+}
+.event-icon {
+  font-size: 3.6rem;
+  line-height: 1;
+  filter: drop-shadow(2px 4px 0 #000000);
+}
+
+/* Titre & Description Comic */
+.event-title {
+  margin: 0;
+  font-family: 'Cinzel', serif;
+  font-size: 1.25rem;
+  font-weight: 900;
+  color: #ffffff;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+  text-shadow:
+    2px 2px 0 #000000,
+    -1px -1px 0 #000000,
+    1px -1px 0 #000000,
+    -1px 1px 0 #000000,
+    0 4px 12px rgba(0, 0, 0, 0.8);
+}
+.event-blurb {
+  margin: 0;
+  font-family: 'Source Serif 4', 'Segoe UI', serif;
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #f5f8ff;
+  text-shadow:
+    1px 1px 0 #000000,
+    -1px -1px 0 #000000,
+    0 2px 8px rgba(0, 0, 0, 0.9);
+  max-width: 22ch;
+}
+
+/* Barre de temps / Timer */
+.event-timer-wrap {
+  width: 100%;
+  height: 9px;
+  background: rgba(0, 0, 0, 0.65);
+  border: 2px solid #000000;
+  border-radius: 99px;
+  overflow: hidden;
+  margin-top: 4px;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.8);
+}
+.event-timer-bar {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #ff2e7e, #ffe259);
+  border-radius: 99px;
+  transform-origin: left center;
+  transition: transform 0.1s linear;
+}
+
+/* ---- TONALITÉS CEL-SHADED ---- */
+
+/* TONE GOOD (Bénédiction / Avantage) */
+.event-card.tone-good {
+  background:
+    radial-gradient(circle at 50% 30%, rgba(52, 211, 153, 0.35), transparent 70%),
+    linear-gradient(180deg, #0d3b2a 0%, #061c14 100%);
+  border-color: #000000;
+}
+.event-card.tone-good .event-card-ribbon {
+  background: linear-gradient(180deg, #34d399 0%, #059669 100%);
+}
+.event-card.tone-good .event-ribbon-text {
+  color: #ffffff;
+  text-shadow: 1px 1px 0 #000000;
+}
+.event-card.tone-good .event-icon-circle {
+  background: radial-gradient(circle at 35% 35%, #6ee7b7 0%, #047857 100%);
+}
+.event-card.tone-good .event-icon-glow {
+  background: #10b981;
+}
+.event-card.tone-good .event-timer-bar {
+  background: linear-gradient(90deg, #10b981, #6ee7b7);
+}
+
+/* TONE BAD (Malédiction / Catastrophe) */
+.event-card.tone-bad {
+  background:
+    radial-gradient(circle at 50% 30%, rgba(248, 113, 113, 0.35), transparent 70%),
+    linear-gradient(180deg, #4a131e 0%, #1e060c 100%);
+  border-color: #000000;
+}
+.event-card.tone-bad .event-card-ribbon {
+  background: linear-gradient(180deg, #f87171 0%, #dc2626 100%);
+}
+.event-card.tone-bad .event-ribbon-text {
+  color: #ffffff;
+  text-shadow: 1px 1px 0 #000000;
+}
+.event-card.tone-bad .event-icon-circle {
+  background: radial-gradient(circle at 35% 35%, #fca5a5 0%, #b91c1c 100%);
+}
+.event-card.tone-bad .event-icon-glow {
+  background: #ef4444;
+}
+.event-card.tone-bad .event-timer-bar {
+  background: linear-gradient(90deg, #dc2626, #fca5a5);
+}
+
+/* TONE CHAOS (Chaos / Anarchie) */
+.event-card.tone-chaos {
+  background:
+    radial-gradient(circle at 50% 30%, rgba(251, 191, 36, 0.35), transparent 70%),
+    linear-gradient(180deg, #44300d 0%, #1a1203 100%);
+  border-color: #000000;
+}
+.event-card.tone-chaos .event-card-ribbon {
+  background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%);
+}
+.event-card.tone-chaos .event-ribbon-text {
+  color: #0d0700;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+.event-card.tone-chaos .event-icon-circle {
+  background: radial-gradient(circle at 35% 35%, #fde68a 0%, #b45309 100%);
+}
+.event-card.tone-chaos .event-icon-glow {
+  background: #f59e0b;
+}
+.event-card.tone-chaos .event-timer-bar {
+  background: linear-gradient(90deg, #f59e0b, #fde68a);
+}
+
+/* ---- ANIMATIONS KEYFRAMES ---- */
+
+/* Spin 3D Flip */
+.event-card.is-spinning {
+  animation: cel-spin-3d 0.38s linear infinite;
+}
+@keyframes cel-spin-3d {
+  0% { transform: rotateY(0deg) scale(0.95); }
+  50% { transform: rotateY(180deg) scale(0.92); }
+  100% { transform: rotateY(360deg) scale(0.95); }
+}
+
+/* Slam / Land Impact avec Overshoot Physics */
+.event-card.is-landing {
+  animation: cel-land-slam 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+@keyframes cel-land-slam {
+  0% { transform: scale(1.22) rotateY(-20deg) translateY(-30px); }
+  60% { transform: scale(0.94) rotateY(5deg) translateY(6px); }
+  82% { transform: scale(1.05) rotateY(-2deg) translateY(-2px); }
+  100% { transform: scale(1) rotateY(0deg) translateY(0); }
+}
+
+/* Reveal State */
+.event-card.is-reveal {
+  transform: scale(1.04);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Cel Shine Sweep */
+@keyframes cel-shine-sweep {
+  0% { transform: translateX(-100%) translateY(-100%); }
+  100% { transform: translateX(100%) translateY(100%); }
+}
+
+/* Speed Lines Background Rotation */
+@keyframes speed-lines-rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Shockwave expansion */
+@keyframes shockwave-expand {
+  0% {
+    transform: scale(0.2);
+    opacity: 0.9;
+    border-color: #ffffff;
+  }
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+    border-color: rgba(255, 255, 255, 0);
+  }
+}
+
+@media (max-width: 520px) {
+  .event-card { width: min(86vw, 260px); }
+  .event-title { font-size: 1.15rem; }
+  .event-blurb { font-size: 0.86rem; }
+  .event-icon-circle { width: 78px; height: 78px; }
+  .event-icon { font-size: 3rem; }
+}
+
 #streak {
   position: absolute;
   left: 50%;

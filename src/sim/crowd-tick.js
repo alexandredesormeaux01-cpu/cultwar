@@ -9,12 +9,17 @@
 import {
   CONV_R, CONV_RITUAL_T, FLEE_R,
   DISC_HUNT_R, DISC_FLEE_R, DISC_DETOUR_T, DISC_PAINT_R, DISC_SEP_R,
-  FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
+  DISC_BOMB_R, DISC_FUEL_CRITICAL, DISC_FUEL_COMFORT,
+  FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD, DISCIPLE_FORM_SCALE,
+  FUEL_MAX,
 } from './constants.js';
 import { discSpd, discPaintMul } from './disciples.js';
 
 export function stepCrowd(state, dt, ctx) {
-  const { agents, factions, island, elapsed } = state;
+  const {
+    agents, factions, island, elapsed, bombs = [],
+    grayPanic = false, zeal = false, discFreeze = false,
+  } = state;
   const {
     // physique
     resolveIsland, isSolid, canJumpToward, steerOnIsland,
@@ -67,6 +72,29 @@ export function stepCrowd(state, dt, ctx) {
       a.vx = a.vx || 0; a.vz = a.vz || 0;
       a._detourT = Math.max(0, (a._detourT || 0) - dt);
 
+      /* Vœu de silence : disciple figé (auréole continue de battre). */
+      if (discFreeze) {
+        a.vx = 0; a.vz = 0;
+        a._bombTarget = null;
+        a._huntTarget = null;
+        tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
+        tmpP.set(a.x, a.y || 0, a.z);
+        if (a._followerSlot != null) {
+          const ds = DISCIPLE_FORM_SCALE;
+          tmpS.set(ds, ds, ds);
+          tmpM.compose(tmpP, tmpQ, tmpS);
+          updateFollowerTransform(a, tmpM, 0);
+        } else {
+          tmpS.set(0, 0, 0);
+          tmpM.compose(tmpP, tmpQ, tmpS);
+          const cm = crowdOf(a.id), sl = slotOf(a.id);
+          cm.setMatrixAt(sl, tmpM);
+        }
+        const pulse = 0.5 + 0.5 * Math.sin(elapsed * 5.5 + a.id);
+        setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, pulse, a.base || 1);
+        continue;
+      }
+
       if (a.jmp) {
         resolveIsland(island, a, a.vx, a.vz, dt, true);
         const spd = Math.hypot(a.vx, a.vz);
@@ -74,17 +102,16 @@ export function stepCrowd(state, dt, ctx) {
         tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
         tmpP.set(a.x, a.y || 0, a.z);
         if (a._followerSlot != null) {
-          tmpS.set(1, 1, 1);
+          const ds = DISCIPLE_FORM_SCALE;
+          tmpS.set(ds, ds, ds);
           tmpM.compose(tmpP, tmpQ, tmpS);
           updateFollowerTransform(a, tmpM, Math.max(spd, 4));
         } else {
-          const s = a.base * 1.04;
-          tmpS.set(s, s, s);
+          /* En attente de morph : ne jamais réafficher le villageois. */
+          tmpS.set(0, 0, 0);
           tmpM.compose(tmpP, tmpQ, tmpS);
           const cm = crowdOf(a.id), sl = slotOf(a.id);
           cm.setMatrixAt(sl, tmpM);
-          cm.userData.anim.setY(sl, Math.max(spd, 4));
-          cm.userData.anim.needsUpdate = true;
         }
         const pulse = 0.5 + 0.5 * Math.sin(elapsed * 5.5 + a.id);
         setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, pulse, a.base || 1);
@@ -92,17 +119,38 @@ export function stepCrowd(state, dt, ctx) {
       }
 
       let prey = null, preyScore = -1e9;
+      let bomb = null, bombScore = -1e9;
       if (a._pathBias === undefined) {
         a._pathBias = (Math.random() - 0.5) * 1.4;
         a._pathWobble = 0.55 + Math.random() * 0.7;
         a._pathPhase = Math.random() * Math.PI * 2;
       }
-      const claimed = new Set();
+      const claimedPrey = new Set();
+      const claimedBombs = new Set();
       for (const other of agents) {
         if (other === a || other.dead || other.discipleOf !== a.discipleOf) continue;
-        if (other._huntTarget && !other._huntTarget.dead) claimed.add(other._huntTarget.id);
+        if (other._huntTarget && !other._huntTarget.dead) claimedPrey.add(other._huntTarget.id);
+        if (other._bombTarget) claimedBombs.add(other._bombTarget);
       }
 
+      const fuelR = Math.min(1, Math.max(0, (f.fuel || 0) / FUEL_MAX));
+      const fuelUrgent = fuelR < DISC_FUEL_CRITICAL;
+      const fuelOk = fuelR >= DISC_FUEL_COMFORT;
+
+      /* Mission #1 : cristaux-bombes → peinture du maître. */
+      for (let bi = 0; bi < bombs.length; bi++) {
+        const b = bombs[bi];
+        if (!b) continue;
+        const d = Math.hypot(b.x - a.x, b.z - a.z);
+        if (d > DISC_BOMB_R) continue;
+        const approach = islandApproachScore(a.x, a.z, b.x, b.z);
+        let score = (2.8 / (4 + d)) * (0.35 + Math.max(0, approach));
+        score *= 1.15 + (1 - fuelR) * 2.4; // plus le fuel est bas, plus la bombe attire
+        if (claimedBombs.has(b)) score *= 0.08;
+        if (score > bombScore) { bombScore = score; bomb = b; }
+      }
+
+      /* Mission #2 : convertir un maximum de croyants au passage. */
       const candidates = [];
       for (const o of agents) {
         if (o.dead || (o.discipleOf ?? -1) >= 0 || o === a) continue;
@@ -114,32 +162,67 @@ export function stepCrowd(state, dt, ctx) {
         const nearBonus = d <= DISC_HUNT_R ? 2.2 : 0.55;
         let score = nearBonus / (5 + d) * (0.3 + Math.max(0, approach));
         score *= 0.75 + Math.random() * 0.55;
-        if (claimed.has(o.id)) score *= 0.12;
+        if (claimedPrey.has(o.id)) score *= 0.12;
         for (const other of agents) {
           if (other === a || other.dead || other.discipleOf !== a.discipleOf) continue;
           const od = Math.hypot(other.x - o.x, other.z - o.z);
           if (od < DISC_SEP_R) score *= 0.35 + od / DISC_SEP_R * 0.4;
         }
+        /* Gris très proches : snack au passage même en route vers une bombe. */
+        if (d < CONV_R * 1.35) score *= 1.8;
         if (score > preyScore) { preyScore = score; prey = o; }
-        if (score > 0.02) candidates.push({ o, score });
+        if (score > 0.02) candidates.push({ o, score, d });
       }
       if (candidates.length > 1 && Math.random() < 0.35) {
         candidates.sort((x, y) => y.score - x.score);
         const pick = candidates[1 + ((Math.random() * Math.min(3, candidates.length - 1)) | 0)];
-        if (pick) prey = pick.o;
+        if (pick) { prey = pick.o; preyScore = pick.score; }
+      }
+
+      /* Arbitrage : peinture d'abord, conversion ensuite.
+         - fuel critique → bombe sauf gris déjà dans le rituel
+         - fuel moyen → bombe si meilleure / plus urgente que la proie
+         - fuel confort → chasse, mais dévie vers une bombe proche */
+      let goalMode = 'scout'; // 'bomb' | 'prey' | 'scout'
+      const preyNear = prey && Math.hypot(prey.x - a.x, prey.z - a.z) < CONV_R * 1.15;
+      if (bomb && fuelUrgent && !preyNear) {
+        goalMode = 'bomb';
+      } else if (bomb && !fuelOk) {
+        const preyD = prey ? Math.hypot(prey.x - a.x, prey.z - a.z) : 1e9;
+        const bombD = Math.hypot(bomb.x - a.x, bomb.z - a.z);
+        if (!prey || bombD < preyD * 1.35 || bombScore > preyScore * 1.1) goalMode = 'bomb';
+        else goalMode = 'prey';
+      } else if (prey && (!bomb || fuelOk)) {
+        goalMode = 'prey';
+        if (bomb) {
+          const bombD = Math.hypot(bomb.x - a.x, bomb.z - a.z);
+          if (bombD < 10 || (bombD < 18 && Math.random() < 0.25)) goalMode = 'bomb';
+        }
+      } else if (bomb) {
+        goalMode = 'bomb';
       }
 
       let wishX = 0, wishZ = 0, wishSpd = discSpd(a);
       let goalX = a.x, goalZ = a.z;
-      if (prey) {
+      if (goalMode === 'bomb' && bomb) {
+        goalX = bomb.x; goalZ = bomb.z;
+        const d = Math.hypot(bomb.x - a.x, bomb.z - a.z) || 1;
+        wishX = (bomb.x - a.x) / d;
+        wishZ = (bomb.z - a.z) / d;
+        wishSpd = discSpd(a) * (fuelUrgent ? 1.12 : 1.0);
+        a._bombTarget = bomb;
+        a._huntTarget = null;
+      } else if (goalMode === 'prey' && prey) {
         goalX = prey.x; goalZ = prey.z;
         const d = Math.hypot(prey.x - a.x, prey.z - a.z) || 1;
         wishX = (prey.x - a.x) / d;
         wishZ = (prey.z - a.z) / d;
         wishSpd = d < CONV_R ? 1.4 : discSpd(a);
         a._huntTarget = prey;
+        a._bombTarget = null;
       } else {
         a._huntTarget = null;
+        a._bombTarget = null;
         a.wt = (a.wt || 0) - dt;
         if (a.wt <= 0 || !a._scoutX) {
           a.wt = 1.8 + Math.random() * 2.8;
@@ -258,17 +341,15 @@ export function stepCrowd(state, dt, ctx) {
       tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
       tmpP.set(a.x, a.y || 0, a.z);
       if (a._followerSlot != null) {
-        tmpS.set(1, 1, 1);
+        const ds = DISCIPLE_FORM_SCALE;
+        tmpS.set(ds, ds, ds);
         tmpM.compose(tmpP, tmpQ, tmpS);
         updateFollowerTransform(a, tmpM, spd);
       } else {
-        const s = a.base * 1.04;
-        tmpS.set(s, s, s);
+        tmpS.set(0, 0, 0);
         tmpM.compose(tmpP, tmpQ, tmpS);
         const cm = crowdOf(a.id), sl = slotOf(a.id);
         cm.setMatrixAt(sl, tmpM);
-        cm.userData.anim.setY(sl, spd);
-        cm.userData.anim.needsUpdate = true;
       }
 
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * 5.5 + a.id);
@@ -307,13 +388,14 @@ export function stepCrowd(state, dt, ctx) {
           a.converting = enemyC.f.i;
           a.extractProgress = 0;
         }
-        a.extractProgress = (a.extractProgress || 0) + dt;
-        const u = Math.min(1, a.extractProgress / CONV_RITUAL_T);
+        a.extractProgress = (a.extractProgress || 0) + dt * (zeal ? 2.35 : 1);
+        const ritualNeed = zeal ? CONV_RITUAL_T * 0.55 : CONV_RITUAL_T;
+        const u = Math.min(1, a.extractProgress / ritualNeed);
         _convCol.copy(f.color).lerp(enemyC.f.color, Math.min(1, u * 1.35));
         _setFCol(_convCol);
         a.vx *= Math.max(0, 1 - dt * 10);
         a.vz *= Math.max(0, 1 - dt * 10);
-        if (a.extractProgress >= CONV_RITUAL_T) {
+        if (a.extractProgress >= ritualNeed) {
           finishConvert(a, enemyC.f, a.convertingDisc);
           continue;
         }
@@ -330,7 +412,7 @@ export function stepCrowd(state, dt, ctx) {
         a.vx += (tx - a.vx) * Math.min(1, dt * 6);
         a.vz += (tz - a.vz) * Math.min(1, dt * 6);
         if ((a.extractProgress || 0) > 0) {
-          _setFCol(f.color);
+          _setFCol({ r: 1, g: 1, b: 1 });
           a.converting = -1;
           a.convertingDisc = null;
           a.extractProgress = 0;
@@ -347,7 +429,7 @@ export function stepCrowd(state, dt, ctx) {
         a.vx += (wx - a.vx) * Math.min(1, dt * 2);
         a.vz += (wz - a.vz) * Math.min(1, dt * 2);
         if ((a.extractProgress || 0) > 0) {
-          _setFCol(f.color);
+          _setFCol({ r: 1, g: 1, b: 1 });
           a.converting = -1;
           a.convertingDisc = null;
           a.extractProgress = 0;
@@ -366,14 +448,12 @@ export function stepCrowd(state, dt, ctx) {
         tmpM.compose(tmpP, tmpQ, tmpS);
         updateFollowerTransform(a, tmpM, spd);
       } else {
-        const s = a.base;
-        tmpS.set(s, s, s);
+        /* Converti sans mesh Leader : caché, pas de paysan fantôme. */
+        tmpS.set(0, 0, 0);
         tmpP.set(a.x, 0, a.z);
         tmpM.compose(tmpP, tmpQ, tmpS);
         const cm = crowdOf(a.id), sl = slotOf(a.id);
         cm.setMatrixAt(sl, tmpM);
-        cm.userData.anim.setY(sl, spd);
-        cm.userData.anim.needsUpdate = true;
       }
       continue;
     }
@@ -388,7 +468,8 @@ export function stepCrowd(state, dt, ctx) {
     const threatX = nearC ? nearC.x : 0;
     const threatZ = nearC ? nearC.z : 0;
     const fromDisciple = !!(nearC && nearC.disc);
-    const fleeR = fromDisciple ? DISC_FLEE_R : FLEE_R;
+    let fleeR = fromDisciple ? DISC_FLEE_R : FLEE_R;
+    if (grayPanic) fleeR *= 1.4;
 
     a.vx = a.vx || 0; a.vz = a.vz || 0;
     a.stumbleT = Math.max(0, (a.stumbleT || 0) - dt);
@@ -403,19 +484,82 @@ export function stepCrowd(state, dt, ctx) {
       const fx = ax / n, fz = az / n;
       const crowdFear = Math.min(1, (nearF.count || 0) / 35);
       const urgency = Math.min(1, (1 - nearD / fleeR) * (0.75 + crowdFear * 0.45));
-      const fleeSpd = fromDisciple
+      const fleeSpd = (fromDisciple
         ? 3.6 + urgency * 2.2
-        : 4.8 + urgency * 3.8 + crowdFear * 1.2;
-      const zig = Math.sin(elapsed * (7 + urgency * 9) + a.id * 1.7) * urgency * (1.8 + crowdFear);
-      const px = -fz, pz = fx;
-      let tx = fx * fleeSpd + px * zig;
-      let tz = fz * fleeSpd + pz * zig;
-      const steered = steerOnIsland(a.x, a.z, tx, tz, 2.4);
-      if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
-        const sn = Math.hypot(tx, tz) || fleeSpd;
-        tx = steered.x * sn;
-        tz = steered.z * sn;
+        : 4.8 + urgency * 3.8 + crowdFear * 1.2) * (grayPanic ? 1.28 : 1);
+
+      /* Bias perso stable : la meute s'éventaille au lieu de tout foncer
+         dans le même coin / la même péninsule. */
+      const personal = ((a.id * 0.6180339) % 1) * 2 - 1;
+      const fan = personal * (0.7 + urgency * 0.55)
+        + Math.sin(elapsed * 2.1 + a.id * 0.37) * 0.18;
+
+      /* Score plusieurs directions : fuir la menace + rester à l'intérieur
+         des tuiles (pas le long du vide). */
+      let bestDx = fx, bestDz = fz, bestSc = -1e9;
+      const tryAng = [
+        fan, fan + 0.45, fan - 0.45, fan + 0.95, fan - 0.95,
+        fan + 1.45, fan - 1.45, fan + 2.1, fan - 2.1,
+      ];
+      for (let ti = 0; ti < tryAng.length; ti++) {
+        const ang = tryAng[ti];
+        const c = Math.cos(ang), s = Math.sin(ang);
+        const dx = fx * c - fz * s;
+        const dz = fx * s + fz * c;
+        let inland = 0;
+        let blocked = false;
+        for (const dist of [1.3, 2.6, 4.0, 5.5]) {
+          if (isSolid(island, a.x + dx * dist, a.z + dz * dist)) inland += 1.0;
+          else { inland -= (dist < 2.8 ? 3.5 : 1.8); blocked = dist < 2.8; break; }
+        }
+        if (blocked) continue;
+        /* Largeur de corridor : pénalise les bords / langues de terre. */
+        const side = 1.6;
+        if (isSolid(island, a.x - dz * side, a.z + dx * side)) inland += 0.55;
+        else inland -= 1.1;
+        if (isSolid(island, a.x + dz * side, a.z - dx * side)) inland += 0.55;
+        else inland -= 1.1;
+        const away = dx * fx + dz * fz;
+        const score = away * 2.2 + inland * 1.35 - Math.abs(ang - fan) * 0.12;
+        if (score > bestSc) { bestSc = score; bestDx = dx; bestDz = dz; }
       }
+
+      let tx = bestDx * fleeSpd;
+      let tz = bestDz * fleeSpd;
+      const steered = steerOnIsland(a.x, a.z, tx, tz, 3.6);
+      if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
+        /* Si le steer dévie vers le vide proche, retomber sur le meilleur score. */
+        const sx = steered.x, sz = steered.z;
+        const deepOk = isSolid(island, a.x + sx * 4.0, a.z + sz * 4.0);
+        if (deepOk || bestSc < -10) {
+          tx = sx * fleeSpd;
+          tz = sz * fleeSpd;
+        } else {
+          tx = bestDx * fleeSpd;
+          tz = bestDz * fleeSpd;
+        }
+      }
+
+      /* Micro-séparation : repousser des voisins gris tout proches pour
+         éviter le tas dans un coin. */
+      let sepX = 0, sepZ = 0, sepN = 0;
+      for (let j = 0; j < agents.length; j++) {
+        const o = agents[j];
+        if (!o || o === a || o.dead) continue;
+        if ((o.discipleOf ?? -1) >= 0 || (o.followerOf ?? -1) >= 0) continue;
+        const dx = a.x - o.x, dz = a.z - o.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > 2.8 * 2.8 || d2 < 1e-6) continue;
+        const d = Math.sqrt(d2);
+        const w = (1 - d / 2.8) / d;
+        sepX += dx * w; sepZ += dz * w; sepN++;
+        if (sepN >= 6) break;
+      }
+      if (sepN > 0) {
+        tx += sepX * (1.8 + urgency);
+        tz += sepZ * (1.8 + urgency);
+      }
+
       if (a.stumbleT <= 0 && urgency > 0.4 && Math.random() < dt * (0.35 + urgency)) {
         a.stumbleT = 0.18 + Math.random() * 0.16;
       }
@@ -428,7 +572,20 @@ export function stepCrowd(state, dt, ctx) {
       a.wt = (a.wt || 0) - dt;
       if (a.wt <= 0) { a.wt = 2 + Math.random() * 3; a.wander = Math.random() * 6.28; }
       let wx = Math.cos(a.wander || 0) * 1.1, wz = Math.sin(a.wander || 0) * 1.1;
-      const steered = steerOnIsland(a.x, a.z, wx, wz, 2.2);
+      /* Errance : privilégier l'intérieur des tuiles, pas longer le vide. */
+      let wBest = -1e9, wX = wx, wZ = wz;
+      for (let k = 0; k < 5; k++) {
+        const ang = (a.wander || 0) + (k - 2) * 0.55;
+        const dx = Math.cos(ang), dz = Math.sin(ang);
+        let sc = 0;
+        for (const dist of [1.5, 3.0, 4.5]) {
+          if (isSolid(island, a.x + dx * dist, a.z + dz * dist)) sc += 1;
+          else { sc -= 2; break; }
+        }
+        if (sc > wBest) { wBest = sc; wX = dx; wZ = dz; }
+      }
+      wx = wX * 1.1; wz = wZ * 1.1;
+      const steered = steerOnIsland(a.x, a.z, wx, wz, 2.8);
       if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
         wx = steered.x * 1.1; wz = steered.z * 1.1;
       } else {
@@ -461,15 +618,16 @@ export function stepCrowd(state, dt, ctx) {
         a.extractProgress = 0;
         if (closestF.i === 0) tone(420, 0.04, 'triangle', 0.02);
       }
-      a.extractProgress = (a.extractProgress || 0) + dt;
-      const u = Math.min(1, a.extractProgress / CONV_RITUAL_T);
+      a.extractProgress = (a.extractProgress || 0) + dt * (zeal ? 2.35 : 1);
+      const ritualNeed = zeal ? CONV_RITUAL_T * 0.55 : CONV_RITUAL_T;
+      const u = Math.min(1, a.extractProgress / ritualNeed);
       _convCol.copy(GRAY).lerp(closestF.color, Math.min(1, u * 1.35));
       setAgentColor(a.id, _convCol);
       scaleMul = u < 0.65
         ? 1 + u * 0.14
         : Math.max(0.12, 1.09 * (1 - (u - 0.65) / 0.35));
       if (Math.random() < 0.12 + u * 0.55) spawnSoulBurst(a.x, a.z, closestF);
-      if (a.extractProgress >= CONV_RITUAL_T) {
+      if (a.extractProgress >= ritualNeed) {
         finishConvert(a, closestF, a.convertingDisc);
         if (a.dead) continue;
         scaleMul = 1.12;

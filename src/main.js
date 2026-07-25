@@ -18,7 +18,7 @@ import {
 import { initNative } from './cap.js';
 import { getSkillMods } from './skills.js';
 import {
-  CRYSTAL_MAX, initCrystals, updateCrystals, spawnSoulBurst,
+  initCrystals, updateCrystals, spawnSoulBurst,
   resetCrystals,
 } from './crystals.js';
 import { bakeVAT, makeVATMaterial, makeVATOutlineMaterial } from './vat.js';
@@ -38,7 +38,7 @@ import {
   DISCIPLE_CHANCE, DISCIPLE_COOLDOWN, DISCIPLE_MAX_BASE,
   DISC_HUNT_R, DISC_SPD, DISC_FLEE_R, DISC_HALO_Y, DISC_DETOUR_T,
   DISC_PAINT_R, DISC_SEP_R, DISC_LVL_MAX, DISC_XP_TO_NEXT,
-  FOLLOWER_SCALE, FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
+  FOLLOWER_SCALE, FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD, DISCIPLE_FORM_SCALE,
   RALLY_CD, RALLY_DUR, GRAY_MIN,
   FERVOR_GAIN, FERVOR_DECAY, ECSTASY_DUR, ECSTASY_RANGE, ECSTASY_CONV,
   SHRINE_R, SHRINE_CAPTURE_T, SHRINE_INCOME_T, SHRINE_INCOME_N,
@@ -52,6 +52,10 @@ import { effects } from './sim/effects.js';
 import { aiThink as _aiThink, paintMixAround as _paintMixAround } from './sim/ai.js';
 import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion, playerDir } from './sim/leader-tick.js';
 import { stepCrowd as _stepCrowd } from './sim/crowd-tick.js';
+import {
+  EVENT_TIMES, EVENT_SPIN_DUR, EVENT_REVEAL_DUR,
+  EVENT_DECK, pickEvent, applyEvent, clampDiscipleLevel,
+} from './sim/events.js';
 import { createNetClient } from './net/client.js';
 import { createRng } from './sim/rng.js';
 
@@ -879,6 +883,7 @@ const HOUSE_EMPTY = new THREE.Color(0.35, 0.32, 0.3);
 const houseColor = new THREE.Color();
 let state = 'menu';     // menu | play | over
 let paused = false;     // partie suspendue via le bouton pause
+let eventFreeze = false; // gel pendant la roulette d'événement
 let elapsed = 0, respawnT = 0, hudT = 0, winT = 0;
 let conceding = false;   // la dernière IA est en train de se rendre
 let lateBellDone = false; // clocher des 30 dernières secondes (une fois / partie)
@@ -917,7 +922,7 @@ const LEADERS = {
 };
 const leaderAssets = {};   // key → { model, texture, clips }
 const followerMeshes = {}; // leaderKey → { mesh, outline, freeSlots[], color[] }
-const FOLLOWER_MESH_CAP = 200;
+const FOLLOWER_MESH_CAP = 400;
 
 /* Horloge partagée des shaders de marche (villageois) et des petits mouvements
    secondaires (roulis d'épaules du Leader). */
@@ -1340,6 +1345,16 @@ function buildFollowerMesh(key, gltf, tex) {
   mesh.count = 0;
   mesh.userData.anim = anim;
 
+  /* instanceColor AVANT le 1er rendu — sinon le shader compile sans teinte d'instance. */
+  const colAttr = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
+  colAttr.setUsage(THREE.DynamicDrawUsage);
+  for (let i = 0; i < cap; i++) colAttr.setXYZ(i, 1, 1, 1);
+  mesh.instanceColor = colAttr;
+
+  const zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+  for (let i = 0; i < cap; i++) mesh.setMatrixAt(i, zeroM);
+  mesh.instanceMatrix.needsUpdate = true;
+
   scene.add(mesh);
   setCharLayer(mesh);
   let outline = null;
@@ -1359,16 +1374,8 @@ function buildFollowerMesh(key, gltf, tex) {
 
   const freeSlots = [];
   for (let i = cap - 1; i >= 0; i--) freeSlots.push(i);
-  const zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
-  for (let i = 0; i < cap; i++) mesh.setMatrixAt(i, zeroM);
-  mesh.instanceMatrix.needsUpdate = true;
 
-  const colAttr = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-  colAttr.setUsage(THREE.DynamicDrawUsage);
-  mesh.instanceColor = colAttr;
-  mesh.geometry.setAttribute('color', colAttr);
-
-  followerMeshes[key] = { mesh, outline, freeSlots, vat, cap };
+  followerMeshes[key] = { key, mesh, outline, freeSlots, vat, cap };
   console.log('[follower] mesh ready:', key, 'verts:', vat.vCount);
   flushPendingFollowers(key);
 }
@@ -1567,13 +1574,20 @@ function releaseFollowerSlot(a) {
   a._followerKey = null;
 }
 
-/* Conversions trop tôt (mesh Leader pas encore cuit) : on retente dès qu'il est prêt.
-   Sinon paysan / paysanne / chevalier restent en mesh d'origine — « pas tous » morphent. */
+/* Conversions trop tôt / pool plein / Leader sans VAT : fallback moine + retry chaque frame. */
 const _pendingFollowers = []; // { a, f }
 
+function followerMeshFor(f) {
+  const want = (f && f.leaderKey) || 'monk';
+  return followerMeshes[want] || followerMeshes.monk || null;
+}
+
 function assignFollowerSlot(a, f) {
-  const key = f.leaderKey || 'monk';
-  const fm = followerMeshes[key];
+  if (a._followerSlot != null && a._followerKey && followerMeshes[a._followerKey]) {
+    hideAgent(a.id);
+    return true;
+  }
+  const fm = followerMeshFor(f);
   if (!fm || !fm.freeSlots.length) {
     a._followerSlot = null;
     a._followerKey = null;
@@ -1581,29 +1595,33 @@ function assignFollowerSlot(a, f) {
   }
   releaseFollowerSlot(a);
   const slot = fm.freeSlots.pop();
+  const key = fm.key;
   a._followerSlot = slot;
   a._followerKey = key;
   fm.mesh.count = Math.max(fm.mesh.count, slot + 1);
   if (fm.outline) fm.outline.count = fm.mesh.count;
-  const col = f.color;
-  fm.mesh.instanceColor.setXYZ(slot, col.r, col.g, col.b);
+  fm.mesh.instanceColor.setXYZ(slot, 1, 1, 1);
   fm.mesh.instanceColor.needsUpdate = true;
   const anim = fm.mesh.userData.anim;
   anim.setXY(slot, Math.random() * 14, 0);
   anim.needsUpdate = true;
+  /* Pose immédiate — sinon invisible jusqu'au prochain crowd-tick. */
+  const sc = (a.discipleOf ?? -1) >= 0 ? DISCIPLE_FORM_SCALE : 1;
+  tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
+  tmpP.set(a.x, a.y || 0, a.z);
+  tmpS.set(sc, sc, sc);
+  tmpM.compose(tmpP, tmpQ, tmpS);
+  fm.mesh.setMatrixAt(slot, tmpM);
+  fm.mesh.instanceMatrix.needsUpdate = true;
+  hideAgent(a.id);
   return true;
 }
 
 function queueFollowerMorph(a, f) {
-  if (assignFollowerSlot(a, f)) {
-    hideAgent(a.id);
-    return true;
-  }
-  /* Mesh pas prêt : garde le villageois visible, retente dès que le VAT Leader arrive. */
-  if (!followerMeshes[f.leaderKey || 'monk']) {
-    if (!_pendingFollowers.some((p) => p.a === a)) _pendingFollowers.push({ a, f });
-  }
-  setAgentColor(a.id, f.color);
+  if (!a || a.dead || !f) return false;
+  if (assignFollowerSlot(a, f)) return true;
+  if (!_pendingFollowers.some((p) => p.a === a)) _pendingFollowers.push({ a, f });
+  hideAgent(a.id); // ne jamais laisser le paysan visible en attendant
   return false;
 }
 
@@ -1614,14 +1632,27 @@ function flushPendingFollowers(readyKey) {
     if (!a || a.dead) { _pendingFollowers.splice(i, 1); continue; }
     const isConv = (a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0;
     if (!isConv) { _pendingFollowers.splice(i, 1); continue; }
-    const key = f.leaderKey || 'monk';
-    if (readyKey && key !== readyKey) continue;
+    const key = (f && f.leaderKey) || 'monk';
+    if (readyKey && key !== readyKey && readyKey !== 'monk') continue;
     if (a._followerSlot != null) { _pendingFollowers.splice(i, 1); continue; }
-    if (assignFollowerSlot(a, f)) {
-      hideAgent(a.id);
-      _pendingFollowers.splice(i, 1);
-    }
+    if (assignFollowerSlot(a, f)) _pendingFollowers.splice(i, 1);
   }
+}
+
+/** Chaque frame : tout converti DOIT être en forme Leader (ou caché en attendant). */
+function ensureAllFollowerMorphs() {
+  for (let i = 0; i < agents.length; i++) {
+    const a = agents[i];
+    if (!a || a.dead) continue;
+    let fi = a.discipleOf ?? -1;
+    if (fi < 0) fi = a.followerOf ?? -1;
+    if (fi < 0) continue;
+    const f = factions[fi];
+    if (!f || !f.alive) continue;
+    if (a._followerSlot == null) queueFollowerMorph(a, f);
+    else hideAgent(a.id);
+  }
+  flushPendingFollowers();
 }
 
 function convertToFollower(a, f, byDisc = null) {
@@ -1653,9 +1684,9 @@ function promoteToDisciple(a, f, byDisc = null) {
   a._paintAcc = 0;
   grayCount--;
   f.count = (f.count || 0) + 1;
-  /* Même morph Leader pour paysan / paysanne / chevalier (auréole en plus). */
+  /* Même morph Leader pour paysan / paysanne / chevalier (auréole + taille Leader). */
   if (!a._origBase) a._origBase = a.base;
-  a.base = a._origBase * FOLLOWER_SCALE;
+  a.base = a._origBase;
   queueFollowerMorph(a, f);
   setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, 1, a.base || 1);
   creditConvert(a, f, { sfx: 'disciple', byDisciple: byDisc });
@@ -1674,7 +1705,14 @@ function finishConvert(a, f, byDisc = null) {
     a.followerOf = -1;
     grayCount++;
   }
-  const underCap = (f.count || 0) < discipleCap(f);
+  /* Plafond = nb de disciples vivants, PAS f.count (croyants totaux) —
+     sinon après 3 converts le culte ne peut plus jamais former de disciple. */
+  let discN = 0;
+  for (let i = 0; i < agents.length; i++) {
+    const d = agents[i];
+    if (d && !d.dead && (d.discipleOf ?? -1) === f.i) discN++;
+  }
+  const underCap = discN < discipleCap(f);
   const cooled = (f.discipleCd || 0) <= 0;
   const rolled = Math.random() < DISCIPLE_CHANCE;
   if (!wasFollower && underCap && cooled && rolled) {
@@ -2689,7 +2727,7 @@ const _leaderTickState = { factions: null, island: null, judgeR: 999 };
 const _leaderTickInput = { x: 0, z: 0, keys: null };
 
 /* Contexte partagé de la boucle crowd — set une fois, mis à jour par référence. */
-const _crowdTickState = { agents: null, factions: null, island: null, elapsed: 0 };
+const _crowdTickState = { agents: null, factions: null, island: null, elapsed: 0, bombs: null };
 const _crowdTickCtx = {
   resolveIsland, isSolid, canJumpToward, steerOnIsland,
   islandApproachScore, islandPathBlocked, islandRandomPoint,
@@ -3355,6 +3393,16 @@ function resetGame() {
   elapsed = 0; respawnT = 0; hudT = 0; winT = 0;
   conceding = false;
   lateBellDone = false;
+  eventFreeze = false;
+  eventsFired.clear();
+  endEventCard(true);
+  worldMods.fuelLockT = 0;
+  worldMods.bombSurgeT = 0;
+  worldMods.bombCapMul = 1;
+  worldMods.bombDroughtT = 0;
+  worldMods.grayPanicT = 0;
+  worldMods.zealT = 0;
+  worldMods.discFreezeT = 0;
   netStatsT = 0;
   stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
   streak = 0; streakT = 0; rallyCd = 0; rallyT = 0;
@@ -3696,33 +3744,61 @@ function endGame(forced) {
    touche déclenche une explosion de SA couleur : grosse flaque gratuite +
    pluie de gouttes qui tachent en retombant. Visible de tous → course. */
 const bombs = [];        // { grp, x, z, bob }
-const BOMB_MIN = 6;      // stock permanent : il y a TOUJOURS de l'action à aller chercher
-const BOMB_MAX = 12;
+const BOMB_MIN = 12;     // stock permanent de cristaux-bombes
+const BOMB_MAX = 20;
 const BOMB_FUEL = 18;
 let bombT = 1;
 
+/* Modificateurs temporaires posés par les cartes événement. */
+const worldMods = {
+  fuelLockT: 0,
+  bombSurgeT: 0,
+  bombCapMul: 1,
+  bombDroughtT: 0,
+  grayPanicT: 0,
+  zealT: 0,
+  discFreezeT: 0,
+};
+
+function bombCapNow() {
+  return Math.round(BOMB_MAX * (worldMods.bombSurgeT > 0 ? worldMods.bombCapMul : 1));
+}
+function bombMinNow() {
+  return Math.round(BOMB_MIN * (worldMods.bombSurgeT > 0 ? worldMods.bombCapMul : 1));
+}
+
+function spawnBombAt(x, z) {
+  if (!bombModel || bombs.length >= bombCapNow()) return null;
+  const grp = bombModel.clone();
+  grp.position.set(x, 0, z);
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(7, 7).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({
+      map: lampGlowTex, color: 0x7fd0ff, transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+  glow.position.y = 0.07;
+  glow.renderOrder = 2;
+  grp.add(glow);
+  scene.add(grp);
+  const b = { grp, x, z, bob: Math.random() * 6.28 };
+  bombs.push(b);
+  return b;
+}
+
 function updateBombs(dt) {
   bombT -= dt;
-  if (bombT <= 0 && bombs.length < BOMB_MAX && bombModel) {
-    // sous le stock minimum : réapparition rapide ; au-dessus : au compte-gouttes
-    bombT = bombs.length < BOMB_MIN ? 1.0 + Math.random() * 1.5 : 8 + Math.random() * 6;
-    const pt = islandRandomPoint(island, 6, Infinity);
-    const grp = bombModel.clone();
-    grp.position.set(pt.x, 0, pt.z);
-    // halo bleuté au sol : le cristal se repère de loin, même de nuit
-    const glow = new THREE.Mesh(
-      new THREE.PlaneGeometry(7, 7).rotateX(-Math.PI / 2),
-      new THREE.MeshBasicMaterial({
-        map: lampGlowTex, color: 0x7fd0ff, transparent: true, opacity: 0.9,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-      }));
-    glow.position.y = 0.07;
-    glow.renderOrder = 2;
-    grp.add(glow);
-    scene.add(grp);
-    bombs.push({ grp, x: pt.x, z: pt.z, bob: Math.random() * 6.28 });
-    // stock permanent : un simple carillon discret, pas de bannière à répétition
-    tone(880, 0.2, 'sine', 0.04); tone(1320, 0.25, 'sine', 0.03, 0.08);
+  if (worldMods.bombDroughtT > 0) {
+    /* Sécheresse : pas de nouveaux cristaux, on anime juste ceux restants. */
+  } else {
+    const cap = bombCapNow();
+    const min = bombMinNow();
+    if (bombT <= 0 && bombs.length < cap && bombModel) {
+      bombT = bombs.length < min ? 0.7 + Math.random() * 1.1 : 5 + Math.random() * 5;
+      const pt = islandRandomPoint(island, 6, Infinity);
+      spawnBombAt(pt.x, pt.z);
+      tone(880, 0.2, 'sine', 0.04); tone(1320, 0.25, 'sine', 0.03, 0.08);
+    }
   }
   for (let i = bombs.length - 1; i >= 0; i--) {
     const b = bombs[i];
@@ -3734,11 +3810,20 @@ function updateBombs(dt) {
       if (!f.alive) continue;
       if (Math.hypot(f.leader.x - b.x, f.leader.z - b.z) < 2.3) { taker = f; break; }
     }
+    if (!taker) {
+      for (const a of agents) {
+        if (a.dead || (a.discipleOf ?? -1) < 0) continue;
+        const f = factions[a.discipleOf];
+        if (!f || !f.alive) continue;
+        if (Math.hypot(a.x - b.x, a.z - b.z) < 2.3) { taker = f; break; }
+      }
+    }
     if (!taker) continue;
     scene.remove(b.grp);
     bombs.splice(i, 1);
-    taker.fuel = Math.min(FUEL_MAX, (taker.fuel || 0) + BOMB_FUEL);
-    // flaque massive GRATUITE + éclaboussures satellites via la pluie de gouttes
+    if (worldMods.fuelLockT <= 0) {
+      taker.fuel = Math.min(FUEL_MAX, (taker.fuel || 0) + BOMB_FUEL);
+    }
     stampSplash(b.x, b.z, 8.5, taker.team, taker.css);
     explodeShrine(b.x, b.z, taker.color, taker.css, taker.team);
     spawnShock(b.x, b.z, taker.color, 13, 0.9);
@@ -3751,6 +3836,327 @@ function updateBombs(dt) {
       banner(`💥 Le Culte ${taker.cult.name} fait exploser un cristal !`);
       tone(392, 0.3, 'triangle', 0.04);
     }
+  }
+}
+
+/* ============================== Cartes événement ============================== */
+const eventsFired = new Set();
+let eventShow = null; // { phase, t, pick, flashAcc }
+const eventOverlayEl = () => $('event-overlay');
+const eventCardEl = () => $('event-card');
+const eventArtEl = () => $('event-art');
+const eventIconEl = () => $('event-icon');
+const eventTitleEl = () => $('event-title');
+const eventBlurbEl = () => $('event-blurb');
+const eventRibbonTextEl = () => $('event-ribbon-text');
+const eventTimerBarEl = () => $('event-timer-bar');
+const eventShockwaveEl = () => $('event-shockwave');
+
+function paintEventCard(ev) {
+  const card = eventCardEl();
+  if (!card || !ev) return;
+  const tone = ev.tone || 'chaos';
+  card.classList.remove('tone-good', 'tone-bad', 'tone-chaos');
+  card.classList.add('tone-' + tone);
+
+  const ribbonEl = eventRibbonTextEl();
+  if (ribbonEl) {
+    if (tone === 'good') ribbonEl.textContent = '✦ BÉNÉDICTION ✦';
+    else if (tone === 'bad') ribbonEl.textContent = '⚠️ MALÉDICTION ⚠️';
+    else ribbonEl.textContent = '⚡ ANARCHIE & CHAOS ⚡';
+  }
+
+  const artEl = eventArtEl();
+  const artFrame = artEl?.parentElement;
+  const src = ev.art || (ev.id ? `assets/events/${ev.id}.png` : '');
+  if (artEl && src) {
+    if (artEl.getAttribute('src') !== src) artEl.src = src;
+    artEl.alt = ev.title || '';
+    artFrame?.classList.add('has-art');
+    artEl.onerror = () => {
+      artFrame?.classList.remove('has-art');
+      const iconEl = eventIconEl();
+      if (iconEl) iconEl.textContent = ev.icon || '✦';
+    };
+  } else {
+    artFrame?.classList.remove('has-art');
+  }
+  const iconEl = eventIconEl();
+  if (iconEl) iconEl.textContent = ev.icon || '✦';
+  const titleEl = eventTitleEl();
+  if (titleEl) titleEl.textContent = ev.title || '';
+  const blurbEl = eventBlurbEl();
+  if (blurbEl) blurbEl.textContent = ev.blurb || '';
+}
+
+function beginEventCard(ev) {
+  eventFreeze = true;
+  eventShow = { phase: 'spin', t: 0, pick: ev, flashAcc: 0 };
+  const overlay = eventOverlayEl();
+  const card = eventCardEl();
+  const shockwave = eventShockwaveEl();
+  const timerBar = eventTimerBarEl();
+
+  if (shockwave) shockwave.classList.remove('trigger');
+  if (timerBar) timerBar.style.transform = 'scaleX(1)';
+
+  if (overlay) overlay.classList.remove('hidden');
+  if (card) {
+    card.classList.remove('is-landing', 'is-reveal');
+    card.classList.add('is-spinning');
+  }
+  paintEventCard(EVENT_DECK[Math.floor(Math.random() * EVENT_DECK.length)]);
+  soundEngine.playSFX('convert', { volume: 0.35, rate: 0.7 });
+}
+
+function endEventCard(silent = false) {
+  eventFreeze = false;
+  eventShow = null;
+  const overlay = eventOverlayEl();
+  const card = eventCardEl();
+  const shockwave = eventShockwaveEl();
+
+  if (overlay) overlay.classList.add('hidden');
+  if (shockwave) shockwave.classList.remove('trigger');
+  if (card) card.classList.remove('is-spinning', 'is-landing', 'is-reveal');
+  if (!silent) banner('▶ La partie reprend !');
+}
+
+const eventCtx = {
+  swapFactionColors() {
+    const alive = factions.filter((f) => f && f.alive);
+    if (alive.length < 2) return;
+    const snap = alive.map((f) => ({
+      color: f.color.clone(),
+      css: f.css,
+      c: f.cult.c,
+    }));
+    for (let i = 0; i < alive.length; i++) {
+      const src = snap[(i + 1) % alive.length];
+      const f = alive[i];
+      f.color.copy(src.color);
+      f.css = src.css;
+      f.cult = { ...f.cult, c: src.c };
+    }
+  },
+  levelUpDisciples(n = 1) {
+    for (const a of agents) {
+      if (!a || a.dead || (a.discipleOf ?? -1) < 0) continue;
+      clampDiscipleLevel(a, n);
+    }
+    updateDisciplesUI();
+  },
+  drainAllFuel(dur = 10) {
+    worldMods.fuelLockT = Math.max(worldMods.fuelLockT, dur);
+    for (const f of factions) {
+      if (f && f.alive) f.fuel = 0;
+    }
+  },
+  surgeBombs(dur = 30, mul = 1.5) {
+    worldMods.bombSurgeT = Math.max(worldMods.bombSurgeT, dur);
+    worldMods.bombCapMul = Math.max(worldMods.bombCapMul, mul);
+    const want = Math.min(bombCapNow(), bombs.length + Math.ceil(BOMB_MIN * (mul - 1)) + 4);
+    let guard = 24;
+    while (bombs.length < want && guard-- > 0) {
+      const pt = islandRandomPoint(island, 6, Infinity);
+      spawnBombAt(pt.x, pt.z);
+    }
+  },
+  boostAllLeaders(dur = 2.5) {
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      f.boostT = Math.max(f.boostT || 0, dur);
+    }
+  },
+  slowAllLeaders(dur = 4) {
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      f.slowT = Math.max(f.slowT || 0, dur);
+    }
+  },
+  panicGrays(dur = 8) {
+    worldMods.grayPanicT = Math.max(worldMods.grayPanicT, dur);
+  },
+  fillAllFuel() {
+    worldMods.fuelLockT = 0;
+    for (const f of factions) {
+      if (f && f.alive) f.fuel = FUEL_MAX;
+    }
+  },
+  washAllPaint() {
+    clearPaint();
+    shake = Math.max(shake, 0.45);
+  },
+  splashAllLeaders(r = 7.5) {
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      stampSplash(f.leader.x, f.leader.z, r, f.team, f.css);
+      spawnShock(f.leader.x, f.leader.z, f.color, r * 0.9, 0.45);
+    }
+  },
+  droughtBombs(dur = 20) {
+    worldMods.bombDroughtT = Math.max(worldMods.bombDroughtT, dur);
+    worldMods.bombSurgeT = 0;
+    worldMods.bombCapMul = 1;
+    for (let i = bombs.length - 1; i >= 0; i--) {
+      scene.remove(bombs[i].grp);
+    }
+    bombs.length = 0;
+  },
+  spawnPilgrims(n = 28) {
+    let left = n;
+    let guard = n * 3;
+    while (left > 0 && guard-- > 0) {
+      const pt = islandRandomPoint(island, 4, Infinity);
+      if (spawnAgent(pt.x, pt.z)) left--;
+    }
+  },
+  scrambleLeaders() {
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      const pt = islandRandomPoint(island, 8, Infinity);
+      f.leader.x = pt.x;
+      f.leader.z = pt.z;
+      f.leader.y = 0;
+      f.leader.dx = 0;
+      f.leader.dz = 0;
+      if (f.grp) f.grp.position.set(pt.x, 0, pt.z);
+    }
+    shake = Math.max(shake, 0.5);
+  },
+  zealAura(dur = 12) {
+    worldMods.zealT = Math.max(worldMods.zealT, dur);
+  },
+  freezeDisciples(dur = 8) {
+    worldMods.discFreezeT = Math.max(worldMods.discFreezeT, dur);
+  },
+  swapTwoLeaders() {
+    const alive = factions.filter((f) => f && f.alive);
+    if (alive.length < 2) return;
+    const i = (Math.random() * alive.length) | 0;
+    let j = (Math.random() * (alive.length - 1)) | 0;
+    if (j >= i) j++;
+    const A = alive[i], B = alive[j];
+    const ax = A.leader.x, az = A.leader.z;
+    A.leader.x = B.leader.x; A.leader.z = B.leader.z;
+    B.leader.x = ax; B.leader.z = az;
+    if (A.grp) A.grp.position.set(A.leader.x, 0, A.leader.z);
+    if (B.grp) B.grp.position.set(B.leader.x, 0, B.leader.z);
+    shake = Math.max(shake, 0.35);
+  },
+  grantBelieversAll(n = 6) {
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      f.count = (f.count || 0) + n;
+      f.everGrew = true;
+      spawnSoulBurst(f.leader.x, f.leader.z, f);
+    }
+  },
+  quake(dur = 5) {
+    shake = Math.max(shake, 0.85);
+    worldMods.grayPanicT = Math.max(worldMods.grayPanicT, dur);
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      f.slowT = Math.max(f.slowT || 0, dur);
+    }
+    for (const a of agents) {
+      if (!a || a.dead) continue;
+      if ((a.discipleOf ?? -1) >= 0 || (a.followerOf ?? -1) >= 0) continue;
+      a.stumbleT = Math.max(a.stumbleT || 0, 0.6 + Math.random() * 0.5);
+      a.vx *= 0.2; a.vz *= 0.2;
+    }
+  },
+};
+
+function updateEventCard(dt) {
+  if (!eventShow) return;
+  eventShow.t += dt;
+  const card = eventCardEl();
+  const shockwave = eventShockwaveEl();
+  const timerBar = eventTimerBarEl();
+
+  if (eventShow.phase === 'spin') {
+    const u = Math.min(1, eventShow.t / EVENT_SPIN_DUR);
+    /* Ralentit franchement : on lit les titres qui défilent, puis on pose. */
+    const interval = 0.14 + u * u * 0.55;
+    eventShow.flashAcc += dt;
+    if (eventShow.flashAcc >= interval) {
+      eventShow.flashAcc = 0;
+      const flash = EVENT_DECK[Math.floor(Math.random() * EVENT_DECK.length)];
+      paintEventCard(flash);
+      soundEngine.playEventSpinTick();
+    }
+    if (eventShow.t >= EVENT_SPIN_DUR) {
+      eventShow.phase = 'land';
+      eventShow.t = 0;
+      paintEventCard(eventShow.pick);
+      if (card) {
+        card.classList.remove('is-spinning');
+        card.classList.add('is-landing');
+      }
+      if (shockwave) {
+        shockwave.classList.remove('trigger');
+        void shockwave.offsetWidth; // Force reflow pour re-déclencher l'animation
+        shockwave.classList.add('trigger');
+      }
+      shake = Math.max(shake, 0.4);
+      soundEngine.playEventSlam();
+    }
+  } else if (eventShow.phase === 'land') {
+    if (eventShow.t >= 0.8) {
+      eventShow.phase = 'reveal';
+      eventShow.t = 0;
+      if (card) {
+        card.classList.remove('is-landing');
+        card.classList.add('is-reveal');
+      }
+      applyEvent(eventShow.pick, eventCtx);
+      banner(`${eventShow.pick.icon} ${eventShow.pick.title}`);
+      shake = Math.max(shake, 0.3);
+      soundEngine.playEventReveal(eventShow.pick?.tone);
+    }
+  } else if (eventShow.phase === 'reveal') {
+    const progress = Math.max(0, 1 - eventShow.t / EVENT_REVEAL_DUR);
+    if (timerBar) {
+      timerBar.style.transform = `scaleX(${progress})`;
+    }
+    if (eventShow.t >= EVENT_REVEAL_DUR) endEventCard();
+  }
+}
+
+function tryTriggerMatchEvent() {
+  if (eventFreeze || eventShow) return;
+  for (const t of EVENT_TIMES) {
+    if (elapsed >= t && !eventsFired.has(t)) {
+      eventsFired.add(t);
+      beginEventCard(pickEvent());
+      return;
+    }
+  }
+}
+
+function tickWorldMods(dt) {
+  if (worldMods.fuelLockT > 0) {
+    worldMods.fuelLockT = Math.max(0, worldMods.fuelLockT - dt);
+    for (const f of factions) {
+      if (f && f.alive) f.fuel = 0;
+    }
+  }
+  if (worldMods.bombSurgeT > 0) {
+    worldMods.bombSurgeT = Math.max(0, worldMods.bombSurgeT - dt);
+    if (worldMods.bombSurgeT <= 0) worldMods.bombCapMul = 1;
+  }
+  if (worldMods.bombDroughtT > 0) {
+    worldMods.bombDroughtT = Math.max(0, worldMods.bombDroughtT - dt);
+  }
+  if (worldMods.grayPanicT > 0) {
+    worldMods.grayPanicT = Math.max(0, worldMods.grayPanicT - dt);
+  }
+  if (worldMods.zealT > 0) {
+    worldMods.zealT = Math.max(0, worldMods.zealT - dt);
+  }
+  if (worldMods.discFreezeT > 0) {
+    worldMods.discFreezeT = Math.max(0, worldMods.discFreezeT - dt);
   }
 }
 
@@ -3849,6 +4255,8 @@ function snapCameraToPlayer() {
 
 function update(dt) {
   elapsed += dt;
+  tryTriggerMatchEvent();
+  tickWorldMods(dt);
 
   // recharge du sprint (cadence fixe, identique pour tous)
   if (factions[0] && factions[0].alive) {
@@ -4019,6 +4427,10 @@ function update(dt) {
   _crowdTickState.factions = factions;
   _crowdTickState.island = island;
   _crowdTickState.elapsed = elapsed;
+  _crowdTickState.bombs = bombs;
+  _crowdTickState.grayPanic = worldMods.grayPanicT > 0;
+  _crowdTickState.zeal = worldMods.zealT > 0;
+  _crowdTickState.discFreeze = worldMods.discFreezeT > 0;
   if (!_crowdTickCtx.finishConvert) {
     // câblage tardif : ces fonctions sont définies plus haut mais on installe
     // les références au premier appel, une fois pour toutes.
@@ -4039,7 +4451,8 @@ function update(dt) {
   for (const m of crowds) { m.instanceMatrix.needsUpdate = true; }
   discHalos.instanceMatrix.needsUpdate = true;
 
-  /* -- Cristaux : orbites et particules d'âme -- */
+  /* -- Morph Leader : tous les convertis ; cristaux orbitaux OFF ; âmes OK -- */
+  ensureAllFollowerMorphs();
   updateCrystals(dt, elapsed, factions);
   /* -- Leaders : visuel -- */
   for (const f of factions) {
@@ -4314,7 +4727,7 @@ function startGame() {
   joyId = null; joyEl.style.display = 'none';
   if (!conquest) {
     MAX_AGENTS = AGENT_CAP;
-    START_GRAYS = 400 * DENSITY;
+    START_GRAYS = 90 * DENSITY;
   }
   /* Multi : biome et graine viennent de l'hôte P2P — même vallée pour tout le monde. */
   const netSeed = multiMode ? net.getSeed() : 0;
@@ -5093,10 +5506,9 @@ setPlayHandler((ctx) => {
   const maxPopKey = `${ctx.world.iso}_${ctx.region.id}`;
   const maxPop = (save.conqMaxPop && save.conqMaxPop[maxPopKey]) || 500;
   
-  // La densité double la population simulée ; le verdict re-divise par DENSITY
-  // pour que la méta-progression garde la même échelle qu'avant.
-  MAX_AGENTS = Math.min(AGENT_CAP, maxPop * DENSITY);
-  START_GRAYS = Math.min(MAX_AGENTS, Math.max(100, Math.round(maxPop * 0.55)) * DENSITY);
+  // Population allégée : moins de NPC = carte aérée + GPU plus calme.
+  MAX_AGENTS = Math.min(AGENT_CAP, Math.max(120, Math.round(maxPop * 0.35) * DENSITY));
+  START_GRAYS = Math.min(MAX_AGENTS, Math.max(55, Math.round(maxPop * 0.28)) * DENSITY);
   
   // Couleur du joueur = sa religion (save.playerColor), fallback couleur du pays
   const colorStr = ctx.playerColor || ctx.world.color;
@@ -5133,7 +5545,8 @@ function frame(now) {
   if (state === 'play') {
     // ralenti dramatique (kill de Leader) : le temps s'étire un court instant
     if (slowmoT > 0) { slowmoT -= dt; dt *= 0.3; }
-    if (!paused) update(dt);   // gelé pendant la pause, mais on continue de rendre
+    if (eventFreeze) updateEventCard(dt);
+    else if (!paused) update(dt);   // gelé pendant pause / carte événement
   } else {
     // Vue d'attente du menu : magnifique orbite cinématographique au-dessus de la vallée
     applyDayCycle(0.42);
