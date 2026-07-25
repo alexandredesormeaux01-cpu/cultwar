@@ -3678,7 +3678,9 @@ function update(dt) {
       const me = factions[0];
       if (me) net.sendPos(me.leader.x, me.leader.z, me.leader.dx, me.leader.dz);
       if (netStatsT <= 0) {
-        netStatsT = 0.5;
+        /* Envoi plus rapproché (4 Hz au lieu de 2 Hz) : réduit le décalage
+           des grisAbs/count côté hôte lors du calcul du podium final. */
+        netStatsT = 0.25;
         const s = factionScore(me);
         net.sendStats(me.sessionId, {
           count: me.count | 0, grisAbs: me.grisAbs | 0,
@@ -3686,14 +3688,35 @@ function update(dt) {
         });
       }
     }
-    /* -- Fin de match : chacun clôt sur son propre chrono (les frames étant
-          quasi identiques, le delta reste <100 ms). L'hôte diffuse aussi le
-          message `over` pour synchroniser le podium (via netRank), et
-          couvrir un client dont le chrono aurait dérivé. -- */
+    /* -- Fin de match : l'hôte reste seul maître du signal. Quand il touche
+          MATCH_DUR, il diffuse UN dernier snapshot frais (pour que le podium
+          reflète bien les toutes dernières peintures) PUIS déclenche `over`.
+          L'invité attend ce message : c'est la seule façon d'avoir un
+          classement identique sur les deux écrans (chacun lisait sinon sa
+          propre snapshot décalée de quelques centaines de ms). -- */
     if (net.isHost() && elapsed >= MATCH_DUR && net.state.phase !== 'over') {
+      const finalData = factions.filter(f => f.sessionId).map(f => {
+        const s = factionScore(f);
+        return {
+          sid: f.sessionId,
+          x: f.leader.x, z: f.leader.z, dx: f.leader.dx, dz: f.leader.dz,
+          alive: f.alive,
+          score: s.total, pct: s.pct,
+          grisAbs: f.grisAbs | 0, count: f.count | 0,
+          playerName: f.cult.name, cultColor: f.cult.c, cultSym: f.cult.sym,
+          isBot: f.isBot, seatIndex: f.seatIndex ?? 0,
+        };
+      });
+      net.broadcastLeaders(finalData, elapsed);
       net.endMatch();
     }
     if (net.state.phase === 'over') { endGame(); return; }
+    /* -- Filet de sécurité (généreux) : si l'`over` de l'hôte ne parvient
+          jamais à l'invité (perte réseau, mise en veille…), on termine
+          quand même après 10 s au-delà du chrono officiel pour ne pas
+          laisser un joueur coincé. Le podium utilisera alors la dernière
+          snapshot reçue — pas idéal mais mieux qu'un jeu figé. -- */
+    if (!net.isHost() && elapsed >= MATCH_DUR + 10) { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
   paintUploadT -= dt;
@@ -3712,9 +3735,10 @@ function update(dt) {
 
   /* -- Le jour est le chrono : la partie s'ouvre à l'aube et se joue jusqu'à
         la nuit tombée. Aucun compteur affiché — le ciel EST l'horloge. -- */
-  /* Fin sur chrono local — en multi, le HUD lit netRank (cohérent chez tous),
-     donc chacun peut clôturer sur son propre elapsed sans divergence de podium. */
-  if (elapsed >= MATCH_DUR) { endGame(); return; }
+  /* Fin sur chrono local en solo. En multi, l'invité NE ferme PAS ici (bloc
+     précédent — attend le message `over` de l'hôte), et l'hôte a déjà fermé
+     via net.endMatch() → phase='over'. */
+  if (!multiMode && elapsed >= MATCH_DUR) { endGame(); return; }
   /* Clocher : trois coups quand il reste 30 s. */
   if (!lateBellDone && MATCH_DUR - elapsed <= 30) {
     lateBellDone = true;
