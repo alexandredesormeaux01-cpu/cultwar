@@ -4,10 +4,17 @@
 
 import { Client } from 'colyseus.js';
 
-/* URL du serveur : dev = local, prod = fly.dev */
-const DEFAULT_URL = import.meta.env.DEV
-  ? `ws://${location.hostname}:2567`
-  : 'wss://cultwar.fly.dev';
+const REMOTE_URL = 'wss://cultwar.fly.dev';
+
+/* URL du serveur : dev = Vite en local, web = même origine que la page,
+   mobile = serveur distant (Capacitor sert le bundle depuis localhost). */
+function defaultServerUrl() {
+  if (import.meta.env.DEV) return `ws://${location.hostname}:2567`;
+  const { protocol, host, hostname } = location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return REMOTE_URL;
+  if (protocol !== 'http:' && protocol !== 'https:') return REMOTE_URL;
+  return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}`;
+}
 
 export function createNetClient() {
   const state = {
@@ -25,7 +32,7 @@ export function createNetClient() {
 
   async function connect(opts = {}) {
     if (state.connected) return state.room;
-    const url = opts.url || DEFAULT_URL;
+    const url = opts.url || defaultServerUrl();
     state.client = new Client(url);
     try {
       state.room = await state.client.joinOrCreate('quickplay', {
