@@ -24,7 +24,7 @@ export function paintMixAround(x, z, r, myTeam, ctx) {
   const { paintGrid, PAINT_N, PAINT_SPAN, island, isSolid } = ctx;
   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;
   let neutral = 0, mine = 0, total = 0;
-  const byTeam = [0, 0, 0];
+  const byTeam = [0, 0, 0, 0, 0, 0, 0, 0];
   for (let i = -2; i <= 2; i++) {
     for (let j = -2; j <= 2; j++) {
       const wx = x + (i / 2) * r, wz = z + (j / 2) * r;

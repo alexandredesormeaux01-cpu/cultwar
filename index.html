@@ -110,19 +110,33 @@
     </div>
   </div>
 
-  <!-- Multijoueur : créer / rejoindre par code -->
+  <!-- Multijoueur : créer / rejoindre / salon -->
   <div id="multi-panel" class="overlay hidden">
-    <div class="panel">
-      <h1>Multijoueur</h1>
-      <p class="tag">Crée un salon et partage le code avec ton ami, ou entre son code pour le rejoindre.</p>
-      <div class="menu-actions">
-        <button id="btn-multi-create" class="big">Créer un salon</button>
-        <div class="multi-join-row">
-          <input id="multi-code-input" maxlength="4" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" />
-          <button id="btn-multi-join" class="big">Rejoindre</button>
+    <div class="panel multi-panel-inner">
+      <div id="multi-gate">
+        <h1>Multijoueur</h1>
+        <p class="tag">Crée un salon et partage le code, ou entre le code d'un ami.</p>
+        <div class="menu-actions">
+          <button id="btn-multi-create" class="big">Créer un salon</button>
+          <div class="multi-join-row">
+            <input id="multi-code-input" maxlength="4" placeholder="CODE" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+            <button id="btn-multi-join" class="big">Rejoindre</button>
+          </div>
+          <div id="multi-status" class="hidden"></div>
+          <button id="btn-multi-back" class="secondary-btn">Retour</button>
         </div>
-        <div id="multi-status" class="hidden"></div>
-        <button id="btn-multi-back" class="secondary-btn">Retour</button>
+      </div>
+
+      <div id="multi-lobby" class="hidden">
+        <h1>Salon <span id="lobby-code">····</span></h1>
+        <p class="tag" id="lobby-hint">Partage le code. Jusqu'à 6 places (joueurs + IA).</p>
+        <ul id="lobby-slots" class="lobby-slots"></ul>
+        <div id="lobby-host-actions" class="menu-actions hidden">
+          <button id="btn-lobby-add-bot" class="secondary-btn">+ Ajouter une IA</button>
+          <button id="btn-lobby-start" class="big">Lancer la partie</button>
+        </div>
+        <p id="lobby-guest-hint" class="tag hidden">En attente que l'hôte lance la partie…</p>
+        <button id="btn-lobby-leave" class="secondary-btn">Quitter le salon</button>
       </div>
     </div>
   </div>

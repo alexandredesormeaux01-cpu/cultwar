@@ -2946,7 +2946,7 @@ function aiThink(f, dt) {
   _aiCtx.island = island;
   _aiCtx.paintGrid = paintGrid;
   _aiCtx.elapsed = elapsed;
-  _aiCtx.difficulty = currentDifficulty;
+  _aiCtx.difficulty = f.aiDifficulty || currentDifficulty;
   _aiCtx.paintOwnerAt = paintOwnerAt;
   _aiCtx.factionScore = factionScore;
   _aiCtx.islandApproachScore = islandApproachScore;
@@ -3110,63 +3110,89 @@ function resetGame() {
   }
   trimCrowdCounts(0);
 
-  // factions : solo = joueur + IA ; multi = humains du salon (+ IA si places libres)
+  // factions : solo = joueur + IA ; multi = sièges du salon (humains + IA)
   const save = JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}');
   if (save.playerColor) {
     const hex = parseInt(save.playerColor.replace('#', ''), 16);
     const ci = CULTS.findIndex(c => c.c === hex);
     if (ci >= 0) playerCultIdx = ci;
   }
-  // Choix du perso jouable (moine par défaut) ; validé contre le registre
   if (save.playerLeader && LEADERS[save.playerLeader]) playerLeaderKey = save.playerLeader;
 
   const multiSeats = [];
-  if (multiMode && net.getLeaders()) {
-    net.getLeaders().forEach((rl, sid) => {
-      multiSeats.push({ sid, rl, isMe: net.isMe(sid) });
-    });
-    multiSeats.sort((a, b) => Number(b.isMe) - Number(a.isMe));
+  if (multiMode) {
+    const lobbySlots = net.getSlots();
+    if (lobbySlots.length) {
+      // Moi d'abord, puis les autres (humains puis IA)
+      const mine = lobbySlots.filter((s) => s.kind === 'human' && net.isMe(s.sessionId));
+      const others = lobbySlots.filter((s) => !(s.kind === 'human' && net.isMe(s.sessionId)));
+      for (const s of [...mine, ...others]) {
+        multiSeats.push({
+          sid: s.sessionId,
+          isMe: s.kind === 'human' && net.isMe(s.sessionId),
+          isBot: s.kind === 'bot',
+          difficulty: s.difficulty || 'normal',
+          name: s.name,
+          leaderKey: s.leaderKey,
+          cultColor: s.cultColor,
+          cultSym: s.cultSym,
+          rl: net.getLeaders()?.get(s.sessionId) || null,
+        });
+      }
+    }
   }
+
+  const factionCount = multiSeats.length
+    ? Math.max(2, Math.min(6, multiSeats.length))
+    : NB_FACTIONS;
 
   const pool = CULTS.map(c => ({ ...c })).filter((_, i) => i !== playerCultIdx);
-  const picks = [{ ...CULTS[playerCultIdx] }];
-  if (save.playerName) {
-    picks[0].name = save.religionName || picks[0].name;
-    picks[0].sym = save.religionIcon || picks[0].sym;
-    if (save.playerColor) {
-      picks[0].c = parseInt(save.playerColor.replace('#', ''), 16);
-    }
-  }
+  const picks = [];
 
   if (multiSeats.length) {
-    // Couleurs / noms issus du serveur pour les adversaires humains
-    for (let i = 1; i < Math.min(NB_FACTIONS, multiSeats.length); i++) {
-      const rl = multiSeats[i].rl;
-      const hex = (rl.cultColor >>> 0) & 0xffffff;
-      picks.push({
-        c: hex,
-        name: rl.playerName || `Joueur ${i + 1}`,
-        sym: rl.cultSym || '⚔',
-      });
+    for (let i = 0; i < factionCount; i++) {
+      const seat = multiSeats[i];
+      if (seat?.isMe) {
+        const base = { ...CULTS[playerCultIdx] };
+        if (save.playerName) {
+          base.name = save.religionName || base.name;
+          base.sym = save.religionIcon || base.sym;
+          if (save.playerColor) base.c = parseInt(save.playerColor.replace('#', ''), 16);
+        }
+        // Couleur assignée par le salon si dispo
+        if (seat.cultColor) base.c = (seat.cultColor >>> 0) & 0xffffff;
+        if (seat.cultSym) base.sym = seat.cultSym;
+        picks.push(base);
+      } else if (seat) {
+        picks.push({
+          c: (seat.cultColor >>> 0) & 0xffffff,
+          name: seat.name || (seat.isBot ? `IA ${i + 1}` : `Joueur ${i + 1}`),
+          sym: seat.cultSym || '⚔',
+        });
+      } else {
+        picks.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
+      }
     }
   } else {
-    // Force la présence des religions adjacentes (touchant la zone) dans la partie
+    picks.push({ ...CULTS[playerCultIdx] });
+    if (save.playerName) {
+      picks[0].name = save.religionName || picks[0].name;
+      picks[0].sym = save.religionIcon || picks[0].sym;
+      if (save.playerColor) {
+        picks[0].c = parseInt(save.playerColor.replace('#', ''), 16);
+      }
+    }
     if (conquest && conquest.touchingOwners && Array.isArray(conquest.touchingOwners)) {
       for (const ownerColor of conquest.touchingOwners) {
         if (picks.length >= 3) break;
         const ownerHex = parseInt(ownerColor.replace('#', ''), 16);
         const idx = pool.findIndex(c => c.c === ownerHex);
-        if (idx >= 0) {
-          picks.push(pool.splice(idx, 1)[0]);
-        }
+        if (idx >= 0) picks.push(pool.splice(idx, 1)[0]);
       }
     }
+    while (picks.length < 3) picks.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
   }
 
-  while (picks.length < 3) picks.push(pool.splice((Math.random() * pool.length) | 0, 1)[0]);
-
-  // Zone non conquise : les adversaires sont des tribus barbares aux noms aléatoires,
-  // SAUF s'ils font partie des religions adjacentes (touchingOwners) venues conquérir la zone.
   if (!multiMode && conquest && conquest.barbarian) {
     const names = BARBARIAN_NAMES.slice();
     for (let i = 1; i < picks.length; i++) {
@@ -3180,17 +3206,13 @@ function resetGame() {
     }
   }
 
-  // Points de dépôt invisibles (plus de remparts / autels / reliques)
   teams = [];
-
-  for (let t = 0; t < 3; t++) {
-    const teamAng = (t / 3) * Math.PI * 2 - Math.PI / 2; // N / SE / SO
+  for (let t = 0; t < factionCount; t++) {
+    const teamAng = (t / factionCount) * Math.PI * 2 - Math.PI / 2;
     const site = findBaseSite(teamAng);
     const gateAng = Math.atan2(-site.z, -site.x);
     const teamColor = new THREE.Color(picks[t].c);
-
     const team = createTeam(t, site.x, site.z, BASE_WALL_R, BASE_WALL_T, gateAng, BASE_GATE_HALF, picks[t]);
-    // Champs vue attachés (transitoire — migrera en Phase 1c)
     team.color = teamColor;
     team.iconStamp = makeIconStamp(picks[t].sym);
     team.altarMesh = null;
@@ -3200,57 +3222,53 @@ function resetGame() {
     teams.push(team);
   }
 
-  /* Distribution des persos : joueur = son choix, bots = les autres du registre
-     dans un ordre mélangé. Si moins de persos que de bots, on complète en
-     piochant de nouveau (jamais le perso du joueur, pour éviter les doublons
-     à l'écran). Ajouter un perso au registre le rend jouable ET utilisable
-     par l'IA, sans autre changement. */
   const rosterPool = Object.keys(LEADERS).filter((k) => k !== playerLeaderKey);
   for (let s = rosterPool.length - 1; s > 0; s--) {
     const j = (Math.random() * (s + 1)) | 0;
     [rosterPool[s], rosterPool[j]] = [rosterPool[j], rosterPool[s]];
   }
   const factionLeaderKey = (i) => {
-    if (multiSeats[i]?.rl?.leaderKey && LEADERS[multiSeats[i].rl.leaderKey]) {
-      return multiSeats[i].rl.leaderKey;
-    }
+    const seat = multiSeats[i];
+    if (seat?.leaderKey && LEADERS[seat.leaderKey]) return seat.leaderKey;
+    if (seat?.rl?.leaderKey && LEADERS[seat.rl.leaderKey]) return seat.rl.leaderKey;
     if (i === 0) return playerLeaderKey;
-    // -1 car le joueur est l'index 0 ; modulo pour un pool plus petit que les bots
     return rosterPool.length ? rosterPool[(i - 1) % rosterPool.length] : 'monk';
   };
 
-  for (let i = 0; i < NB_FACTIONS; i++) {
-    const teamIdx = i;   // un Leader par culte : faction i = équipe i
+  for (let i = 0; i < factionCount; i++) {
+    const teamIdx = i;
     const seat = multiSeats[i];
-    const isHuman = multiMode && !!seat;
-    const spawnPos = isHuman
+    const isLocalBot = !multiMode ? i !== 0 : !!(seat && seat.isBot);
+    const spawnPos = (seat?.rl)
       ? { x: seat.rl.x, z: seat.rl.z }
       : spawnInFactionBase(teams[teamIdx], 0);
 
     let botAggr = 0.35 + Math.random() * 0.65;
     let botAiT = Math.random() * 0.3;
-    if (!isHuman && i !== 0) {
-      if (currentDifficulty === 'easy') {
+    const seatDiff = seat?.difficulty || currentDifficulty;
+    if (isLocalBot) {
+      if (seatDiff === 'easy') {
         botAggr = 0.10 + Math.random() * 0.25;
         botAiT = Math.random() * 0.6;
-      } else if (currentDifficulty === 'normal') {
-        botAggr = 0.30 + Math.random() * 0.40;
-        botAiT = Math.random() * 0.3;
-      } else { // hard
+      } else if (seatDiff === 'hard') {
         botAggr = 0.60 + Math.random() * 0.40;
         botAiT = Math.random() * 0.15;
+      } else {
+        botAggr = 0.30 + Math.random() * 0.40;
+        botAiT = Math.random() * 0.3;
       }
     }
     const leaderKey = factionLeaderKey(i);
     const f = createFaction(i, teamIdx, picks[teamIdx], leaderKey, spawnPos.x, spawnPos.z, {
-      // En multi : les sièges humains ne sont PAS des bots (sinon IA locale vs joueur réel)
-      isBot: isHuman ? false : i !== 0,
+      // Humains distants : pas d'IA locale (positions serveur).
+      // IA du salon : IA locale avec difficulté du siège.
+      isBot: isLocalBot,
       aggr: botAggr,
       aiT: botAiT,
       fuel: FUEL_MAX,
     });
     f.sessionId = seat?.sid || null;
-    // Champs vue attachés (transitoire — migrera en Phase 1c)
+    f.aiDifficulty = seatDiff;
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
     factions.push(f);
@@ -3527,10 +3545,9 @@ function update(dt) {
     const remoteLeaders = net.getLeaders();
     if (remoteLeaders) {
       remoteLeaders.forEach((rl, sid) => {
-        // Son propre perso reste piloté en local (sinon il fige quand le
-        // serveur ne renvoie pas encore de mouvement) ; le serveur ne sert
-        // d'autorité que pour les adversaires.
-        if (net.isMe(sid)) return;
+        // Perso local : pilotage client. IA du salon : IA locale.
+        // Humains distants : positions serveur.
+        if (net.isMe(sid) || rl.isBot) return;
         const f = factions.find((x) => x.sessionId === sid) || null;
         if (f && rl.alive) {
           f.isBot = false;
@@ -3837,13 +3854,14 @@ function startGame() {
 }
 /* Multi : connecte au serveur, attend le début du match, puis démarre la partie
    en mode « multiMode » où les Leaders adverses sont pilotés par le serveur. */
+/* Multi : salon par code, liste jusqu'à 6 (humains + IA), l'hôte lance. */
 async function startMultiGame(opts = {}) {
   audioInit();
   const onStatus = typeof opts.onStatus === 'function' ? opts.onStatus : () => {};
+  const onLobby = typeof opts.onLobby === 'function' ? opts.onLobby : () => {};
   const code = String(opts.code || '').toUpperCase();
   onStatus('Connexion au serveur…');
 
-  const CONNECT_MS = 25000;
   try {
     await Promise.race([
       net.connect({
@@ -3857,7 +3875,7 @@ async function startMultiGame(opts = {}) {
       }),
       new Promise((_, rej) => setTimeout(
         () => rej(new Error('Délai dépassé — le serveur met trop de temps à répondre')),
-        CONNECT_MS,
+        25000,
       )),
     ]);
   } catch (e) {
@@ -3866,34 +3884,20 @@ async function startMultiGame(opts = {}) {
     return false;
   }
 
-  const players = () => net.getLeaders()?.size || 1;
-  const label = code ? `Code : ${code}` : 'Partie rapide';
-  const waitMsg = () => `${label}\n${players()}/2 joueurs — partage le code !`;
-  onStatus(waitMsg());
-  banner(`🌐 ${label} — en attente (${players()}/2)`);
+  onLobby(net.getSlots());
+  net.onSlotsUpdate((slots) => onLobby(slots));
 
-  net.onLeadersUpdate(() => {
-    const n = players();
-    if (net.state.phase === 'lobby') {
-      onStatus(n < 2 ? waitMsg() : `${label}\n${n} joueurs — démarrage…`);
-      banner(n < 2
-        ? `🌐 ${label} — en attente (${n}/2)`
-        : `🌐 ${n} joueurs — la partie démarre…`);
-    }
-  });
-
-  // Attendre 'play' (≥2 joueurs + 5 s côté serveur) — annulable via Retour (leave)
-  const started = await new Promise(res => {
+  const started = await new Promise((res) => {
     if (net.state.phase === 'play') return res(true);
-    net.onPhaseChange(p => { if (p === 'play') res(true); });
+    net.onPhaseChange((p) => { if (p === 'play') res(true); });
     net.onLeft(() => res(false));
   });
   if (!started) {
     onStatus(null);
     return false;
   }
-  if (players() < 2) {
-    banner('⚠ Pas assez de joueurs dans le salon — réessaie');
+  if (net.getSlots().length < 2) {
+    banner('⚠ Pas assez de places dans le salon');
     await net.leave();
     onStatus(null);
     return false;
@@ -3968,9 +3972,9 @@ $('btn-new-game').addEventListener('click', () => {
   });
 });
 
-/* ---- Multijoueur par code : un joueur crée le salon, l'autre entre le code ---- */
+/* ---- Multijoueur par code : salon jusqu'à 6 (humains + IA) ---- */
 function genRoomCode() {
-  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // sans I/L/O/0/1 (lisibilité)
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   let c = '';
   for (let i = 0; i < 4; i++) c += chars[(Math.random() * chars.length) | 0];
   return c;
@@ -3988,31 +3992,136 @@ function setMultiButtonsEnabled(on) {
   $('btn-multi-join').disabled = !on;
 }
 
+function showMultiGate() {
+  $('multi-gate').classList.remove('hidden');
+  $('multi-lobby').classList.add('hidden');
+}
+
+function showMultiLobby() {
+  $('multi-gate').classList.add('hidden');
+  $('multi-lobby').classList.remove('hidden');
+}
+
+const DIFF_LABEL = { easy: 'Facile', normal: 'Normal', hard: 'Difficile' };
+const DIFF_CYCLE = ['easy', 'normal', 'hard'];
+
+function renderLobbySlots(slots) {
+  const list = $('lobby-slots');
+  const code = net.getCode() || '····';
+  $('lobby-code').textContent = code;
+  const host = net.isHost();
+  $('lobby-host-actions').classList.toggle('hidden', !host);
+  $('lobby-guest-hint').classList.toggle('hidden', host);
+  $('lobby-hint').textContent = host
+    ? `Code ${code} — ajoute des IA ou attends des joueurs (max 6), puis lance.`
+    : `Code ${code} — en attente que l'hôte lance la partie.`;
+
+  list.replaceChildren();
+  const ordered = [...(slots || [])];
+  ordered.sort((a, b) => Number(b.isHost) - Number(a.isHost) || a.kind.localeCompare(b.kind));
+
+  for (const s of ordered) {
+    const li = document.createElement('li');
+    li.className = 'lobby-slot';
+    const sw = document.createElement('span');
+    sw.className = 'lobby-slot-swatch';
+    sw.style.background = `#${((s.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
+    const info = document.createElement('div');
+    info.className = 'lobby-slot-info';
+    const name = document.createElement('div');
+    name.className = 'lobby-slot-name';
+    name.textContent = `${s.cultSym || ''} ${s.name}`.trim();
+    const meta = document.createElement('div');
+    meta.className = 'lobby-slot-meta';
+    if (s.kind === 'bot') meta.textContent = `IA · ${DIFF_LABEL[s.difficulty] || s.difficulty}`;
+    else meta.textContent = s.isHost ? 'Hôte' : 'Joueur';
+    info.append(name, meta);
+    li.append(sw, info);
+
+    if (s.isHost) {
+      const badge = document.createElement('span');
+      badge.className = 'lobby-badge';
+      badge.textContent = 'HÔTE';
+      li.append(badge);
+    }
+
+    if (host && s.kind === 'bot') {
+      const actions = document.createElement('div');
+      actions.className = 'lobby-slot-actions';
+      const diffBtn = document.createElement('button');
+      diffBtn.className = 'lobby-diff-btn';
+      diffBtn.type = 'button';
+      diffBtn.textContent = DIFF_LABEL[s.difficulty] || s.difficulty;
+      diffBtn.title = 'Changer la difficulté';
+      diffBtn.addEventListener('click', () => {
+        const i = DIFF_CYCLE.indexOf(s.difficulty);
+        const next = DIFF_CYCLE[(i + 1) % DIFF_CYCLE.length];
+        net.setBotDiff(s.id, next);
+      });
+      const kick = document.createElement('button');
+      kick.className = 'lobby-kick-btn';
+      kick.type = 'button';
+      kick.textContent = '✕';
+      kick.title = 'Retirer cette IA';
+      kick.addEventListener('click', () => net.removeBot(s.id));
+      actions.append(diffBtn, kick);
+      li.append(actions);
+    }
+    list.append(li);
+  }
+
+  const n = ordered.length;
+  $('btn-lobby-add-bot').disabled = n >= 6;
+  $('btn-lobby-start').disabled = n < 2;
+  $('btn-lobby-start').textContent = n < 2
+    ? 'Il faut au moins 2 places'
+    : `Lancer la partie (${n}/6)`;
+}
+
 $('btn-multi').addEventListener('click', () => {
   $('start').classList.add('hidden');
   $('multi-panel').classList.remove('hidden');
+  showMultiGate();
   setMultiStatus(null);
 });
 
-$('btn-multi-back').addEventListener('click', async () => {
+async function leaveMultiToMenu() {
   await net.leave();
   $('multi-panel').classList.add('hidden');
+  showMultiGate();
   $('start').classList.remove('hidden');
   setMultiStatus(null);
   setMultiButtonsEnabled(true);
-});
+}
+
+$('btn-multi-back').addEventListener('click', leaveMultiToMenu);
+$('btn-lobby-leave').addEventListener('click', leaveMultiToMenu);
+
+$('btn-lobby-add-bot').addEventListener('click', () => net.addBot('normal'));
+$('btn-lobby-start').addEventListener('click', () => net.requestStart());
 
 async function launchMulti(code) {
   setMultiButtonsEnabled(false);
+  setMultiStatus('Connexion…');
   try {
-    const ok = await startMultiGame({ code, onStatus: setMultiStatus });
+    const ok = await startMultiGame({
+      code,
+      onStatus: setMultiStatus,
+      onLobby: (slots) => {
+        showMultiLobby();
+        renderLobbySlots(slots);
+        setMultiStatus(null);
+      },
+    });
     if (ok) {
       $('multi-panel').classList.add('hidden');
     } else {
+      showMultiGate();
       setMultiButtonsEnabled(true);
     }
   } catch (e) {
     setMultiStatus(`⚠ ${e?.message || e}`);
+    showMultiGate();
     setMultiButtonsEnabled(true);
   }
 }
