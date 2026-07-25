@@ -1,9 +1,10 @@
 /* Génère toutes les icônes Android (ic_launcher, ic_launcher_round,
-   ic_launcher_foreground) à partir de public/assets/cult_war_logo.png.
-   - Le logo (1024×682) est centré sur un carré transparent avant redimension.
-   - ic_launcher / ic_launcher_round : logo pleine taille (padding léger 6%).
-   - ic_launcher_foreground : logo réduit dans la « safe area » (⅔ centrale),
-     règle Android pour les adaptive icons. */
+   ic_launcher_foreground) à partir de public/assets/cult_war_icon.png
+   (source carrée 252×252, alpha).
+   - ic_launcher / ic_launcher_round : logo pleine taille (padding léger 4%).
+   - ic_launcher_foreground : logo réduit dans la « safe area » centrale
+     (~66 %), règle Android pour les adaptive icons — sinon les coins du
+     splat sont mangés par les masques ronds/squircles des launchers. */
 
 import sharp from 'sharp';
 import path from 'node:path';
@@ -11,7 +12,7 @@ import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const LOGO = path.join(ROOT, 'public/assets/cult_war_logo.png');
+const LOGO = path.join(ROOT, 'public/assets/cult_war_icon.png');
 const RES = path.join(ROOT, 'android/app/src/main/res');
 
 // Tailles standard Android
@@ -36,7 +37,7 @@ async function squareLogo(size, padPct) {
 
 async function main() {
   for (const [density, size] of Object.entries(SIZES)) {
-    const buf = await squareLogo(size, 0.06);
+    const buf = await squareLogo(size, 0.04);
     const dir = path.join(RES, `mipmap-${density}`);
     await fs.writeFile(path.join(dir, 'ic_launcher.png'), buf);
     await fs.writeFile(path.join(dir, 'ic_launcher_round.png'), buf);
