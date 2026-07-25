@@ -9,6 +9,7 @@
 import {
   CONV_R, CONV_RITUAL_T, FLEE_R,
   DISC_HUNT_R, DISC_FLEE_R, DISC_DETOUR_T, DISC_PAINT_R, DISC_SEP_R,
+  FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
 } from './constants.js';
 import { discSpd, discPaintMul } from './disciples.js';
 
@@ -27,6 +28,9 @@ export function stepCrowd(state, dt, ctx) {
     crowdOf, slotOf, trimCrowdCounts,
     spawnSoulBurst, tone,
     onDiscipleLostFaction, // () → main.js incrémente son grayCount
+    onFollowerLostFaction, // (a) → main.js libère le slot follower
+    updateFollowerTransform, // (a, mat, spd) → met à jour le mesh follower
+    setFollowerColor, // (a, col) → teinte le slot follower
     // buffers réutilisables (main.js les partage — un neuf par tick coûterait cher)
     tmpM, tmpQ, tmpS, tmpP, UP_AXIS, GRAY, _convCol,
   } = ctx;
@@ -51,10 +55,11 @@ export function stepCrowd(state, dt, ctx) {
       const f = factions[a.discipleOf];
       if (!f || !f.alive) {
         a.discipleOf = -1;
+        a.base = a._origBase || a.base;
         a.discLvl = 1;
         a.discXp = 0;
-        setAgentColor(a.id, GRAY);
         hideDiscHalo(a.id);
+        onFollowerLostFaction(a); // libère slot Leader + réaffiche le villageois
         onDiscipleLostFaction();
         continue;
       }
@@ -67,14 +72,20 @@ export function stepCrowd(state, dt, ctx) {
         const spd = Math.hypot(a.vx, a.vz);
         if (spd > 0.12) a.face = Math.atan2(a.vx, a.vz);
         tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
-        const s = a.base * 1.04;
-        tmpS.set(s, s, s);
         tmpP.set(a.x, a.y || 0, a.z);
-        tmpM.compose(tmpP, tmpQ, tmpS);
-        const cm = crowdOf(a.id), sl = slotOf(a.id);
-        cm.setMatrixAt(sl, tmpM);
-        cm.userData.anim.setY(sl, Math.max(spd, 4));
-        cm.userData.anim.needsUpdate = true;
+        if (a._followerSlot != null) {
+          tmpS.set(1, 1, 1);
+          tmpM.compose(tmpP, tmpQ, tmpS);
+          updateFollowerTransform(a, tmpM, Math.max(spd, 4));
+        } else {
+          const s = a.base * 1.04;
+          tmpS.set(s, s, s);
+          tmpM.compose(tmpP, tmpQ, tmpS);
+          const cm = crowdOf(a.id), sl = slotOf(a.id);
+          cm.setMatrixAt(sl, tmpM);
+          cm.userData.anim.setY(sl, Math.max(spd, 4));
+          cm.userData.anim.needsUpdate = true;
+        }
         const pulse = 0.5 + 0.5 * Math.sin(elapsed * 5.5 + a.id);
         setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, pulse, a.base || 1);
         continue;
@@ -95,6 +106,7 @@ export function stepCrowd(state, dt, ctx) {
       const candidates = [];
       for (const o of agents) {
         if (o.dead || (o.discipleOf ?? -1) >= 0 || o === a) continue;
+        if ((o.followerOf ?? -1) === a.discipleOf) continue;
         const d = Math.hypot(o.x - a.x, o.z - a.z);
         const approach = d <= DISC_HUNT_R
           ? islandApproachScore(a.x, a.z, o.x, o.z)
@@ -244,17 +256,125 @@ export function stepCrowd(state, dt, ctx) {
       if (spd > 0.12) a.face = Math.atan2(a.vx, a.vz);
 
       tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
-      const s = a.base * 1.04;
-      tmpS.set(s, s, s);
       tmpP.set(a.x, a.y || 0, a.z);
-      tmpM.compose(tmpP, tmpQ, tmpS);
-      const cm = crowdOf(a.id), sl = slotOf(a.id);
-      cm.setMatrixAt(sl, tmpM);
-      cm.userData.anim.setY(sl, spd);
-      cm.userData.anim.needsUpdate = true;
+      if (a._followerSlot != null) {
+        tmpS.set(1, 1, 1);
+        tmpM.compose(tmpP, tmpQ, tmpS);
+        updateFollowerTransform(a, tmpM, spd);
+      } else {
+        const s = a.base * 1.04;
+        tmpS.set(s, s, s);
+        tmpM.compose(tmpP, tmpQ, tmpS);
+        const cm = crowdOf(a.id), sl = slotOf(a.id);
+        cm.setMatrixAt(sl, tmpM);
+        cm.userData.anim.setY(sl, spd);
+        cm.userData.anim.needsUpdate = true;
+      }
 
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * 5.5 + a.id);
       setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, pulse, a.base || 1);
+      continue;
+    }
+
+    /* ========== FOLLOWER : erre tranquillement, fuit les ennemis ========== */
+    if ((a.followerOf ?? -1) >= 0) {
+      const _setFCol = (col) => {
+        if (a._followerSlot != null) setFollowerColor(a, col);
+        else setAgentColor(a.id, col);
+      };
+      const f = factions[a.followerOf];
+      if (!f || !f.alive) {
+        onFollowerLostFaction(a);
+        a.followerOf = -1;
+        a.base = a._origBase || a.base;
+        onDiscipleLostFaction();
+        continue;
+      }
+
+      let enemyC = null, enemyD = 1e9;
+      for (const c of converters) {
+        if (c.f.i === a.followerOf) continue;
+        const d = Math.hypot(c.x - a.x, c.z - a.z);
+        if (d < enemyD) { enemyD = d; enemyC = c; }
+      }
+
+      a.vx = a.vx || 0; a.vz = a.vz || 0;
+
+      const inEnemyConvR = enemyC && enemyD < CONV_R;
+      if (inEnemyConvR) {
+        a.convertingDisc = (enemyC.disc) ? enemyC.disc : null;
+        if ((a.converting ?? -1) !== enemyC.f.i) {
+          a.converting = enemyC.f.i;
+          a.extractProgress = 0;
+        }
+        a.extractProgress = (a.extractProgress || 0) + dt;
+        const u = Math.min(1, a.extractProgress / CONV_RITUAL_T);
+        _convCol.copy(f.color).lerp(enemyC.f.color, Math.min(1, u * 1.35));
+        _setFCol(_convCol);
+        a.vx *= Math.max(0, 1 - dt * 10);
+        a.vz *= Math.max(0, 1 - dt * 10);
+        if (a.extractProgress >= CONV_RITUAL_T) {
+          finishConvert(a, enemyC.f, a.convertingDisc);
+          continue;
+        }
+      } else if (enemyC && enemyD < FOLLOWER_FLEE_R) {
+        const ax = a.x - enemyC.x, az = a.z - enemyC.z;
+        const n = Math.hypot(ax, az) || 1;
+        const urgency = 1 - enemyD / FOLLOWER_FLEE_R;
+        const spd = FOLLOWER_SPD + urgency * 3.5;
+        let tx = (ax / n) * spd, tz = (az / n) * spd;
+        const steered = steerOnIsland(a.x, a.z, tx, tz, 2.2);
+        if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
+          tx = steered.x * spd; tz = steered.z * spd;
+        }
+        a.vx += (tx - a.vx) * Math.min(1, dt * 6);
+        a.vz += (tz - a.vz) * Math.min(1, dt * 6);
+        if ((a.extractProgress || 0) > 0) {
+          _setFCol(f.color);
+          a.converting = -1;
+          a.convertingDisc = null;
+          a.extractProgress = 0;
+        }
+      } else {
+        a.wt = (a.wt || 0) - dt;
+        if (a.wt <= 0) { a.wt = 2.5 + Math.random() * 4; a.wander = Math.random() * 6.28; }
+        let wx = Math.cos(a.wander || 0) * FOLLOWER_WANDER_SPD;
+        let wz = Math.sin(a.wander || 0) * FOLLOWER_WANDER_SPD;
+        const steered = steerOnIsland(a.x, a.z, wx, wz, 2.2);
+        if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
+          wx = steered.x * FOLLOWER_WANDER_SPD; wz = steered.z * FOLLOWER_WANDER_SPD;
+        } else { a.wander += 1.2; }
+        a.vx += (wx - a.vx) * Math.min(1, dt * 2);
+        a.vz += (wz - a.vz) * Math.min(1, dt * 2);
+        if ((a.extractProgress || 0) > 0) {
+          _setFCol(f.color);
+          a.converting = -1;
+          a.convertingDisc = null;
+          a.extractProgress = 0;
+        }
+      }
+
+      a.x += a.vx * dt; a.z += a.vz * dt;
+      resolveIsland(island, a, a.vx, a.vz, dt, false);
+      const spd = Math.hypot(a.vx, a.vz);
+      if (spd > 0.12) a.face = Math.atan2(a.vx, a.vz);
+
+      tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
+      if (a._followerSlot != null) {
+        tmpS.set(1, 1, 1);
+        tmpP.set(a.x, 0, a.z);
+        tmpM.compose(tmpP, tmpQ, tmpS);
+        updateFollowerTransform(a, tmpM, spd);
+      } else {
+        const s = a.base;
+        tmpS.set(s, s, s);
+        tmpP.set(a.x, 0, a.z);
+        tmpM.compose(tmpP, tmpQ, tmpS);
+        const cm = crowdOf(a.id), sl = slotOf(a.id);
+        cm.setMatrixAt(sl, tmpM);
+        cm.userData.anim.setY(sl, spd);
+        cm.userData.anim.needsUpdate = true;
+      }
       continue;
     }
 

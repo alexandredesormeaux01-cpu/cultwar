@@ -38,6 +38,7 @@ import {
   DISCIPLE_CHANCE, DISCIPLE_COOLDOWN, DISCIPLE_MAX_BASE,
   DISC_HUNT_R, DISC_SPD, DISC_FLEE_R, DISC_HALO_Y, DISC_DETOUR_T,
   DISC_PAINT_R, DISC_SEP_R, DISC_LVL_MAX, DISC_XP_TO_NEXT,
+  FOLLOWER_SCALE, FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
   RALLY_CD, RALLY_DUR, GRAY_MIN,
   FERVOR_GAIN, FERVOR_DECAY, ECSTASY_DUR, ECSTASY_RANGE, ECSTASY_CONV,
   SHRINE_R, SHRINE_CAPTURE_T, SHRINE_INCOME_T, SHRINE_INCOME_N,
@@ -112,30 +113,34 @@ let currentCamDist = localStorage.getItem(CAM_DIST_KEY) || 'mid';
 if (!(currentCamDist in CAM_DIST_MUL)) currentCamDist = 'mid';
 let camDistMul = CAM_DIST_MUL[currentCamDist];
 
-/* Qualité graphique (menu) : DPR + AA + ombres. Sur tactile, défaut = équilibré
-   (netteté sans ombres coûteuses) plutôt que l'ancien « tout coupé ». */
+/* Qualité graphique (menu). Sur tactile : presets sobres + défaut Perf. pour
+   limiter la chaleur GPU (DPR/AA/ombres). Desktop inchangé. */
 const isCoarse = matchMedia('(pointer: coarse)').matches;
-const GRAPHICS = {
+const GRAPHICS = isCoarse ? {
+  low:  { maxDpr: 1.0,  aa: false, shadows: false },
+  mid:  { maxDpr: 1.15, aa: false, shadows: false },
+  high: { maxDpr: 1.25, aa: false, shadows: true },
+} : {
   low:  { maxDpr: 1.0, aa: false, shadows: false },
   mid:  { maxDpr: 1.5, aa: true,  shadows: false },
-  /* Belle mobile : DPR plafonné (fillrate) — les ombres restent, allégées ailleurs. */
-  high: { maxDpr: isCoarse ? 1.4 : 2.0, aa: true, shadows: true },
+  high: { maxDpr: 2.0, aa: true,  shadows: true },
 };
 const GRAPHICS_KEY = 'cultio_graphics';
-let currentGraphics = localStorage.getItem(GRAPHICS_KEY) || (isCoarse ? 'mid' : 'high');
-if (!(currentGraphics in GRAPHICS)) currentGraphics = isCoarse ? 'mid' : 'high';
+let currentGraphics = localStorage.getItem(GRAPHICS_KEY) || (isCoarse ? 'low' : 'high');
+if (!(currentGraphics in GRAPHICS)) currentGraphics = isCoarse ? 'low' : 'high';
 const gfx = () => GRAPHICS[currentGraphics];
 const gfxShadows = () => gfx().shadows;
 
 /* ============================== Rendu ============================== */
 const renderer = new THREE.WebGLRenderer({
   antialias: gfx().aa,
-  powerPreference: 'high-performance',
+  /* low-power sur tactile : le navigateur / SoC limite mieux la chauffe. */
+  powerPreference: isCoarse ? 'low-power' : 'high-performance',
 });
 /* L'antialias est figé au contexte WebGL : si l'utilisateur change de palier
    AA, on recharge pour recréer le renderer. */
 const _bootGfxAA = gfx().aa;
-renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.shadowMap.type = isCoarse ? THREE.BasicShadowMap : THREE.PCFShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.12;
 document.getElementById('app').appendChild(renderer.domElement);
@@ -165,11 +170,11 @@ sun.castShadow = true;
 sun.shadow.bias = -0.0015;
 scene.add(sun, sun.target);
 
-/** Résolution + frustum d'ombre : 512 / serré sur tactile, 1024 / large sur desktop. */
+/** Résolution + frustum d'ombre : 256 / serré sur tactile, 1024 / large sur desktop. */
 function configureSunShadow(enabled) {
   const mobile = isCoarse;
-  const size = mobile ? 512 : 1024;
-  const half = mobile ? 20 : 28;
+  const size = mobile ? 256 : 1024;
+  const half = mobile ? 16 : 28;
   if (sun.shadow.mapSize.x !== size) {
     sun.shadow.mapSize.set(size, size);
     if (sun.shadow.map) {
@@ -181,7 +186,7 @@ function configureSunShadow(enabled) {
   sun.shadow.camera.right = half;
   sun.shadow.camera.top = half;
   sun.shadow.camera.bottom = -half;
-  sun.shadow.camera.far = mobile ? 90 : 120;
+  sun.shadow.camera.far = mobile ? 70 : 120;
   sun.shadow.camera.updateProjectionMatrix();
   sun.castShadow = !!enabled;
 }
@@ -535,6 +540,7 @@ const crowdOf = (id) => crowds[variantOf(id)];
    taille des points est exprimée en pixels du framebuffer. */
 initCrystals(scene, renderer.getPixelRatio());
 
+
 /* Les emplacements libres restent dessinés à l'échelle zéro, mais le vertex shader
    les traite quand même. Comme les ids sont attribués dans l'ordre, les
    emplacements occupés d'une variante forment toujours un préfixe : il suffit de
@@ -646,7 +652,7 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
 
   /* Teinte de culte sur le Leader : désactivée — on garde l'apparence d'origine
      du modèle. Le code ci-dessous reste prêt à être réactivé (LEADER_CULT_TINT). */
-  const LEADER_CULT_TINT = false;
+  const LEADER_CULT_TINT = true;
 
   if (asset && asset.model) {
     body = new THREE.Group();
@@ -910,6 +916,8 @@ const LEADERS = {
   chief:    { url: 'assets/models/chief_rigged.glb',    tint: 'none'   },  // chef des Premières Nations : coiffe et perles très signées
 };
 const leaderAssets = {};   // key → { model, texture, clips }
+const followerMeshes = {}; // leaderKey → { mesh, outline, freeSlots[], color[] }
+const FOLLOWER_MESH_CAP = 200;
 
 /* Horloge partagée des shaders de marche (villageois) et des petits mouvements
    secondaires (roulis d'épaules du Leader). */
@@ -1200,20 +1208,22 @@ function setupVillager(mesh, gltf, opts = {}) {
     mesh.geometry = vat.geometry;
     mesh.material = makeVATMaterial(tex, vat, monkTimeU, mesh.uuid);
 
-    // Contour cartoon synchronisé sur la même anim VAT (sibling, pas enfant)
-    const outlineMat = makeVATOutlineMaterial(vat, monkTimeU, mesh.uuid, 0.028);
-    const outline = new THREE.InstancedMesh(vat.geometry, outlineMat, mesh.userData.slots);
-    outline.instanceMatrix = mesh.instanceMatrix;
-    outline.count = mesh.count;
-    outline.frustumCulled = false;
-    outline.userData.isOutline = true;
-    outline.matrixAutoUpdate = false;
-    outline.renderOrder = 2; // après la peinture (renderOrder 1), avant le HUD
-    if (mesh.parent) mesh.parent.add(outline);
-    else mesh.add(outline);
-    mesh.userData.outlineMesh = outline;
+    // Contour cartoon synchronisé — sauté sur tactile (×2 draw calls foule).
+    if (!isCoarse) {
+      const outlineMat = makeVATOutlineMaterial(vat, monkTimeU, mesh.uuid, 0.028);
+      const outline = new THREE.InstancedMesh(vat.geometry, outlineMat, mesh.userData.slots);
+      outline.instanceMatrix = mesh.instanceMatrix;
+      outline.count = mesh.count;
+      outline.frustumCulled = false;
+      outline.userData.isOutline = true;
+      outline.matrixAutoUpdate = false;
+      outline.renderOrder = 2; // après la peinture (renderOrder 1), avant le HUD
+      if (mesh.parent) mesh.parent.add(outline);
+      else mesh.add(outline);
+      mesh.userData.outlineMesh = outline;
+      setCharLayer(outline);
+    }
     setCharLayer(mesh);
-    setCharLayer(outline);
 
     console.log('[VAT]', gltf.scene.name || '', 'verts:', vat.vCount, 'frames:', vat.framesPer * vat.clipCount);
     return;
@@ -1306,7 +1316,61 @@ for (const [key, def] of Object.entries(LEADERS)) {
     });
     leaderAssets[key] = { model: gltf.scene, texture: tex, clips: gltf.animations };
     if (key === 'monk') { monkModel = gltf.scene; monkTexture = tex; monkClips = gltf.animations; }
+    buildFollowerMesh(key, gltf, tex);
   });
+}
+
+function buildFollowerMesh(key, gltf, tex) {
+  const vat = bakeVAT(gltf, { scale: 1, targetHeight: VILLAGER_H * FOLLOWER_SCALE });
+  if (!vat) { console.warn('[follower] VAT fail for', key); return; }
+  const cap = FOLLOWER_MESH_CAP;
+  const anim = new THREE.InstancedBufferAttribute(new Float32Array(cap * 2), 2);
+  anim.setUsage(THREE.DynamicDrawUsage);
+  vat.geometry.setAttribute('aAnim', anim);
+
+  const mesh = new THREE.InstancedMesh(
+    vat.geometry,
+    makeVATMaterial(tex, vat, monkTimeU, 'follower-' + key),
+    cap,
+  );
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.castShadow = gfxShadows();
+  mesh.userData.shadowable = true;
+  mesh.frustumCulled = false;
+  mesh.count = 0;
+  mesh.userData.anim = anim;
+
+  scene.add(mesh);
+  setCharLayer(mesh);
+  let outline = null;
+  if (!isCoarse) {
+    const outMat = makeVATOutlineMaterial(vat, monkTimeU, 'foll-out-' + key, 0.022);
+    outline = new THREE.InstancedMesh(vat.geometry, outMat, cap);
+    outline.instanceMatrix = mesh.instanceMatrix;
+    outline.count = 0;
+    outline.frustumCulled = false;
+    outline.userData.isOutline = true;
+    outline.matrixAutoUpdate = false;
+    outline.renderOrder = 2;
+    scene.add(outline);
+    setCharLayer(outline);
+  }
+  mesh.userData.outlineMesh = outline;
+
+  const freeSlots = [];
+  for (let i = cap - 1; i >= 0; i--) freeSlots.push(i);
+  const zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+  for (let i = 0; i < cap; i++) mesh.setMatrixAt(i, zeroM);
+  mesh.instanceMatrix.needsUpdate = true;
+
+  const colAttr = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
+  colAttr.setUsage(THREE.DynamicDrawUsage);
+  mesh.instanceColor = colAttr;
+  mesh.geometry.setAttribute('color', colAttr);
+
+  followerMeshes[key] = { mesh, outline, freeSlots, vat, cap };
+  console.log('[follower] mesh ready:', key, 'verts:', vat.vCount);
+  flushPendingFollowers(key);
 }
 
 /* Texture du moine recolorée par culte : seuls les pixels de la tunique (orange
@@ -1452,8 +1516,6 @@ function grantDiscipleXp(disc) {
 }
 
 function creditConvert(a, f, opts = {}) {
-  const fuelGain = (f.leaderKey === 'sorcerer') ? FUEL_PER_GRAY * 1.20 : FUEL_PER_GRAY;
-  f.fuel = Math.min(FUEL_MAX, (f.fuel || 0) + fuelGain);
   f.grisAbs = (f.grisAbs || 0) + 1;
 
   if (f.i === 0) {
@@ -1492,6 +1554,93 @@ function creditConvert(a, f, opts = {}) {
 
 function discipleCap(f) { _simCtx.skillMods = skillMods; return _discipleCap(f, _simCtx); }
 
+function releaseFollowerSlot(a) {
+  if (a._followerSlot == null || !a._followerKey) return;
+  const fm = followerMeshes[a._followerKey];
+  if (fm) {
+    fm.freeSlots.push(a._followerSlot);
+    const zeroM = new THREE.Matrix4().makeScale(0, 0, 0);
+    fm.mesh.setMatrixAt(a._followerSlot, zeroM);
+    fm.mesh.instanceMatrix.needsUpdate = true;
+  }
+  a._followerSlot = null;
+  a._followerKey = null;
+}
+
+/* Conversions trop tôt (mesh Leader pas encore cuit) : on retente dès qu'il est prêt.
+   Sinon paysan / paysanne / chevalier restent en mesh d'origine — « pas tous » morphent. */
+const _pendingFollowers = []; // { a, f }
+
+function assignFollowerSlot(a, f) {
+  const key = f.leaderKey || 'monk';
+  const fm = followerMeshes[key];
+  if (!fm || !fm.freeSlots.length) {
+    a._followerSlot = null;
+    a._followerKey = null;
+    return false;
+  }
+  releaseFollowerSlot(a);
+  const slot = fm.freeSlots.pop();
+  a._followerSlot = slot;
+  a._followerKey = key;
+  fm.mesh.count = Math.max(fm.mesh.count, slot + 1);
+  if (fm.outline) fm.outline.count = fm.mesh.count;
+  const col = f.color;
+  fm.mesh.instanceColor.setXYZ(slot, col.r, col.g, col.b);
+  fm.mesh.instanceColor.needsUpdate = true;
+  const anim = fm.mesh.userData.anim;
+  anim.setXY(slot, Math.random() * 14, 0);
+  anim.needsUpdate = true;
+  return true;
+}
+
+function queueFollowerMorph(a, f) {
+  if (assignFollowerSlot(a, f)) {
+    hideAgent(a.id);
+    return true;
+  }
+  /* Mesh pas prêt : garde le villageois visible, retente dès que le VAT Leader arrive. */
+  if (!followerMeshes[f.leaderKey || 'monk']) {
+    if (!_pendingFollowers.some((p) => p.a === a)) _pendingFollowers.push({ a, f });
+  }
+  setAgentColor(a.id, f.color);
+  return false;
+}
+
+function flushPendingFollowers(readyKey) {
+  if (!_pendingFollowers.length) return;
+  for (let i = _pendingFollowers.length - 1; i >= 0; i--) {
+    const { a, f } = _pendingFollowers[i];
+    if (!a || a.dead) { _pendingFollowers.splice(i, 1); continue; }
+    const isConv = (a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0;
+    if (!isConv) { _pendingFollowers.splice(i, 1); continue; }
+    const key = f.leaderKey || 'monk';
+    if (readyKey && key !== readyKey) continue;
+    if (a._followerSlot != null) { _pendingFollowers.splice(i, 1); continue; }
+    if (assignFollowerSlot(a, f)) {
+      hideAgent(a.id);
+      _pendingFollowers.splice(i, 1);
+    }
+  }
+}
+
+function convertToFollower(a, f, byDisc = null) {
+  a.dead = false;
+  a.extractProgress = 0;
+  a.converting = -1;
+  a.convertingDisc = null;
+  a.discipleOf = -1;
+  a.followerOf = f.i;
+  if (!a._origBase) a._origBase = a.base;
+  a.base = a._origBase * FOLLOWER_SCALE;
+  a.vx = 0; a.vz = 0;
+  grayCount--;
+  f.count = (f.count || 0) + 1;
+  hideDiscHalo(a.id);
+  queueFollowerMorph(a, f);
+  creditConvert(a, f, { byDisciple: byDisc });
+}
+
 function promoteToDisciple(a, f, byDisc = null) {
   a.dead = false;
   a.extractProgress = 0;
@@ -1504,37 +1653,35 @@ function promoteToDisciple(a, f, byDisc = null) {
   a._paintAcc = 0;
   grayCount--;
   f.count = (f.count || 0) + 1;
-  setAgentColor(a.id, f.color);
+  /* Même morph Leader pour paysan / paysanne / chevalier (auréole en plus). */
+  if (!a._origBase) a._origBase = a.base;
+  a.base = a._origBase * FOLLOWER_SCALE;
+  queueFollowerMorph(a, f);
   setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, 1, a.base || 1);
   creditConvert(a, f, { sfx: 'disciple', byDisciple: byDisc });
   if (f.i === 0) updateDisciplesUI();
 }
 
-function absorbAgent(a, f, byDisc = null) {
-  a.dead = true;
-  a.extractProgress = 0;
-  a.converting = -1;
-  a.convertingDisc = null;
-  a.discipleOf = -1;
-  grayCount--;
-  freeAgentIds.push(a.id);
-  hideAgent(a.id);
-  hideDiscHalo(a.id);
-  setAgentColor(a.id, GRAY);
-  creditConvert(a, f, { byDisciple: byDisc });
-}
-
 function finishConvert(a, f, byDisc = null) {
   if (a.dead || !f || !f.alive) return;
   if ((a.discipleOf ?? -1) >= 0) return;
+  const wasFollower = (a.followerOf ?? -1) >= 0;
+  if (wasFollower && a.followerOf === f.i) return;
+  if (wasFollower) {
+    const oldF = factions[a.followerOf];
+    if (oldF) oldF.count = Math.max(0, (oldF.count || 0) - 1);
+    releaseFollowerSlot(a);
+    a.followerOf = -1;
+    grayCount++;
+  }
   const underCap = (f.count || 0) < discipleCap(f);
   const cooled = (f.discipleCd || 0) <= 0;
   const rolled = Math.random() < DISCIPLE_CHANCE;
-  if (underCap && cooled && rolled) {
+  if (!wasFollower && underCap && cooled && rolled) {
     promoteToDisciple(a, f, byDisc);
     f.discipleCd = DISCIPLE_COOLDOWN;
   } else {
-    absorbAgent(a, f, byDisc);
+    convertToFollower(a, f, byDisc);
   }
 }
 
@@ -1799,7 +1946,7 @@ function erasePaintAt(x, z, radius) {
 }
 
 function explodeShrine(x, z, colorObj, cssStr, factionIdx) {
-  const pCount = isCoarse ? 30 : 85;
+  const pCount = isCoarse ? 14 : 85;
   const mat = new THREE.MeshBasicMaterial({ color: colorObj });
   for (let i = 0; i < pCount; i++) {
     const size = 0.28 + Math.random() * 0.28;
@@ -2552,6 +2699,37 @@ const _crowdTickCtx = {
   crowdOf: null, slotOf: null, trimCrowdCounts: null,
   spawnSoulBurst: null, tone: null,
   onDiscipleLostFaction: () => { grayCount++; },
+  onFollowerLostFaction: (a) => {
+    releaseFollowerSlot(a);
+    setAgentColor(a.id, GRAY);
+    const cm = crowdOf(a.id), sl = slotOf(a.id);
+    const m = new THREE.Matrix4();
+    m.compose(
+      new THREE.Vector3(a.x, 0, a.z),
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), a.face || 0),
+      new THREE.Vector3(a.base, a.base, a.base),
+    );
+    cm.setMatrixAt(sl, m);
+    cm.instanceMatrix.needsUpdate = true;
+  },
+  updateFollowerTransform: (a, mat, spd) => {
+    if (a._followerSlot == null || !a._followerKey) return;
+    const fm = followerMeshes[a._followerKey];
+    if (!fm) return;
+    fm.mesh.setMatrixAt(a._followerSlot, mat);
+    fm.mesh.instanceMatrix.needsUpdate = true;
+    if (fm.mesh.userData.anim) {
+      fm.mesh.userData.anim.setY(a._followerSlot, spd);
+      fm.mesh.userData.anim.needsUpdate = true;
+    }
+  },
+  setFollowerColor: (a, col) => {
+    if (a._followerSlot == null || !a._followerKey) return;
+    const fm = followerMeshes[a._followerKey];
+    if (!fm) return;
+    fm.mesh.instanceColor.setXYZ(a._followerSlot, col.r, col.g, col.b);
+    fm.mesh.instanceColor.needsUpdate = true;
+  },
   tmpM, tmpQ, tmpS, tmpP, UP_AXIS, GRAY,
   _convCol: null,
 };
@@ -3152,6 +3330,14 @@ function resetGame() {
   agents = []; factions = []; grayCount = 0;
   freeAgentIds.length = 0;
   resetCrystals();
+  for (const a of agents) releaseFollowerSlot(a);
+  _pendingFollowers.length = 0;
+  for (const fm of Object.values(followerMeshes)) {
+    fm.mesh.count = 0;
+    if (fm.outline) fm.outline.count = 0;
+    fm.freeSlots.length = 0;
+    for (let i = fm.cap - 1; i >= 0; i--) fm.freeSlots.push(i);
+  }
   // objectif de la course : proportionnel à la population de départ de la carte
   GOAL = Math.max(GOAL_MIN, Math.round(START_GRAYS * GOAL_RATIO));
   // adoption des habitations construites par buildMap : chacune reçoit son état
@@ -3510,15 +3696,16 @@ function endGame(forced) {
    touche déclenche une explosion de SA couleur : grosse flaque gratuite +
    pluie de gouttes qui tachent en retombant. Visible de tous → course. */
 const bombs = [];        // { grp, x, z, bob }
-const BOMB_MIN = 3;      // stock permanent : il y a TOUJOURS de l'action à aller chercher
-const BOMB_MAX = 5;
+const BOMB_MIN = 6;      // stock permanent : il y a TOUJOURS de l'action à aller chercher
+const BOMB_MAX = 12;
+const BOMB_FUEL = 18;
 let bombT = 1;
 
 function updateBombs(dt) {
   bombT -= dt;
   if (bombT <= 0 && bombs.length < BOMB_MAX && bombModel) {
     // sous le stock minimum : réapparition rapide ; au-dessus : au compte-gouttes
-    bombT = bombs.length < BOMB_MIN ? 1.5 + Math.random() * 2 : 16 + Math.random() * 14;
+    bombT = bombs.length < BOMB_MIN ? 1.0 + Math.random() * 1.5 : 8 + Math.random() * 6;
     const pt = islandRandomPoint(island, 6, Infinity);
     const grp = bombModel.clone();
     grp.position.set(pt.x, 0, pt.z);
@@ -3550,6 +3737,7 @@ function updateBombs(dt) {
     if (!taker) continue;
     scene.remove(b.grp);
     bombs.splice(i, 1);
+    taker.fuel = Math.min(FUEL_MAX, (taker.fuel || 0) + BOMB_FUEL);
     // flaque massive GRATUITE + éclaboussures satellites via la pluie de gouttes
     stampSplash(b.x, b.z, 8.5, taker.team, taker.css);
     explodeShrine(b.x, b.z, taker.color, taker.css, taker.team);
@@ -3615,7 +3803,7 @@ function updateStorm(dt) {
   storm.x += storm.dx * dt; storm.z += storm.dz * dt;
   storm.grp.position.set(storm.x, 15, storm.z);
   if (isSolid(island, storm.x, storm.z)) erasePaintAt(storm.x, storm.z, 5.2);
-  const rainCount = isCoarse ? 1 : 3;
+  const rainCount = isCoarse ? 0 : 3;
   for (let k = 0; k < rainCount; k++) {
     const a = Math.random() * Math.PI * 2, rr = Math.random() * 5.2;
     const mesh = new THREE.Mesh(RAIN_GEO, RAIN_MAT);
@@ -3853,7 +4041,6 @@ function update(dt) {
 
   /* -- Cristaux : orbites et particules d'âme -- */
   updateCrystals(dt, elapsed, factions);
-
   /* -- Leaders : visuel -- */
   for (const f of factions) {
     if (!f.alive) continue;
@@ -4933,7 +5120,8 @@ document.addEventListener('visibilitychange', () => {
   appActive = !document.hidden;
   if (appActive) last = performance.now();
 });
-const FRAME_MIN_MS = 1000 / 62;
+/* Cap FPS : 30 sur tactile (chaleur), ~62 sur desktop. */
+const FRAME_MIN_MS = 1000 / (isCoarse ? 30 : 62);
 function frame(now) {
   requestAnimationFrame(frame);
   if (!appActive) return;

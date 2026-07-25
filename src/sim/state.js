@@ -32,6 +32,7 @@ export function createAgent(id, x, z, ang = 0, baseScale = 1) {
     convertingDisc: null,
     stumbleT: 0,
     discipleOf: -1,
+    followerOf: -1,
     discLvl: 1,
     discXp: 0,
     _stuckT: 0,
@@ -60,6 +61,7 @@ export function resetAgent(a, x, z, ang = 0) {
   a.convertingDisc = null;
   a.stumbleT = 0;
   a.discipleOf = -1;
+  a.followerOf = -1;
   a._stuckT = 0;
   a._detourT = 0;
   a._detourSide = 0;

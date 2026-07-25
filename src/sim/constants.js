@@ -6,9 +6,9 @@
 /* ---- Carte ---- */
 export const MAP_R = 60;               // rayon jouable de la vallée
 export const DENSITY = 2;              // multiplicateur de population
-export const AGENT_CAP_MOBILE = 640;
+export const AGENT_CAP_MOBILE = 480;
 export const AGENT_CAP_DESKTOP = 1280;
-export const START_GRAYS = 280 * DENSITY;
+export const START_GRAYS = 140 * DENSITY;
 
 /* ---- Factions & base ---- */
 export const NB_FACTIONS = 3;
@@ -70,10 +70,16 @@ export const DISC_SEP_R = 9;
 export const DISC_LVL_MAX = 3;
 export const DISC_XP_TO_NEXT = [0, 30, 45];
 
+/* ---- Followers (convertis fidèles) ---- */
+export const FOLLOWER_SCALE = 0.55;
+export const FOLLOWER_FLEE_R = 10;
+export const FOLLOWER_SPD = 2.8;
+export const FOLLOWER_WANDER_SPD = 0.8;
+
 /* ---- Ralliement / repop ---- */
 export const RALLY_CD = 14;
 export const RALLY_DUR = 3.0;
-export const GRAY_MIN = 130 * DENSITY;
+export const GRAY_MIN = 60 * DENSITY;
 
 /* ---- Ferveur / Extase ---- */
 export const FERVOR_GAIN = 0.042;

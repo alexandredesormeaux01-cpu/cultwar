@@ -9,7 +9,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /* Tactile : densités / outlines allégés (mode Belle plus fluide sur téléphone). */
 const _isCoarse = matchMedia('(pointer: coarse)').matches;
-const GRASS_DENSITY_MOBILE = 0.5;
+const GRASS_DENSITY_MOBILE = 0.35;
 
 /* ---------------------------------------------------------------------------
    Gradient map toon partagé (3 crans) — la recette standard Three.js.
@@ -1236,10 +1236,11 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
       spec.scale || [1, 1],
       foliage ? OUTLINE_WORLD_FOLIAGE : OUTLINE_WORLD,
     );
-    /* Mobile : moitié d'herbe pour limiter draw calls + overdraw alpha. */
+    /* Mobile : moitié d'herbe + sol fleuri allégé pour limiter draw calls. */
     let specCount = spec.count;
-    if (_isCoarse && kind === 'grass') {
-      specCount = Math.max(8, Math.round(spec.count * GRASS_DENSITY_MOBILE));
+    if (_isCoarse && (kind === 'grass' || kind === 'ground')) {
+      const dens = kind === 'grass' ? GRASS_DENSITY_MOBILE : 0.45;
+      specCount = Math.max(8, Math.round(spec.count * dens));
     }
     const base = Math.floor(specCount / variants.length);
     let extra = specCount % variants.length;

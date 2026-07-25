@@ -95,8 +95,8 @@ export function initCrystals(scene, pixelRatio = 1) {
    s'y résorbent. Le croyant est crédité immédiatement — ces particules sont du
    pur retour sensoriel, jamais un délai de jeu. */
 const _isMobileSoul = matchMedia('(pointer: coarse)').matches;
-const SOUL_POOL = _isMobileSoul ? 2000 : 6000;
-const SOULS_PER_ABSORB = _isMobileSoul ? 10 : 22;
+const SOUL_POOL = _isMobileSoul ? 800 : 6000;
+const SOULS_PER_ABSORB = _isMobileSoul ? 6 : 22;
 /* Deux temps : l'âme se disperse et flotte sur place, puis file d'un coup vers
    le Leader. C'est la suspension qui donne la lecture « magie qui s'attarde
    avant d'être absorbée » — sans elle, la gerbe n'est qu'un trait. */

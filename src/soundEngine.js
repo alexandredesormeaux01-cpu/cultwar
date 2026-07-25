@@ -14,6 +14,7 @@ const SFX = {
   disciple_alien: asset('sfx_disciple_alien.mp3'),
   bell: asset('sfx_bell.mp3'),
   crystal: asset('sfx_crystal_explode.mp3'),
+  paint_orb: asset('sfx_paint_orb.mp3'),
 };
 
 const MUSIC = {
