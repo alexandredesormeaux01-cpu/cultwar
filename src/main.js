@@ -3694,6 +3694,12 @@ function update(dt) {
       net.endMatch();
     }
     if (net.state.phase === 'over') { endGame(); return; }
+    /* -- Filet de sécurité invité : si le message `over` n'arrive jamais
+          (onglet hôte en arrière-plan, connexion instable, mobile en veille),
+          on termine tout de même quelques secondes après l'échéance officielle
+          pour ne pas laisser un joueur bloqué en jeu. Le netRank utilisé sera
+          celui du dernier tick reçu — cohérent avec ce que l'hôte a diffusé. -- */
+    if (!net.isHost() && elapsed >= MATCH_DUR + 3) { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
   paintUploadT -= dt;
