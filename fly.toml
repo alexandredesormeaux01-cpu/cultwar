@@ -1,23 +1,33 @@
-# Fly.io — serveur Colyseus (multiplayer)
-app = "cult-io"
-primary_region = "cdg"
+# fly.toml app configuration file generated for cultwar on 2026-07-25T02:56:39Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'cultwar'
+primary_region = 'cdg'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  PORT = "8080"
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 1
 
   [[http_service.checks]]
-    interval = "15s"
-    timeout = "2s"
-    grace_period = "10s"
-    method = "GET"
-    path = "/health"
+    interval = '15s'
+    timeout = '2s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
