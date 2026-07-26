@@ -2748,6 +2748,9 @@ const _leaderTickCtx = {
 const _leaderTickState = { factions: null, island: null, judgeR: 999 };
 const _leaderTickInput = { x: 0, z: 0, keys: null };
 
+/* Contexte réutilisé pour les aiTrigger de pouvoirs (évite une alloc/frame). */
+const _botPowerCtx = { agents: null, factions: null };
+
 /* Contexte partagé de la boucle crowd — set une fois, mis à jour par référence. */
 const _crowdTickState = { agents: null, factions: null, island: null, elapsed: 0, bombs: null };
 const _crowdTickCtx = {
@@ -4677,6 +4680,28 @@ function update(dt) {
   updateShields(dt);
   updateTotems(dt);
   updateCurses(dt);
+  /* IA : chaque bot ré-évalue ses triggers de pouvoir toutes les ~0.4 s.
+     La décision (aiTrigger) est dans le registry ; ici on ne fait
+     qu'orchestrer les appels et respecter le cd + le coût. */
+  _botPowerCtx.agents = agents;
+  _botPowerCtx.factions = factions;
+  for (const f of factions) {
+    if (!f || !f.isBot || !f.alive) continue;
+    f.powerAiT = (f.powerAiT || 0) - dt;
+    if (f.powerAiT > 0) continue;
+    f.powerAiT = 0.35 + Math.random() * 0.15;
+    const slotCount = f.powers?.length || 0;
+    for (let slot = 0; slot < slotCount; slot++) {
+      const id = f.powers[slot];
+      if (!id) continue;
+      if ((f.powerCds?.[slot] || 0) > 0) continue;
+      const def = getPowerDef(id);
+      if (!def || !def.aiTrigger || (f.fuel || 0) < def.cost) continue;
+      if (def.aiTrigger(f, slot, _botPowerCtx)) {
+        activatePower(f, slot);
+      }
+    }
+  }
   updateAttackUI();
   updatePowerUI();
 

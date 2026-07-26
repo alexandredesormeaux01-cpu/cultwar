@@ -48,6 +48,23 @@ export const POWER_DEFS = {
         tickRate: 0.35,  // 1 vague de conversion toutes les 0.35s
       };
     },
+    /* IA : casser un totem si ≥4 gris pêchables sont à ~6 m du Leader. */
+    aiTrigger(f, _slot, ctx) {
+      const agents = ctx?.agents; if (!agents) return false;
+      const L = f.leader; if (!L) return false;
+      const R2 = 36;
+      let n = 0;
+      for (let i = 0; i < agents.length; i++) {
+        const a = agents[i];
+        if (!a || a.dead) continue;
+        if ((a.discipleOf ?? -1) >= 0) continue;
+        if ((a.followerOf ?? -1) === f.i) continue;
+        const dx = a.x - L.x, dz = a.z - L.z;
+        if (dx * dx + dz * dz > R2) continue;
+        if (++n >= 4) return true;
+      }
+      return false;
+    },
   },
 
   sanctuaire: {
@@ -80,6 +97,20 @@ export const POWER_DEFS = {
         color: this.color,
         follow: true,   // suit le Leader plutôt que de rester posé
       };
+    },
+    /* IA : dôme quand un Leader rival vient à ≤10 m et qu'il y a des fidèles
+       à protéger — sinon on gâche le cd sur rien. */
+    aiTrigger(f, _slot, ctx) {
+      if ((f.count || 0) < 3) return false;
+      const factions = ctx?.factions; if (!factions) return false;
+      const L = f.leader; if (!L) return false;
+      const R2 = 100;
+      for (const o of factions) {
+        if (!o || !o.alive || o.i === f.i || !o.leader) continue;
+        const dx = o.leader.x - L.x, dz = o.leader.z - L.z;
+        if (dx * dx + dz * dz < R2) return true;
+      }
+      return false;
     },
   },
 
@@ -126,6 +157,20 @@ export const POWER_DEFS = {
         drainRate: this.drainRate,
         color: this.color,
       };
+    },
+    /* IA : malédiction si un Leader rival est à portée (≤24 m) et vaut la
+       peine d'être drainé (≥20 fuel). Sinon on garde le cd pour mieux. */
+    aiTrigger(f, _slot, ctx) {
+      const factions = ctx?.factions; if (!factions) return false;
+      const L = f.leader; if (!L) return false;
+      const R2 = 576;
+      for (const o of factions) {
+        if (!o || !o.alive || o.i === f.i || !o.leader) continue;
+        if ((o.fuel || 0) < 20) continue;
+        const dx = o.leader.x - L.x, dz = o.leader.z - L.z;
+        if (dx * dx + dz * dz < R2) return true;
+      }
+      return false;
     },
   },
 };
