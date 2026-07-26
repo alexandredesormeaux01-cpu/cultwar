@@ -116,6 +116,10 @@ export function createFaction(i, teamIdx, cult, leaderKey, spawnX, spawnZ, opts 
     grisAbs: 0,
     discipleCd: 0,
     dist: 0,
+    /* Pouvoir actif équipé (Phase 1 — Prêche pour le moine par défaut).
+       Piloté par src/sim/powers.js. */
+    power: opts.power ?? null,
+    powerCd: 0,
   };
 }
 

@@ -46,6 +46,7 @@ import {
   V_MAX, V_MIN, N_REF, LEADER_RESP, CAM_RESP, CAM_LOOK_RESP,
 } from './sim/constants.js';
 import { createAgent, resetAgent, createFaction, createTeam } from './sim/state.js';
+import { POWER_DEFS, getPowerDef, tickPowerCd } from './sim/powers.js';
 import { discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac } from './sim/disciples.js';
 import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap, inOwnBase as _inOwnBase } from './sim/leader.js';
 import { effects } from './sim/effects.js';
@@ -900,6 +901,7 @@ let slowmoT = 0;                  // ralenti dramatique (kill de Leader)
 let shrines = [];       // { x, z, owner, cap, progress, incomeT, grp, ring, disc, crystal, beam }
 let shocks = [];        // ondes de choc au sol { mesh, t, maxR, dur }
 let particles = [];     // particules 3D d'explosion
+let activeTotems = [];  // pouvoir Prêche : { grp, life, max, radius, factionIdx, color, tickAcc, tickRate }
 let territoryIncomeT = 0; // timer du revenu passif de territoire
 let stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
 let lastRank = 1;
@@ -2240,6 +2242,9 @@ function clearFx() {
   }
 
   shrines = []; shocks = []; particles = [];
+  /* Nettoyage des totems entre parties : leur groupe est retiré et disposé. */
+  for (const t of activeTotems) { if (t.grp) { scene.remove(t.grp); disposeGroup(t.grp); } }
+  activeTotems = [];
 }
 
 /** Sol praticable devant la porte : la porte regarde le centre de la carte,
@@ -3173,6 +3178,10 @@ addEventListener('keydown', e => {
     e.preventDefault();
     if (!keys.Space && state === 'play') doBoost(factions[0]);
   }
+  /* Touche E → pouvoir équipé (mobile passe par le bouton dédié). */
+  if (e.code === 'KeyE' && !keys.KeyE && state === 'play') {
+    activatePower(factions[0]);
+  }
   keys[e.code] = true;
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
@@ -3218,6 +3227,12 @@ addEventListener('pointerup', onUp);
 addEventListener('pointercancel', onUp);
 
 boostBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); doBoost(factions[0]); });
+if (powerBtn) {
+  powerBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    activatePower(factions[0]);
+  });
+}
 if (rallyEl) rallyEl.style.display = 'none';   // bouton « Piège » retiré
 
 /* ============================== IA ==============================
@@ -3608,6 +3623,9 @@ function resetGame() {
       aggr: botAggr,
       aiT: botAiT,
       fuel: FUEL_MAX,
+      /* Kit de départ du perso (Phase 1 : tout le monde équipe le Prêche).
+         Sera piloté par perso quand le pool aura + de pouvoirs. */
+      power: leaderPowerFor(leaderKey),
     });
     if (isRemote) {
       f.netTarget = { x: spawnPos.x, z: spawnPos.z, dx: 0, dz: 0 };
@@ -4256,6 +4274,153 @@ function snapCameraToPlayer() {
   camera.lookAt(camLook);
 }
 
+/* ============================== Pouvoirs actifs ==============================
+   Phase 1 : un seul pouvoir (Prêche) équipé selon le perso. Le registry vit
+   dans src/sim/powers.js ; le rendu du totem + la conversion sont ici. */
+
+/* Kit de départ par perso — le pool s'enrichira, ici tout le monde a Prêche. */
+function leaderPowerFor(_leaderKey) { return 'preche'; }
+
+/** Instancie le mesh d'un totem à (x,z) : bougie + halo bas + rayon vertical. */
+function makeTotemGroup(x, z, color, radius) {
+  const g = new THREE.Group();
+  g.position.set(x, 0, z);
+  const col = new THREE.Color(color);
+  /* Base : anneau rayon = portée de conversion, pulsera avec le temps. */
+  const ringGeo = new THREE.RingGeometry(radius * 0.94, radius, 48).rotateX(-Math.PI / 2);
+  const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.72, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }));
+  ring.position.y = 0.06;
+  ring.renderOrder = 2;
+  g.add(ring);
+  /* Disc plein légèrement plus petit — donne le "sol chaud". */
+  const discGeo = new THREE.CircleGeometry(radius, 40).rotateX(-Math.PI / 2);
+  const disc = new THREE.Mesh(discGeo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.10, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }));
+  disc.position.y = 0.05;
+  disc.renderOrder = 1;
+  g.add(disc);
+  /* Faisceau vertical : pilier de lumière au-dessus du totem. */
+  const beamGeo = new THREE.CylinderGeometry(0.32, 0.55, 5.2, 10, 1, true).translate(0, 2.6, 0);
+  const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.55, depthWrite: false,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+  }));
+  g.add(beam);
+  /* Petite sphère brillante au sommet — accent visuel. */
+  const orbGeo = new THREE.SphereGeometry(0.32, 12, 8);
+  const orb = new THREE.Mesh(orbGeo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.95, depthWrite: false,
+  }));
+  orb.position.y = 2.7;
+  g.add(orb);
+  g.userData = { ring, disc, beam, orb };
+  return g;
+}
+
+/** Convertit jusqu'à `maxAgents` gris dans un rayon (une "vague" de Prêche). */
+function totemConvertWave(t, maxAgents = 3) {
+  const f = factions[t.factionIdx];
+  if (!f || !f.alive) return;
+  const r2 = t.radius * t.radius;
+  let taken = 0;
+  for (let i = 0; i < agents.length && taken < maxAgents; i++) {
+    const a = agents[i];
+    if (!a || a.dead) continue;
+    if ((a.discipleOf ?? -1) >= 0) continue;      // déjà quelqu'un
+    if ((a.followerOf ?? -1) === f.i) continue;   // déjà à nous
+    const dx = a.x - t.x, dz = a.z - t.z;
+    if (dx * dx + dz * dz > r2) continue;
+    finishConvert(a, f);
+    /* Petit flash au sol pour raconter la conversion. */
+    spawnShock(a.x, a.z, f.color, 1.6, 0.28);
+    taken++;
+  }
+}
+
+/** Déclenche le pouvoir équipé de la faction (retourne true si consommé). */
+function activatePower(f) {
+  if (!f || !f.alive) return false;
+  const def = getPowerDef(f.power);
+  if (!def) return false;
+  const desc = def.activate(f, { now: performance.now() });
+  if (!desc) return false;
+  if (desc.kind === 'totem') {
+    const grp = makeTotemGroup(desc.x, desc.z, desc.color, desc.radius);
+    scene.add(grp);
+    activeTotems.push({ ...desc, grp });
+    /* Feedback audio + choc initial pour marquer l'invocation. */
+    spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.4, 0.42);
+    soundEngine.playSFX?.('boost');
+    /* Première vague immédiate (sinon on attend tickRate secondes pour rien). */
+    totemConvertWave(activeTotems[activeTotems.length - 1], 3);
+  }
+  return true;
+}
+
+/** Tick tous les totems : décroit la vie, joue les vagues, anime le mesh. */
+function updateTotems(dt) {
+  for (let i = activeTotems.length - 1; i >= 0; i--) {
+    const t = activeTotems[i];
+    t.life -= dt;
+    t.tickAcc += dt;
+    if (t.tickAcc >= t.tickRate) {
+      t.tickAcc = 0;
+      totemConvertWave(t, 3);
+    }
+    const k = 1 - Math.max(0, t.life) / t.max; // 0 = frais, 1 = fin
+    const ud = t.grp?.userData;
+    if (ud) {
+      const pulse = 0.85 + 0.15 * Math.sin(elapsed * 6);
+      ud.ring.material.opacity = 0.72 * (1 - k * 0.5) * pulse;
+      ud.disc.material.opacity = 0.10 * (1 - k);
+      ud.beam.material.opacity = 0.55 * (1 - k * 0.6) * pulse;
+      ud.orb.material.opacity = 0.95 * (1 - k * 0.35);
+      ud.orb.position.y = 2.7 + Math.sin(elapsed * 4) * 0.08;
+    }
+    if (t.life <= 0) {
+      scene.remove(t.grp);
+      disposeGroup(t.grp);
+      activeTotems.splice(i, 1);
+    }
+  }
+}
+
+/* Cooldown UI pour le bouton pouvoir (miroir de updateAttackUI pour le boost). */
+const powerBtn = $('power-btn');
+const powerOverlay = $('power-cooldown-overlay');
+const powerIcon = powerBtn?.querySelector('.ico');
+const powerLbl = powerBtn?.querySelector('.lbl');
+let lastPowerPct = -1;
+let lastPowerId = null;
+function updatePowerUI() {
+  if (!powerBtn || !powerOverlay) return;
+  const me = factions[0];
+  if (!me || !me.power) { powerBtn.classList.add('hidden'); return; }
+  powerBtn.classList.remove('hidden');
+  const def = getPowerDef(me.power);
+  if (!def) return;
+  if (me.power !== lastPowerId) {
+    lastPowerId = me.power;
+    if (powerIcon) powerIcon.textContent = def.icon;
+    if (powerLbl) powerLbl.textContent = def.name;
+  }
+  const cd = me.powerCd || 0;
+  const charge = 1 - Math.min(1, cd / def.cooldown);
+  const enoughFuel = (me.fuel || 0) >= def.cost;
+  const ready = charge >= 1 && enoughFuel;
+  const pct = Math.round(charge * 100);
+  if (pct === lastPowerPct && ready === powerBtn.classList.contains('ready')) return;
+  lastPowerPct = pct;
+  powerOverlay.style.setProperty('--cooldown-deg', Math.round((1 - charge) * 360) + 'deg');
+  powerBtn.classList.toggle('ready', ready);
+  powerBtn.classList.toggle('low-fuel', !enoughFuel && charge >= 1);
+}
+
 function update(dt) {
   elapsed += dt;
   tryTriggerMatchEvent();
@@ -4265,7 +4430,11 @@ function update(dt) {
   if (factions[0] && factions[0].alive) {
     playerBoostCharge = Math.min(1, playerBoostCharge + dt / BOOST_CD);
   }
+  /* Cooldown des pouvoirs actifs pour toutes les factions. */
+  for (const f of factions) tickPowerCd(f, dt);
+  updateTotems(dt);
   updateAttackUI();
+  updatePowerUI();
 
   /* -- Jugement désactivé : plus d'anneau qui referme la vallée -- */
   judgeR = 999;

@@ -555,6 +555,34 @@ button.big:active { transform: scale(.95); }
   to { box-shadow: 0 0 20px rgba(0, 255, 200, 0.8); }
 }
 
+/* Bouton pouvoir actif — thème doré/pourpre pour se distinguer du sprint bleu. */
+#power-btn {
+  border-color: rgba(255, 209, 102, 0.35) !important;
+}
+#power-btn.ready {
+  background: rgba(255, 209, 102, 0.22) !important;
+  border-color: rgba(255, 209, 102, 0.7) !important;
+  box-shadow: 0 0 12px rgba(255, 209, 102, 0.55);
+  animation: powerReadyPulse 1.6s infinite alternate;
+}
+#power-btn.low-fuel {
+  border-color: rgba(200, 80, 80, 0.5) !important;
+  opacity: 0.7;
+}
+#power-cooldown-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: conic-gradient(rgba(10, 12, 30, 0.8) var(--cooldown-deg), transparent var(--cooldown-deg));
+  pointer-events: none;
+  border-radius: 50%;
+  transform: rotate(-90deg);
+}
+@keyframes powerReadyPulse {
+  from { box-shadow: 0 0 10px rgba(255, 209, 102, 0.45); }
+  to   { box-shadow: 0 0 22px rgba(255, 209, 102, 0.85); }
+}
+
 #rally {
   border-color: rgba(40, 120, 220, 0.3) !important;
 }
