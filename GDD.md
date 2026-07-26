@@ -212,3 +212,19 @@ Repris et porté depuis Mix-it (React → JS vanilla, module autonome `src/progr
 ### 7.4 La Faune Sauvage (Créatures)
 * **Gardiens de Cristaux (Locaux)** : Lors de l'extraction d'un cristal, 2 à 3 petites créatures agressives (ex: spectres de pierre) surgissent et pourchassent brièvement le joueur pour le ralentir.
 * **Le Traqueur de Cristaux (Global)** : Une grande créature menaçante rôde sur la carte et est activement attirée par le joueur qui transporte le plus grand nombre de cristaux (le Leader de la partie), équilibrant la partie de façon diégétique.
+
+---
+
+## 8. Disciples autonomes — priorités d'objectif
+
+Les disciples (3 slots de base, extensibles via l'arbre de compétences) opèrent en autonomie sur la carte. Ils n'ont pas de skill dédié, meurent au contact d'un Leader rival, et leur slot se libère alors pour la prochaine promotion. Leur cible courante est pilotée par un seul chiffre — la **jauge de peinture du Leader** — selon trois paliers :
+
+| Jauge peinture | Cible primaire | Comportement |
+|---|---|---|
+| **100 % → 70 %** | Conversion | Les disciples cherchent les sceptiques gris. Ils ignorent les cristaux hors trajet. |
+| **70 % → 40 %** | Mixte (peinture + conversion) | Ils vont vers le cristal le plus proche, mais convertissent tout gris rencontré en chemin. |
+| **≤ 40 %** | Cristaux de peinture | Priorité absolue à la recharge. Un gris sur la route peut être converti si le détour reste marginal ; sinon ignoré. |
+
+**Règle de détour opportuniste** (paliers mixte et bas) : un objectif secondaire n'est pris que si dévier vers lui ajoute **≤ 25 %** de distance au trajet vers l'objectif primaire. Comportement lisible en une phrase : *« ils vont chercher ce qui manque, sans ignorer ce qu'ils croisent. »*
+
+**Portage** : un cristal ramassé est instantanément converti en peinture dans la jauge du Leader. Aucun état intermédiaire — la mort d'un disciple ne fait donc rien perdre.
