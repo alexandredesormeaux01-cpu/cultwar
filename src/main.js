@@ -2847,6 +2847,9 @@ const paintOrbLiquidEl = $('paint-orb-liquid');
 const paintOrbPctEl = $('paint-orb-pct');
 const pctValEl = $('pct-val');
 const boostBtn = $('boost-btn'), boostOverlay = $('boost-cooldown-overlay');
+const powerBtn = $('power-btn'), powerOverlay = $('power-cooldown-overlay');
+const powerIcon = powerBtn?.querySelector('.ico');
+const powerLbl = powerBtn?.querySelector('.lbl');
 /* Boule de verre : niveau de peinture. N'écrit dans le DOM que si le % change. */
 let fervorPct = -1;
 function updateFuelUI() {
@@ -4390,11 +4393,9 @@ function updateTotems(dt) {
   }
 }
 
-/* Cooldown UI pour le bouton pouvoir (miroir de updateAttackUI pour le boost). */
-const powerBtn = $('power-btn');
-const powerOverlay = $('power-cooldown-overlay');
-const powerIcon = powerBtn?.querySelector('.ico');
-const powerLbl = powerBtn?.querySelector('.lbl');
+/* Cooldown UI pour le bouton pouvoir (miroir de updateAttackUI pour le boost).
+   Les refs `powerBtn`/`powerOverlay`/`powerIcon`/`powerLbl` sont déclarées dans
+   le bloc HUD principal (à côté de boostBtn), avant les event listeners. */
 let lastPowerPct = -1;
 let lastPowerId = null;
 function updatePowerUI() {
