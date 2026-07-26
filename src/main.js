@@ -905,6 +905,7 @@ let shocks = [];        // ondes de choc au sol { mesh, t, maxR, dur }
 let particles = [];     // particules 3D d'explosion
 let activeTotems = [];  // pouvoir Prêche : { grp, life, max, radius, factionIdx, color, tickAcc, tickRate }
 let activeShields = []; // pouvoir Sanctuaire : { grp, life, max, radius, factionIdx, x, z, follow }
+let activeCurses = [];  // pouvoir Anathème  : { grp, life, max, casterIdx, targetIdx, drainRate }
 let territoryIncomeT = 0; // timer du revenu passif de territoire
 let stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
 let lastRank = 1;
@@ -2256,6 +2257,8 @@ function clearFx() {
   activeTotems = [];
   for (const s of activeShields) { if (s.grp) { scene.remove(s.grp); disposeGroup(s.grp); } }
   activeShields = [];
+  for (const c of activeCurses) { if (c.grp) { scene.remove(c.grp); disposeGroup(c.grp); } }
+  activeCurses = [];
 }
 
 /** Sol praticable devant la porte : la porte regarde le centre de la carte,
@@ -4299,10 +4302,20 @@ function snapCameraToPlayer() {
    Registry dans src/sim/powers.js. Chaque faction équipe 2 slots ; les VFX
    (totem, dôme…) et la sim (conversion en zone, immunité) vivent ici. */
 
-/* Kit de départ par perso — 2 slots. Aujourd'hui : tout le monde teste
-   Prêche + Sanctuaire pour valider le système à 2 catégories. Les kits
-   différenciés viendront quand le pool aura assez de pouvoirs. */
-function leaderPowersFor(_leaderKey) { return ['preche', 'sanctuaire']; }
+/* Kit de départ par perso — 2 slots choisis dans le pool {preche, sanctuaire,
+   anatheme}. Assignations qui collent à l'archétype de chaque Leader ;
+   les persos sans kit propre héritent d'un pair "polyvalent". */
+const LEADER_KITS = {
+  monk:     ['preche',    'sanctuaire'],  // contemplatif : prop + def
+  amazon:   ['anatheme',  'sanctuaire'],  // guerrière : off + def
+  sorcerer: ['preche',    'anatheme'],    // caster occulte : prop + off
+  chief:    ['preche',    'anatheme'],    // chef de chasse : prop + off
+  nomad:    ['preche',    'sanctuaire'],  // pèlerin : prop + def
+  alien:    ['sanctuaire', 'anatheme'],   // mystérieux : def + off
+};
+function leaderPowersFor(leaderKey) {
+  return LEADER_KITS[leaderKey] || ['preche', 'sanctuaire'];
+}
 
 /* Texture procédurale : grille d'hexagones (traits blancs sur transparent),
    posée sur la sphère du dôme en additive blending. */
@@ -4423,6 +4436,73 @@ function updateShields(dt) {
   }
 }
 
+/** Instancie le mesh d'Anathème : anneau rouge tournant au-dessus de la tête
+    + petite sphère noire pulsante. Le groupe suit le Leader ciblé via update. */
+function makeCurseGroup(color) {
+  const g = new THREE.Group();
+  const col = new THREE.Color(color);
+  /* Anneau rouge tournant — hors sol, au-dessus du perso. */
+  const ringGeo = new THREE.RingGeometry(0.75, 0.95, 32).rotateX(-Math.PI / 2);
+  const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.9,
+    depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  }));
+  ring.position.y = 3.15;
+  g.add(ring);
+  /* Deuxième anneau contrarotatif — accentue le mouvement de rune. */
+  const ring2Geo = new THREE.RingGeometry(0.55, 0.7, 24).rotateX(-Math.PI / 2);
+  const ring2 = new THREE.Mesh(ring2Geo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.75,
+    depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  }));
+  ring2.position.y = 3.22;
+  g.add(ring2);
+  /* Sphère centrale sombre — le point de fixation de la malédiction. */
+  const orbGeo = new THREE.SphereGeometry(0.22, 12, 8);
+  const orb = new THREE.Mesh(orbGeo, new THREE.MeshBasicMaterial({
+    color: 0x220000, transparent: true, opacity: 0.85, depthWrite: false,
+  }));
+  orb.position.y = 3.18;
+  g.add(orb);
+  g.userData = { ring, ring2, orb };
+  return g;
+}
+
+/** Tick des malédictions : suit la cible, draine le fuel, anime, expire. */
+function updateCurses(dt) {
+  for (let i = activeCurses.length - 1; i >= 0; i--) {
+    const c = activeCurses[i];
+    c.life -= dt;
+    const target = factions[c.targetIdx];
+    /* Cible morte / disparue → on ferme la malédiction proprement. */
+    if (!target || !target.alive) c.life = 0;
+    if (c.life <= 0) {
+      scene.remove(c.grp);
+      disposeGroup(c.grp);
+      activeCurses.splice(i, 1);
+      continue;
+    }
+    /* Suit la tête de la cible. */
+    if (target.leader) {
+      c.grp.position.set(target.leader.x, 0, target.leader.z);
+    }
+    /* Drain de fuel — s'arrête à 0, ne descend pas dans le négatif. */
+    target.fuel = Math.max(0, (target.fuel || 0) - c.drainRate * dt);
+    /* Anim des runes. */
+    const ud = c.grp.userData;
+    if (ud) {
+      ud.ring.rotation.y += dt * 2.2;
+      ud.ring2.rotation.y -= dt * 3.0;
+      const pulse = 0.85 + 0.15 * Math.sin(elapsed * 7);
+      ud.ring.material.opacity = 0.9 * pulse;
+      ud.ring2.material.opacity = 0.75 * pulse;
+      ud.orb.scale.setScalar(0.9 + 0.15 * Math.sin(elapsed * 8));
+    }
+  }
+}
+
 /** Instancie le mesh d'un totem à (x,z) : bougie + halo bas + rayon vertical. */
 function makeTotemGroup(x, z, color, radius) {
   const g = new THREE.Group();
@@ -4491,7 +4571,9 @@ function activatePower(f, slot = 0) {
   if (!id) return false;
   const def = getPowerDef(id);
   if (!def) return false;
-  const desc = def.activate(f, slot);
+  /* ctx : accès en lecture aux factions pour les pouvoirs à ciblage
+     (Anathème auto-lock sur le Leader adverse le plus proche). */
+  const desc = def.activate(f, slot, { factions });
   if (!desc) return false;
   if (desc.kind === 'totem') {
     const grp = makeTotemGroup(desc.x, desc.z, desc.color, desc.radius);
@@ -4499,13 +4581,21 @@ function activatePower(f, slot = 0) {
     activeTotems.push({ ...desc, grp });
     spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.4, 0.42);
     soundEngine.playSFX?.('boost');
-    /* Première vague immédiate (sinon on attend tickRate secondes pour rien). */
     totemConvertWave(activeTotems[activeTotems.length - 1], 3);
   } else if (desc.kind === 'shield') {
     const grp = makeShieldGroup(desc.x, desc.z, desc.color, desc.radius);
     scene.add(grp);
     activeShields.push({ ...desc, grp });
     spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.5, 0.42);
+    soundEngine.playSFX?.('boost');
+  } else if (desc.kind === 'curse') {
+    const target = factions[desc.targetIdx];
+    if (!target || !target.leader) return true;   // cd déjà consommé, on ne rembourse pas
+    const grp = makeCurseGroup(desc.color);
+    grp.position.set(target.leader.x, 0, target.leader.z);
+    scene.add(grp);
+    activeCurses.push({ ...desc, grp });
+    spawnShock(target.leader.x, target.leader.z, new THREE.Color(desc.color), 2.0, 0.45);
     soundEngine.playSFX?.('boost');
   }
   return true;
@@ -4586,6 +4676,7 @@ function update(dt) {
   for (const f of factions) tickPowerCds(f, dt);
   updateShields(dt);
   updateTotems(dt);
+  updateCurses(dt);
   updateAttackUI();
   updatePowerUI();
 

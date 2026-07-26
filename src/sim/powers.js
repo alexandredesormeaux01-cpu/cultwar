@@ -82,6 +82,52 @@ export const POWER_DEFS = {
       };
     },
   },
+
+  anatheme: {
+    id: 'anatheme',
+    name: 'Anathème',
+    icon: '☠',
+    category: 'offensif',
+    cost: 6,
+    cooldown: 22,
+    range: 25,         // portée de verrouillage sur un Leader adverse (mètres)
+    duration: 8,       // durée du drain (secondes)
+    drainRate: 2,      // fuel/s soutirés à la cible
+    color: 0xff3355,   // rouge sang — signature offensive
+    activate(f, slot, ctx) {
+      if (!f || !f.alive) return null;
+      if ((f.powerCds?.[slot] || 0) > 0) return null;
+      if ((f.fuel || 0) < this.cost) return null;
+      const factions = ctx?.factions;
+      if (!factions) return null;
+      /* Auto-lock sur le Leader adverse le plus proche dans la portée. */
+      const lx = f.leader?.x ?? 0;
+      const lz = f.leader?.z ?? 0;
+      const r2 = this.range * this.range;
+      let bestIdx = -1, bestD2 = Infinity;
+      for (const other of factions) {
+        if (!other || !other.alive || other.i === f.i) continue;
+        if (!other.leader) continue;
+        const dx = other.leader.x - lx, dz = other.leader.z - lz;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > r2 || d2 > bestD2) continue;
+        bestIdx = other.i; bestD2 = d2;
+      }
+      if (bestIdx < 0) return null;   // rien à portée → n'entame ni cd ni coût
+      f.fuel -= this.cost;
+      f.powerCds[slot] = this.cooldown;
+      return {
+        kind: 'curse',
+        power: this.id,
+        casterIdx: f.i,
+        targetIdx: bestIdx,
+        life: this.duration,
+        max: this.duration,
+        drainRate: this.drainRate,
+        color: this.color,
+      };
+    },
+  },
 };
 
 /** Renvoie la définition d'un pouvoir par id, ou null. */
