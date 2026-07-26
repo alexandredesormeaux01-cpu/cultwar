@@ -555,7 +555,7 @@ button.big:active { transform: scale(.95); }
   to { box-shadow: 0 0 20px rgba(0, 255, 200, 0.8); }
 }
 
-/* Bouton pouvoir actif — thème doré/pourpre pour se distinguer du sprint bleu. */
+/* Bouton pouvoir actif — thème doré (slot 1) / cyan (slot 2). */
 #power-btn {
   border-color: rgba(255, 209, 102, 0.35) !important;
 }
@@ -565,11 +565,22 @@ button.big:active { transform: scale(.95); }
   box-shadow: 0 0 12px rgba(255, 209, 102, 0.55);
   animation: powerReadyPulse 1.6s infinite alternate;
 }
-#power-btn.low-fuel {
+#power-btn.low-fuel,
+#power-btn-2.low-fuel {
   border-color: rgba(200, 80, 80, 0.5) !important;
   opacity: 0.7;
 }
-#power-cooldown-overlay {
+#power-btn-2 {
+  border-color: rgba(124, 214, 255, 0.35) !important;
+}
+#power-btn-2.ready {
+  background: rgba(124, 214, 255, 0.22) !important;
+  border-color: rgba(124, 214, 255, 0.7) !important;
+  box-shadow: 0 0 12px rgba(124, 214, 255, 0.55);
+  animation: powerReadyPulse2 1.6s infinite alternate;
+}
+#power-cooldown-overlay,
+#power-cooldown-overlay-2 {
   position: absolute;
   inset: 0;
   z-index: 1;
@@ -581,6 +592,10 @@ button.big:active { transform: scale(.95); }
 @keyframes powerReadyPulse {
   from { box-shadow: 0 0 10px rgba(255, 209, 102, 0.45); }
   to   { box-shadow: 0 0 22px rgba(255, 209, 102, 0.85); }
+}
+@keyframes powerReadyPulse2 {
+  from { box-shadow: 0 0 10px rgba(124, 214, 255, 0.45); }
+  to   { box-shadow: 0 0 22px rgba(124, 214, 255, 0.85); }
 }
 
 #rally {

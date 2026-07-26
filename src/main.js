@@ -46,7 +46,7 @@ import {
   V_MAX, V_MIN, N_REF, LEADER_RESP, CAM_RESP, CAM_LOOK_RESP,
 } from './sim/constants.js';
 import { createAgent, resetAgent, createFaction, createTeam } from './sim/state.js';
-import { POWER_DEFS, getPowerDef, tickPowerCd } from './sim/powers.js';
+import { POWER_DEFS, getPowerDef, tickPowerCds } from './sim/powers.js';
 import { discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac } from './sim/disciples.js';
 import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap, inOwnBase as _inOwnBase } from './sim/leader.js';
 import { effects } from './sim/effects.js';
@@ -162,6 +162,8 @@ scene.fog = new THREE.Fog(0x9fdcff, 70, 165);
 window.__cult = {
   scene, renderer,
   info: () => ({ ...renderer.info.render, programs: renderer.info.programs.length }),
+  /* Debug : accès aux factions (temporaire, retiré une fois la Phase 1 stable). */
+  facs: () => factions,
   toggleNature() {
     let n = 0;
     scene.traverse((o) => { if (o.isInstancedMesh && o.userData.sharedGeo) { o.visible = !o.visible; n++; } });
@@ -902,6 +904,7 @@ let shrines = [];       // { x, z, owner, cap, progress, incomeT, grp, ring, dis
 let shocks = [];        // ondes de choc au sol { mesh, t, maxR, dur }
 let particles = [];     // particules 3D d'explosion
 let activeTotems = [];  // pouvoir Prêche : { grp, life, max, radius, factionIdx, color, tickAcc, tickRate }
+let activeShields = []; // pouvoir Sanctuaire : { grp, life, max, radius, factionIdx, x, z, follow }
 let territoryIncomeT = 0; // timer du revenu passif de territoire
 let stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
 let lastRank = 1;
@@ -1703,6 +1706,12 @@ function finishConvert(a, f, byDisc = null) {
   if ((a.discipleOf ?? -1) >= 0) return;
   const wasFollower = (a.followerOf ?? -1) >= 0;
   if (wasFollower && a.followerOf === f.i) return;
+  /* Sanctuaire : si ce fidèle est protégé par le dôme de son culte actuel,
+     le vol par une autre faction est bloqué (petit flash pour le tell). */
+  if (wasFollower && a._sanctUntil && a._sanctUntil > elapsed && a.followerOf !== f.i) {
+    spawnShock(a.x, a.z, new THREE.Color(0x7cd6ff), 1.1, 0.22);
+    return;
+  }
   if (wasFollower) {
     const oldF = factions[a.followerOf];
     if (oldF) oldF.count = Math.max(0, (oldF.count || 0) - 1);
@@ -2242,9 +2251,11 @@ function clearFx() {
   }
 
   shrines = []; shocks = []; particles = [];
-  /* Nettoyage des totems entre parties : leur groupe est retiré et disposé. */
+  /* Nettoyage des VFX de pouvoirs entre parties. */
   for (const t of activeTotems) { if (t.grp) { scene.remove(t.grp); disposeGroup(t.grp); } }
   activeTotems = [];
+  for (const s of activeShields) { if (s.grp) { scene.remove(s.grp); disposeGroup(s.grp); } }
+  activeShields = [];
 }
 
 /** Sol praticable devant la porte : la porte regarde le centre de la carte,
@@ -2847,9 +2858,11 @@ const paintOrbLiquidEl = $('paint-orb-liquid');
 const paintOrbPctEl = $('paint-orb-pct');
 const pctValEl = $('pct-val');
 const boostBtn = $('boost-btn'), boostOverlay = $('boost-cooldown-overlay');
-const powerBtn = $('power-btn'), powerOverlay = $('power-cooldown-overlay');
-const powerIcon = powerBtn?.querySelector('.ico');
-const powerLbl = powerBtn?.querySelector('.lbl');
+/* 2 slots de pouvoirs : refs indexées pour boucler proprement dans updatePowerUI. */
+const powerBtns = [$('power-btn'), $('power-btn-2')];
+const powerOverlays = [$('power-cooldown-overlay'), $('power-cooldown-overlay-2')];
+const powerIcons = powerBtns.map((b) => b?.querySelector('.ico'));
+const powerLbls = powerBtns.map((b) => b?.querySelector('.lbl'));
 /* Boule de verre : niveau de peinture. N'écrit dans le DOM que si le % change. */
 let fervorPct = -1;
 function updateFuelUI() {
@@ -3181,9 +3194,12 @@ addEventListener('keydown', e => {
     e.preventDefault();
     if (!keys.Space && state === 'play') doBoost(factions[0]);
   }
-  /* Touche E → pouvoir équipé (mobile passe par le bouton dédié). */
+  /* Touche E → pouvoir slot 1, touche F → pouvoir slot 2 (mobile = boutons). */
   if (e.code === 'KeyE' && !keys.KeyE && state === 'play') {
-    activatePower(factions[0]);
+    activatePower(factions[0], 0);
+  }
+  if (e.code === 'KeyF' && !keys.KeyF && state === 'play') {
+    activatePower(factions[0], 1);
   }
   keys[e.code] = true;
 });
@@ -3230,12 +3246,13 @@ addEventListener('pointerup', onUp);
 addEventListener('pointercancel', onUp);
 
 boostBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); doBoost(factions[0]); });
-if (powerBtn) {
-  powerBtn.addEventListener('pointerdown', (e) => {
+powerBtns.forEach((btn, slot) => {
+  if (!btn) return;
+  btn.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
-    activatePower(factions[0]);
+    activatePower(factions[0], slot);
   });
-}
+});
 if (rallyEl) rallyEl.style.display = 'none';   // bouton « Piège » retiré
 
 /* ============================== IA ==============================
@@ -3626,9 +3643,10 @@ function resetGame() {
       aggr: botAggr,
       aiT: botAiT,
       fuel: FUEL_MAX,
-      /* Kit de départ du perso (Phase 1 : tout le monde équipe le Prêche).
-         Sera piloté par perso quand le pool aura + de pouvoirs. */
-      power: leaderPowerFor(leaderKey),
+      /* Kit de départ du perso — 2 slots. Tout le monde teste Prêche +
+         Sanctuaire pour l'instant ; les kits par perso arriveront quand le
+         pool sera plus fourni. */
+      powers: leaderPowersFor(leaderKey),
     });
     if (isRemote) {
       f.netTarget = { x: spawnPos.x, z: spawnPos.z, dx: 0, dz: 0 };
@@ -4278,11 +4296,132 @@ function snapCameraToPlayer() {
 }
 
 /* ============================== Pouvoirs actifs ==============================
-   Phase 1 : un seul pouvoir (Prêche) équipé selon le perso. Le registry vit
-   dans src/sim/powers.js ; le rendu du totem + la conversion sont ici. */
+   Registry dans src/sim/powers.js. Chaque faction équipe 2 slots ; les VFX
+   (totem, dôme…) et la sim (conversion en zone, immunité) vivent ici. */
 
-/* Kit de départ par perso — le pool s'enrichira, ici tout le monde a Prêche. */
-function leaderPowerFor(_leaderKey) { return 'preche'; }
+/* Kit de départ par perso — 2 slots. Aujourd'hui : tout le monde teste
+   Prêche + Sanctuaire pour valider le système à 2 catégories. Les kits
+   différenciés viendront quand le pool aura assez de pouvoirs. */
+function leaderPowersFor(_leaderKey) { return ['preche', 'sanctuaire']; }
+
+/* Texture procédurale : grille d'hexagones (traits blancs sur transparent),
+   posée sur la sphère du dôme en additive blending. */
+let _hexTex = null;
+function getHexTexture() {
+  if (_hexTex) return _hexTex;
+  const s = 512;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = s;
+  const c = cv.getContext('2d');
+  c.clearRect(0, 0, s, s);
+  c.strokeStyle = 'rgba(255,255,255,0.92)';
+  c.lineWidth = 2.2;
+  const R = 34;           // rayon hex en px
+  const W = R * Math.sqrt(3);
+  const H = R * 1.5;
+  for (let row = -1; row * H < s + R; row++) {
+    for (let col = -1; col * W < s + W; col++) {
+      const cx = col * W + ((row & 1) ? W / 2 : 0);
+      const cy = row * H;
+      c.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = Math.PI / 3 * i - Math.PI / 2;
+        const px = cx + Math.cos(a) * R;
+        const py = cy + Math.sin(a) * R;
+        if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+      }
+      c.closePath();
+      c.stroke();
+    }
+  }
+  _hexTex = new THREE.CanvasTexture(cv);
+  _hexTex.colorSpace = THREE.SRGBColorSpace;
+  _hexTex.wrapS = _hexTex.wrapT = THREE.RepeatWrapping;
+  return _hexTex;
+}
+
+/** Instancie le mesh d'un dôme Sanctuaire : sphère hex + halo doux + anneau. */
+function makeShieldGroup(x, z, color, radius) {
+  const g = new THREE.Group();
+  g.position.set(x, 0, z);
+  const col = new THREE.Color(color);
+  const tex = getHexTexture();
+  /* Sphère principale texturée : donne le motif alvéolé. */
+  const sphereGeo = new THREE.SphereGeometry(radius, 32, 24);
+  const sphereMat = new THREE.MeshBasicMaterial({
+    color: col, map: tex,
+    transparent: true, opacity: 0.62,
+    depthWrite: false, side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+  });
+  const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+  sphere.position.y = radius * 0.55;   // demi-sphère plutôt qu'orbe flottant
+  g.add(sphere);
+  /* Halo intérieur diffus. */
+  const glowGeo = new THREE.SphereGeometry(radius * 0.96, 20, 14);
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.10,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  });
+  const glow = new THREE.Mesh(glowGeo, glowMat);
+  glow.position.y = radius * 0.55;
+  g.add(glow);
+  /* Anneau au sol : ancre visuelle. */
+  const ringGeo = new THREE.RingGeometry(radius * 0.94, radius * 1.02, 48).rotateX(-Math.PI / 2);
+  const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
+    color: col, transparent: true, opacity: 0.85,
+    depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  ring.position.y = 0.06;
+  g.add(ring);
+  g.userData = { sphere, glow, ring, radius };
+  return g;
+}
+
+/** Tick des dômes : suit le Leader, marque les fidèles immunisés, anime. */
+function updateShields(dt) {
+  for (let i = activeShields.length - 1; i >= 0; i--) {
+    const s = activeShields[i];
+    s.life -= dt;
+    if (s.life <= 0) {
+      scene.remove(s.grp);
+      disposeGroup(s.grp);
+      activeShields.splice(i, 1);
+      continue;
+    }
+    /* Suit le Leader s'il bouge. */
+    if (s.follow) {
+      const f = factions[s.factionIdx];
+      if (f?.leader && f.alive) {
+        s.x = f.leader.x; s.z = f.leader.z;
+        s.grp.position.set(s.x, 0, s.z);
+      }
+    }
+    /* Marque les fidèles/disciples propres dans le rayon comme immunisés
+       jusqu'à un peu après ce tick (le check se fait par timestamp). */
+    const r2 = s.radius * s.radius;
+    const until = elapsed + 0.12;
+    for (let j = 0; j < agents.length; j++) {
+      const a = agents[j];
+      if (!a || a.dead) continue;
+      const owner = (a.followerOf ?? -1) >= 0 ? a.followerOf : (a.discipleOf ?? -1);
+      if (owner !== s.factionIdx) continue;
+      const dx = a.x - s.x, dz = a.z - s.z;
+      if (dx * dx + dz * dz > r2) continue;
+      a._sanctUntil = until;
+    }
+    /* Anim douce : pulse d'opacité + légère rotation du motif hex. */
+    const k = 1 - Math.max(0, s.life) / s.max;
+    const ud = s.grp.userData;
+    if (ud) {
+      const pulse = 0.85 + 0.15 * Math.sin(elapsed * 5);
+      ud.sphere.material.opacity = 0.62 * (1 - k * 0.4) * pulse;
+      ud.glow.material.opacity = 0.10 * (1 - k * 0.3);
+      ud.ring.material.opacity = 0.85 * (1 - k * 0.35) * pulse;
+      ud.sphere.rotation.y += dt * 0.35;
+    }
+  }
+}
 
 /** Instancie le mesh d'un totem à (x,z) : bougie + halo bas + rayon vertical. */
 function makeTotemGroup(x, z, color, radius) {
@@ -4345,22 +4484,29 @@ function totemConvertWave(t, maxAgents = 3) {
   }
 }
 
-/** Déclenche le pouvoir équipé de la faction (retourne true si consommé). */
-function activatePower(f) {
+/** Déclenche le pouvoir d'un slot (0 ou 1). Retourne true si consommé. */
+function activatePower(f, slot = 0) {
   if (!f || !f.alive) return false;
-  const def = getPowerDef(f.power);
+  const id = f.powers?.[slot];
+  if (!id) return false;
+  const def = getPowerDef(id);
   if (!def) return false;
-  const desc = def.activate(f, { now: performance.now() });
+  const desc = def.activate(f, slot);
   if (!desc) return false;
   if (desc.kind === 'totem') {
     const grp = makeTotemGroup(desc.x, desc.z, desc.color, desc.radius);
     scene.add(grp);
     activeTotems.push({ ...desc, grp });
-    /* Feedback audio + choc initial pour marquer l'invocation. */
     spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.4, 0.42);
     soundEngine.playSFX?.('boost');
     /* Première vague immédiate (sinon on attend tickRate secondes pour rien). */
     totemConvertWave(activeTotems[activeTotems.length - 1], 3);
+  } else if (desc.kind === 'shield') {
+    const grp = makeShieldGroup(desc.x, desc.z, desc.color, desc.radius);
+    scene.add(grp);
+    activeShields.push({ ...desc, grp });
+    spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.5, 0.42);
+    soundEngine.playSFX?.('boost');
   }
   return true;
 }
@@ -4393,33 +4539,38 @@ function updateTotems(dt) {
   }
 }
 
-/* Cooldown UI pour le bouton pouvoir (miroir de updateAttackUI pour le boost).
-   Les refs `powerBtn`/`powerOverlay`/`powerIcon`/`powerLbl` sont déclarées dans
-   le bloc HUD principal (à côté de boostBtn), avant les event listeners. */
-let lastPowerPct = -1;
-let lastPowerId = null;
+/* Cooldown UI pour les boutons pouvoirs. Les refs `powerBtns/powerOverlays`
+   sont déclarées dans le bloc HUD principal, avant les event listeners. */
+const _lastPowerPct = [-1, -1];
+const _lastPowerId = [null, null];
 function updatePowerUI() {
-  if (!powerBtn || !powerOverlay) return;
   const me = factions[0];
-  if (!me || !me.power) { powerBtn.classList.add('hidden'); return; }
-  powerBtn.classList.remove('hidden');
-  const def = getPowerDef(me.power);
-  if (!def) return;
-  if (me.power !== lastPowerId) {
-    lastPowerId = me.power;
-    if (powerIcon) powerIcon.textContent = def.icon;
-    if (powerLbl) powerLbl.textContent = def.name;
+  for (let slot = 0; slot < powerBtns.length; slot++) {
+    const btn = powerBtns[slot];
+    const ovl = powerOverlays[slot];
+    if (!btn || !ovl) continue;
+    const id = me?.powers?.[slot] || null;
+    if (!me || !id) { btn.classList.add('hidden'); continue; }
+    btn.classList.remove('hidden');
+    const def = getPowerDef(id);
+    if (!def) continue;
+    if (id !== _lastPowerId[slot]) {
+      _lastPowerId[slot] = id;
+      const ic = powerIcons[slot], lb = powerLbls[slot];
+      if (ic) ic.textContent = def.icon;
+      if (lb) lb.textContent = def.name;
+    }
+    const cd = me.powerCds?.[slot] || 0;
+    const charge = 1 - Math.min(1, cd / def.cooldown);
+    const enoughFuel = (me.fuel || 0) >= def.cost;
+    const ready = charge >= 1 && enoughFuel;
+    const pct = Math.round(charge * 100);
+    if (pct === _lastPowerPct[slot] && ready === btn.classList.contains('ready')) continue;
+    _lastPowerPct[slot] = pct;
+    ovl.style.setProperty('--cooldown-deg', Math.round((1 - charge) * 360) + 'deg');
+    btn.classList.toggle('ready', ready);
+    btn.classList.toggle('low-fuel', !enoughFuel && charge >= 1);
   }
-  const cd = me.powerCd || 0;
-  const charge = 1 - Math.min(1, cd / def.cooldown);
-  const enoughFuel = (me.fuel || 0) >= def.cost;
-  const ready = charge >= 1 && enoughFuel;
-  const pct = Math.round(charge * 100);
-  if (pct === lastPowerPct && ready === powerBtn.classList.contains('ready')) return;
-  lastPowerPct = pct;
-  powerOverlay.style.setProperty('--cooldown-deg', Math.round((1 - charge) * 360) + 'deg');
-  powerBtn.classList.toggle('ready', ready);
-  powerBtn.classList.toggle('low-fuel', !enoughFuel && charge >= 1);
 }
 
 function update(dt) {
@@ -4431,8 +4582,9 @@ function update(dt) {
   if (factions[0] && factions[0].alive) {
     playerBoostCharge = Math.min(1, playerBoostCharge + dt / BOOST_CD);
   }
-  /* Cooldown des pouvoirs actifs pour toutes les factions. */
-  for (const f of factions) tickPowerCd(f, dt);
+  /* Cooldowns des pouvoirs (tous slots) + tick des VFX actifs. */
+  for (const f of factions) tickPowerCds(f, dt);
+  updateShields(dt);
   updateTotems(dt);
   updateAttackUI();
   updatePowerUI();

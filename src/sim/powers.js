@@ -26,12 +26,12 @@ export const POWER_DEFS = {
     range: 8.5,       // rayon de conversion (mètres)
     duration: 6,      // durée du totem (secondes)
     color: 0xffd166,  // teinte du VFX
-    activate(f, ctx) {
+    activate(f, slot) {
       if (!f || !f.alive) return null;
-      if ((f.powerCd || 0) > 0) return null;
+      if ((f.powerCds?.[slot] || 0) > 0) return null;
       if ((f.fuel || 0) < this.cost) return null;
       f.fuel -= this.cost;
-      f.powerCd = this.cooldown;
+      f.powerCds[slot] = this.cooldown;
       const lx = f.leader?.x ?? 0;
       const lz = f.leader?.z ?? 0;
       return {
@@ -49,6 +49,39 @@ export const POWER_DEFS = {
       };
     },
   },
+
+  sanctuaire: {
+    id: 'sanctuaire',
+    name: 'Sanctuaire',
+    icon: '⬢',
+    category: 'defensif',
+    cost: 4,
+    cooldown: 18,
+    range: 5.2,       // rayon du dôme (mètres)
+    duration: 4,      // durée d'immunité (secondes)
+    color: 0x7cd6ff,  // bleu cyan — se distingue du doré du Prêche
+    activate(f, slot) {
+      if (!f || !f.alive) return null;
+      if ((f.powerCds?.[slot] || 0) > 0) return null;
+      if ((f.fuel || 0) < this.cost) return null;
+      f.fuel -= this.cost;
+      f.powerCds[slot] = this.cooldown;
+      const lx = f.leader?.x ?? 0;
+      const lz = f.leader?.z ?? 0;
+      return {
+        kind: 'shield',
+        power: this.id,
+        factionIdx: f.i,
+        x: lx,
+        z: lz,
+        life: this.duration,
+        max: this.duration,
+        radius: this.range,
+        color: this.color,
+        follow: true,   // suit le Leader plutôt que de rester posé
+      };
+    },
+  },
 };
 
 /** Renvoie la définition d'un pouvoir par id, ou null. */
@@ -56,10 +89,10 @@ export function getPowerDef(id) {
   return POWER_DEFS[id] || null;
 }
 
-/** Décrémente le cooldown d'un pouvoir sur une faction. */
-export function tickPowerCd(f, dt) {
-  if (!f) return;
-  if ((f.powerCd || 0) > 0) {
-    f.powerCd = Math.max(0, f.powerCd - dt);
+/** Décrémente les cooldowns de tous les slots d'une faction. */
+export function tickPowerCds(f, dt) {
+  if (!f || !f.powerCds) return;
+  for (let i = 0; i < f.powerCds.length; i++) {
+    if (f.powerCds[i] > 0) f.powerCds[i] = Math.max(0, f.powerCds[i] - dt);
   }
 }
