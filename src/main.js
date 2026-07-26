@@ -117,13 +117,16 @@ let currentCamDist = localStorage.getItem(CAM_DIST_KEY) || 'mid';
 if (!(currentCamDist in CAM_DIST_MUL)) currentCamDist = 'mid';
 let camDistMul = CAM_DIST_MUL[currentCamDist];
 
-/* Qualité graphique (menu). Sur tactile : presets sobres + défaut Perf. pour
-   limiter la chaleur GPU (DPR/AA/ombres). Desktop inchangé. */
+/* Qualité graphique (menu). Sur tactile : MSAA activé partout — c'est
+   quasi-gratuit sur GPU mobiles tile-based (Adreno/Mali/Apple) et supprime
+   l'escalier des contours BackSide bien plus efficacement que monter le DPR.
+   Le DPR est en contrepartie tenu bas pour garder la charge fillrate ≤ à ce
+   qu'on avait avant. Desktop inchangé. */
 const isCoarse = matchMedia('(pointer: coarse)').matches;
 const GRAPHICS = isCoarse ? {
-  low:  { maxDpr: 1.0,  aa: false, shadows: false },
-  mid:  { maxDpr: 1.15, aa: false, shadows: false },
-  high: { maxDpr: 1.25, aa: false, shadows: true },
+  low:  { maxDpr: 1.0,  aa: true, shadows: false },
+  mid:  { maxDpr: 1.1,  aa: true, shadows: false },
+  high: { maxDpr: 1.25, aa: true, shadows: true },
 } : {
   low:  { maxDpr: 1.0, aa: false, shadows: false },
   mid:  { maxDpr: 1.5, aa: true,  shadows: false },
