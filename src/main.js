@@ -1372,7 +1372,8 @@ function mobileDownscaleTextures(gltf, maxSize = 512) {
     const { v, i } = queue.shift();
     gltfLoader.load(v.url, (gltf) => {
       mobileDownscaleTextures(gltf);
-      setupVillager(crowds[i], gltf, v);
+      try { setupVillager(crowds[i], gltf, v); }
+      catch (e) { console.error('[villager] setup failed', v.url, e); }
       loadNext();
     }, undefined, (err) => {
       console.warn('[villager] failed to load', v.url, err);
