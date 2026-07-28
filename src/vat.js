@@ -111,8 +111,8 @@ export function bakeVAT(gltf, opts = {}) {
     }
   }
 
-  const posTex = new THREE.DataTexture(posData, vCount, totalFrames, THREE.RGBAFormat, THREE.FloatType);
-  const normTex = new THREE.DataTexture(normData, vCount, totalFrames, THREE.RGBAFormat, THREE.FloatType);
+  const posTex = new THREE.DataTexture(posData, vCount, totalFrames, THREE.RGBAFormat, THREE.HalfFloatType);
+  const normTex = new THREE.DataTexture(normData, vCount, totalFrames, THREE.RGBAFormat, THREE.HalfFloatType);
   for (const t of [posTex, normTex]) {
     t.minFilter = THREE.NearestFilter;   // pas d'interpolation GPU : les colonnes
     t.magFilter = THREE.NearestFilter;   // (sommets) sont indépendantes ; on lerp
@@ -207,16 +207,10 @@ export function makeVATMaterial(tex, vat, timeU, key = 'vat', opts = {}) {
     if (golden || wildHalo) {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nuniform float uTime;')
-        .replace('#include <opaque_fragment>', [
-          '{',
-          '  vec3 vN = normalize(vNormal);',
-          '  vec3 vV = normalize(vViewPosition);',
-          '  float rim = pow(1.0 - max(dot(vN, vV), 0.0), 1.8);',
-          '  float pulse = 0.75 + 0.25 * sin(uTime * 3.2);',
-          '  vec3 gold = vec3(1.0, 0.76, 0.15);',
-          '  outgoingLight = mix(outgoingLight, gold, 0.85) + gold * rim * pulse * 1.8;',
-          '}',
-          '#include <opaque_fragment>',
+        .replace('#include <dithering_fragment>', [
+          '#include <dithering_fragment>',
+          '  vec3 goldCol = vec3(1.0, 0.76, 0.15);',
+          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, goldCol, 0.82);',
         ].join('\n'));
     }
   };
