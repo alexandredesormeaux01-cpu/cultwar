@@ -25,7 +25,7 @@ import { bakeVAT, makeVATMaterial, makeVATOutlineMaterial } from './vat.js';
 import { soundEngine } from './soundEngine.js';
 import {
   MAP_R, DENSITY, AGENT_CAP_MOBILE, AGENT_CAP_DESKTOP,
-  START_GRAYS as START_GRAYS_CONST, NB_FACTIONS,
+  START_GRAYS as START_GRAYS_CONST, NB_FACTIONS, WIN_DEPOSIT_GOAL,
   SIEGE_R, SIEGE_R2, SIEGE_RATE,
   BASE_WALL_R, BASE_WALL_T, BASE_WALL_H, BASE_GATE_HALF, BASE_WALL_SEGS, BASE_SPAWN_R,
   DEPOSIT_RATE, GOAL_RATIO, GOAL_MIN,
@@ -105,7 +105,7 @@ const BARBARIAN_NAMES = [
   'Angles', 'Francs', 'Berbères', 'Magyars', 'Sarmates', 'Cimbres', 'Teutons',
 ];
 const BARBARIAN_SYMS = ['⚔', '🪓', '🛡️', '🏹', '💀', '🔨'];
-const GRAY = new THREE.Color(0x9aa2ad);
+const GRAY = new THREE.Color(0x9aa2ad); // Esprits neutres : couleur de base d'origine
 const WHITE = new THREE.Color(1, 1, 1);
 const SHARED_PARTICLE_GEO = new THREE.DodecahedronGeometry(1, 0);
 const _particleMatCache = new Map();   // couleur d'instance neutre du paysan (corps non teinté)
@@ -504,13 +504,26 @@ const meepleGeo = makeMeeple();
    recyclage d'emplacements à gérer. Le meeple chibi sert de fallback jusqu'à ce
    que les .glb soient chargés (voir setupVillager). */
 const PEASANT = 0, DAMSEL = 1, KNIGHT = 2;
-const CROWD_CYCLE = 20;
-const KNIGHT_PLACES = new Set([3, 11, 17]);   // 3 places sur 20 ≈ 15 % de chevaliers
+const FIRE = 3, WATER = 4, AIR = 5, LIGHT = 6, EARTH = 7, ETHER = 8;
+const CROWD_VARIANT_COUNT = 9;
+const CROWD_CYCLE = 30; // 5 villageois PNJ (1/6) + 25 esprits dorés (5/6) sur 300 agents = 50 villageois + 250 esprits dorés
+
 const CROWD_VARIANT = [];   // place du cycle -> variante
 const CROWD_RANK = [];      // place du cycle -> rang parmi les agents de sa variante
-const CROWD_PER_CYCLE = [0, 0, 0];
+const CROWD_PER_CYCLE = new Array(CROWD_VARIANT_COUNT).fill(0);
+
+let elemCounter = 0;
 for (let i = 0; i < CROWD_CYCLE; i++) {
-  const v = KNIGHT_PLACES.has(i) ? KNIGHT : (i % 2 === 0 ? PEASANT : DAMSEL);
+  let v;
+  if (i === 0) v = PEASANT;
+  else if (i === 6) v = DAMSEL;
+  else if (i === 12) v = KNIGHT;
+  else if (i === 18) v = PEASANT;
+  else if (i === 24) v = DAMSEL;
+  else {
+    v = FIRE + (elemCounter % 6);
+    elemCounter++;
+  }
   CROWD_VARIANT[i] = v;
   CROWD_RANK[i] = CROWD_PER_CYCLE[v]++;
 }
@@ -520,7 +533,7 @@ const slotOf = (id) =>
   ((id / CROWD_CYCLE) | 0) * CROWD_PER_CYCLE[variantOf(id)] + CROWD_RANK[id % CROWD_CYCLE];
 
 const crowds = [];
-for (let v = 0; v < 3; v++) {
+for (let v = 0; v < CROWD_VARIANT_COUNT; v++) {
   const slots = Math.ceil(MAX_AGENTS / CROWD_CYCLE) * CROWD_PER_CYCLE[v];
   const m = new THREE.InstancedMesh(
     meepleGeo,
@@ -571,23 +584,29 @@ function trimCrowdCounts(n) {
 const ZERO_MATRIX = new THREE.Matrix4().makeScale(0, 0, 0);
 function hideAgent(id) {
   const m = crowdOf(id);
+  if (!m) return;
   m.setMatrixAt(slotOf(id), ZERO_MATRIX);
-  m.instanceMatrix.needsUpdate = true;
-  if (m.userData.outlineMesh) m.userData.outlineMesh.instanceMatrix.needsUpdate = true;
+  if (m.instanceMatrix) m.instanceMatrix.needsUpdate = true;
+  if (m.userData.outlineMesh && m.userData.outlineMesh.instanceMatrix) m.userData.outlineMesh.instanceMatrix.needsUpdate = true;
 }
+
+const GOLDEN_SPIRIT_COLOR = new THREE.Color(0xfbbf24);
 
 function setAgentColor(id, col) {
   const m = crowdOf(id);
+  if (!m) return;
   const sl = slotOf(id);
-  // Non teinté (paysan, chevalier) → couleur d'instance blanche, corps affiché tel quel.
-  // Sinon (damoiselle) → la couleur du culte teinte l'étoffe (masque UV).
-  m.setColorAt(sl, m.userData.untinted ? WHITE : col);
-  // Paysan : la couleur du culte n'est portée que par le chapeau via aHatCol.
+  const v = variantOf(id);
+  const isElemental = v >= 3;
+  const isNeutralCol = !col || col === GRAY || (col.r === GRAY.r && col.g === GRAY.g && col.b === GRAY.b);
+  const targetCol = (isElemental && isNeutralCol) ? GOLDEN_SPIRIT_COLOR : col;
+
+  m.setColorAt(sl, isElemental ? targetCol : (m.userData.untinted ? WHITE : col));
   if (m.userData.hatCol) {
-    m.userData.hatCol.setXYZ(sl, col.r, col.g, col.b);
+    m.userData.hatCol.setXYZ(sl, targetCol.r, targetCol.g, targetCol.b);
     m.userData.hatCol.needsUpdate = true;
   }
-  m.instanceColor.needsUpdate = true;
+  if (m.instanceColor) m.instanceColor.needsUpdate = true;
 }
 
 const ZERO_M = new THREE.Matrix4().makeScale(0, 0, 0);
@@ -631,6 +650,11 @@ for (let i = 0; i < AGENT_CAP; i++) {
 }
 scene.add(discHalos);
 setCharLayer(discHalos);
+/* Auréole désactivée : depuis que le cortège colle au Leader, elle flotte
+   visuellement au-dessus de lui et devient parasite. La logique reste en place
+   (position/couleur mises à jour chaque frame) : suffit de repasser à true
+   pour la réafficher. */
+discHalos.visible = false;
 
 function hideDiscHalo(id) {
   discHalos.setMatrixAt(id, ZERO_MATRIX);
@@ -929,6 +953,18 @@ const LEADERS = {
   alien:    { url: 'assets/models/alien_rigged.glb',    tint: 'none'   },  // extraterrestre : peau grise + haillons — palette d'origine
   chief:    { url: 'assets/models/chief_rigged.glb',    tint: 'none'   },  // chef des Premières Nations : coiffe et perles très signées
 };
+/* Chaque Leader a un esprit élémentaire assigné : ses disciples prennent la
+   forme de cet esprit au lieu d'être des copies humanoïdes du Leader. Les
+   élémentaires « sauvages » (villageois neutres) portent un halo doré tant
+   qu'ils n'ont pas été absorbés — visuel de « proie premium à convertir ». */
+const LEADER_ELEMENT = {
+  monk:     'assets/models/elemental_light_rigged.glb',   // lumière — halo, révélation
+  sorcerer: 'assets/models/elemental_ether_rigged.glb',   // éther — occulte, void
+  nomad:    'assets/models/elemental_earth_rigged.glb',   // terre — voyageur ancré
+  amazon:   'assets/models/elemental_rigged.glb',         // feu — guerrière
+  alien:    'assets/models/elemental_air_rigged.glb',     // air — flotte, étranger
+  chief:    'assets/models/elemental_water_rigged.glb',   // eau — source vitale
+};
 const leaderAssets = {};   // key → { model, texture, clips }
 const followerMeshes = {}; // leaderKey → { mesh, outline, freeSlots[], color[] }
 const FOLLOWER_MESH_CAP = 400;
@@ -969,6 +1005,17 @@ const VILLAGER_MODELS = [
   // Chevalier : garde sa texture d'origine (jamais teinté) et un peu plus grand que les autres.
   // Modèle « Blocky » (Meshy) rigué, texture optimisée 4096→512 WebP (30 Mo → 785 Ko).
   { url: 'assets/models/knight_blocky.glb', scale: 1.18 },
+  // Élémentaires : 6 variantes riggées (feu source Meshy + 5 transferts par
+  // plus-proche-voisin depuis le squelette du feu). Rétrécis à 0.6× — petit perso.
+  // wildHalo : rim doré pulsant tant qu'ils sont neutres — signal « proie premium ».
+  // Une fois absorbés, ils passent au follower mesh (sans halo) → distinction auto.
+  // TODO : optimiser les textures (10–27 Mo → WebP 512 comme les autres villageois).
+  { url: 'assets/models/elemental_rigged.glb', scale: 0.6, wildHalo: true, golden: true },        // FIRE
+  { url: 'assets/models/elemental_water_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // WATER
+  { url: 'assets/models/elemental_air_rigged.glb', scale: 0.6, wildHalo: true, golden: true },    // AIR
+  { url: 'assets/models/elemental_light_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // LIGHT
+  { url: 'assets/models/elemental_earth_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // EARTH
+  { url: 'assets/models/elemental_ether_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // ETHER
 ];
 
 // Chapeau : le masque n'est pas fiable par couleur (l'atlas Meshy mêle la paille et la
@@ -1027,7 +1074,7 @@ function garmentMask(tex, h0, h1) {
    enjambée plus ample, un léger rebond et un buste penché en avant. */
 const HAT_REF_LUM = 0.5;   // luminance de référence de la paille : garde le tressage sous la teinte
 function makeVillagerMaterial(tex, mask, opts = {}) {
-  const { tintable = false, hatTint = false } = opts;
+  const { tintable = false, hatTint = false, gaitScale = 1 } = opts;
   const useGarment = tintable && !!mask;
   const mat = toonMaterial({ map: tex || null });
   /* IMPORTANT : les trois matériaux villageois ont des paramètres identiques, donc Three.js
@@ -1038,6 +1085,9 @@ function makeVillagerMaterial(tex, mask, opts = {}) {
   mat.customProgramCacheKey = () => 'villager-' + variantKey;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = monkTimeU;
+    // Ralentit/accélère la cadence du pas indépendamment de la vitesse au sol
+    // (utile pour les petites créatures dont les jambes battraient sinon trop vite).
+    shader.uniforms.uGaitScale = { value: gaitScale };
     if (useGarment) {
       shader.uniforms.uMask = { value: mask.tex };
       shader.uniforms.uGarmentLum = { value: Math.max(0.03, mask.lum) };
@@ -1046,7 +1096,7 @@ function makeVillagerMaterial(tex, mask, opts = {}) {
     // --- vertex : locomotion + (paysan) passage de l'attribut chapeau au fragment ---
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>',
-        '#include <common>\nuniform float uTime;\nattribute vec2 aAnim;'
+        '#include <common>\nuniform float uTime;\nuniform float uGaitScale;\nattribute vec2 aAnim;'
         + (hatTint ? '\nattribute float aHat;\nattribute vec3 aHatCol;\nvarying float vHat;\nvarying vec3 vHatCol;' : ''))
       .replace('#include <begin_vertex>', [
         '#include <begin_vertex>',
@@ -1057,7 +1107,7 @@ function makeVillagerMaterial(tex, mask, opts = {}) {
         'float vWalk = smoothstep(0.15, 1.2, vSpeed);       // intensite du pas',
         'float vRun  = smoothstep(2.5, 6.5, vSpeed);        // fondu marche -> course',
         '// cadence, enjambee et rebond montent avec la course',
-        'float vFreq = mix(8.0, 12.5, vRun);',
+        'float vFreq = mix(8.0, 12.5, vRun) * uGaitScale;',
         'float vSwing = sin(uTime * vFreq + aAnim.x);',
         'float vArmAmp = mix(0.28, 0.46, vRun);',
         'float vLegAmp = mix(0.17, 0.32, vRun);',
@@ -1206,21 +1256,17 @@ function tagHatVertices(geo) {
 }
 
 function setupVillager(mesh, gltf, opts = {}) {
-  const { hue, tintable = false, hatTint = false, scale = 1 } = opts;
+  const { hue, tintable = false, hatTint = false, scale = 1, gaitScale = 1, wildHalo = false, golden = false } = opts;
   let tex = null;
   gltf.scene.traverse((child) => {
     if (child.isMesh && child.material && child.material.map) tex = child.material.map;
   });
 
-  /* --- Chemin VAT : vraie animation squelettique (Walking/Running) cuite en
-     texture, rejouée par instance dans le shader. Les convertis quittant la carte
-     en particules, les neutres n'ont pas besoin de teinte de camp : on ignore
-     hue/tintable/hatTint et on garde la texture d'origine. --- */
   const vat = bakeVAT(gltf, { scale, targetHeight: VILLAGER_H });
   if (vat) {
     vat.geometry.setAttribute('aAnim', mesh.userData.anim);
     mesh.geometry = vat.geometry;
-    mesh.material = makeVATMaterial(tex, vat, monkTimeU, mesh.uuid);
+    mesh.material = makeVATMaterial(tex, vat, monkTimeU, mesh.uuid, { wildHalo, golden });
 
     // Contour cartoon synchronisé — sauté sur tactile (×2 draw calls foule).
     if (!isCoarse) {
@@ -1292,7 +1338,7 @@ function setupVillager(mesh, gltf, opts = {}) {
   // étoffe teintée par le culte (damoiselle/chevalier) ; le paysan n'a pas de masque
   const mask = tintable ? garmentMask(tex, hue[0], hue[1]) : null;
   console.log('[villager]', gltf.scene.name || hue, 'baked:', !!baked, 'tex:', !!tex, tex && tex.image && (tex.image.width + 'x' + tex.image.height), 'tintable:', tintable, 'hatTint:', hatTint, 'mask lum:', mask && mask.lum);
-  mesh.material = makeVillagerMaterial(tex, mask, { tintable, hatTint });
+  mesh.material = makeVillagerMaterial(tex, mask, { tintable, hatTint, gaitScale });
   // crowds sont déjà dans la scène → outline en sibling
   const out = attachCartoonOutline(mesh, 0.028);
   if (out) out.renderOrder = 2;
@@ -1319,6 +1365,173 @@ gltfLoader.load('assets/models/paint_crystal.glb', (gltf) => {
   bombModel = wrap;
 });
 
+/* Modèle 3D du Sanctuaire de Base (Arcane Stone Sanctuary GLB) */
+let sanctuaryModel = null;
+gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
+  const g = gltf.scene;
+  const box = new THREE.Box3().setFromObject(g);
+  const h = Math.max(0.001, box.max.y - box.min.y);
+  g.scale.setScalar(5.5 / h);
+  box.setFromObject(g);
+  g.position.y = -box.min.y;
+  g.traverse((c) => {
+    if (c.isMesh) {
+      c.castShadow = true;
+      c.receiveShadow = true;
+    }
+  });
+  const wrap = new THREE.Group();
+  wrap.add(g);
+  attachCartoonOutline(g, 0.025);
+  sanctuaryModel = wrap;
+}, undefined, (err) => {
+  console.warn('[sanctuary] Load warning:', err);
+});
+
+/* Modèle 3D du Trou de Terrier (Burrow Hole GLB) */
+let burrowHoleModel = null;
+gltfLoader.load('assets/models/burrow_hole.glb', (gltf) => {
+  const g = gltf.scene;
+  const box = new THREE.Box3().setFromObject(g);
+  const h = Math.max(0.001, box.max.y - box.min.y);
+  g.scale.setScalar(2.6 / h);
+  box.setFromObject(g);
+  g.position.y = -box.min.y;
+  g.traverse((c) => {
+    if (c.isMesh) {
+      c.castShadow = true;
+      c.receiveShadow = true;
+    }
+  });
+  const wrap = new THREE.Group();
+  wrap.add(g);
+  attachCartoonOutline(g, 0.02);
+  burrowHoleModel = wrap;
+}, undefined, (err) => {
+  console.warn('[burrow_hole] Load warning:', err);
+});
+
+/* --- Événements d'animation des trous de terrier pour les esprits volés --- */
+const activeBurrowEvents = [];
+
+function makeProceduralHoleMesh() {
+  const g = new THREE.Group();
+  const holeMat = new THREE.MeshBasicMaterial({ color: 0x0a0502, side: THREE.DoubleSide });
+  const holeGeo = new THREE.CylinderGeometry(1.5, 1.1, 0.45, 24);
+  const m = new THREE.Mesh(holeGeo, holeMat);
+  m.position.y = 0.22;
+  g.add(m);
+
+  const rimGeo = new THREE.RingGeometry(1.1, 1.55, 32).rotateX(-Math.PI / 2);
+  const rimMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.95, side: THREE.DoubleSide });
+  const rim = new THREE.Mesh(rimGeo, rimMat);
+  rim.position.y = 0.46;
+  g.add(rim);
+  return g;
+}
+
+function triggerBurrowRespawn(leader) {
+  // Choisir un point valide sur l'île dans un rayon modéré autour du leader pour être bien visible
+  let pt = null;
+  if (leader) {
+    for (let attempts = 0; attempts < 20; attempts++) {
+      const ang = Math.random() * Math.PI * 2;
+      const dist = 7 + Math.random() * 11;
+      const px = leader.x + Math.cos(ang) * dist;
+      const pz = leader.z + Math.sin(ang) * dist;
+      if (onIsland(px, pz)) { pt = { x: px, z: pz }; break; }
+    }
+  }
+  if (!pt) pt = islandRandomPoint(island, 4, Infinity);
+  if (!pt) return;
+
+  const holeMesh = burrowHoleModel ? burrowHoleModel.clone(true) : makeProceduralHoleMesh();
+  holeMesh.position.set(pt.x, -1.2, pt.z || pt.y);
+  scene.add(holeMesh);
+
+  // Onde dorée éclatante pour signaler l'apparition du trou au joueur
+  spawnShock(pt.x, pt.z || pt.y, GOLDEN_SPIRIT_COLOR, 4.0, 1.6);
+
+  activeBurrowEvents.push({
+    x: pt.x,
+    z: pt.z || pt.y,
+    t: 0,
+    mesh: holeMesh,
+    spawnedSpirit: false,
+    agentId: null
+  });
+}
+
+function stealSpiritFromLeader(f) {
+  if (!f) return false;
+  const fol = agents.find(a => !a.dead && a.followerOf === f.i);
+  if (fol) {
+    releaseFollowerSlot(fol);
+    fol.dead = true;
+    fol.followerOf = -1;
+    fol.discipleOf = -1;
+    hideAgent(fol.id);
+    freeAgentIds.push(fol.id);
+  }
+  f.count = Math.max(0, (f.count || 0) - 1);
+
+  if (f.i === 0) {
+    soundEngine.playSFX?.('boost');
+    banner('⚡ Un villageois vous a volé un esprit !');
+  }
+  triggerBurrowRespawn(f.leader);
+  return true;
+}
+
+function updateBurrowEvents(dt) {
+  for (let i = activeBurrowEvents.length - 1; i >= 0; i--) {
+    const ev = activeBurrowEvents[i];
+    ev.t += dt;
+
+    // Phase 1: Le trou remonte du sol (0.0s -> 0.4s)
+    if (ev.t <= 0.4) {
+      const k = ev.t / 0.4;
+      if (ev.mesh) ev.mesh.position.y = -1.2 + k * 1.2;
+    }
+    // Phase 2: L'esprit sort en sautant du trou (0.4s -> 1.0s)
+    else if (ev.t <= 1.0) {
+      if (ev.mesh) ev.mesh.position.y = 0.0;
+      if (!ev.spawnedSpirit) {
+        ev.spawnedSpirit = true;
+        const a = spawnAgent(ev.x, ev.z);
+        if (a) {
+          ev.agentId = a.id;
+          soundEngine.playSFX?.('crystal', { volume: 0.85, rate: 1.4 });
+        }
+      }
+      if (ev.agentId !== null && agents[ev.agentId]) {
+        const jumpT = (ev.t - 0.4) / 0.6; // 0.0 à 1.0
+        const arcY = Math.sin(jumpT * Math.PI) * 2.8;
+        agents[ev.agentId].y = arcY;
+      }
+    }
+    // Phase 3: L'esprit se pose au sol et le trou rentre dans le sol (1.0s -> 1.5s)
+    else if (ev.t <= 1.5) {
+      if (ev.agentId !== null && agents[ev.agentId]) {
+        agents[ev.agentId].y = 0.0;
+      }
+      const k = (ev.t - 1.0) / 0.5;
+      if (ev.mesh) ev.mesh.position.y = 0.0 - k * 1.2;
+    }
+    // Fin de l'événement : nettoyage du trou
+    else {
+      if (ev.agentId !== null && agents[ev.agentId]) {
+        agents[ev.agentId].y = 0.0;
+      }
+      if (ev.mesh) {
+        scene.remove(ev.mesh);
+        disposeGroup(ev.mesh);
+      }
+      activeBurrowEvents.splice(i, 1);
+    }
+  }
+}
+
 /* Compat : les anciens noms restent utilisés à quelques endroits (avatar HUD,
    texte du menu). Ils pointent maintenant sur les données du moine du registre. */
 let monkModel = null, monkTexture = null, monkClips = null;
@@ -1330,7 +1543,14 @@ for (const [key, def] of Object.entries(LEADERS)) {
     });
     leaderAssets[key] = { model: gltf.scene, texture: tex, clips: gltf.animations };
     if (key === 'monk') { monkModel = gltf.scene; monkTexture = tex; monkClips = gltf.animations; }
-    buildFollowerMesh(key, gltf, tex);
+  });
+  // Le follower prend la forme de l'esprit élémentaire assigné, pas du Leader
+  // lui-même. Chargement séparé (les navigateurs cachent l'URL → pas de re-DL
+  // si l'élémentaire est aussi dans VILLAGER_MODELS).
+  gltfLoader.load(LEADER_ELEMENT[key], (elGltf) => {
+    let elTex = null;
+    elGltf.scene.traverse((c) => { if (c.isMesh && c.material?.map && !elTex) elTex = c.material.map; });
+    buildFollowerMesh(key, elGltf, elTex);
   });
 }
 
@@ -1704,6 +1924,7 @@ function promoteToDisciple(a, f, byDisc = null) {
 
 function finishConvert(a, f, byDisc = null) {
   if (a.dead || !f || !f.alive) return;
+  if (variantOf(a.id) < 3) return; // Paysans, paysannes et chevaliers PNJ ne sont pas assimilables
   if ((a.discipleOf ?? -1) >= 0) return;
   const wasFollower = (a.followerOf ?? -1) >= 0;
   if (wasFollower && a.followerOf === f.i) return;
@@ -2235,6 +2456,7 @@ function clearFx() {
   
   if (typeof teams !== 'undefined' && teams.length > 0) {
     for (const t of teams) {
+      if (t.sanctuaryMesh) { scene.remove(t.sanctuaryMesh); disposeGroup(t.sanctuaryMesh); t.sanctuaryMesh = null; }
       if (t.altarMesh) { scene.remove(t.altarMesh); t.altarMesh.geometry.dispose(); t.altarMesh.material.dispose(); }
       if (t.relicMesh) { scene.remove(t.relicMesh); t.relicMesh.geometry.dispose(); t.relicMesh.material.dispose(); }
       if (t.wallMeshes) {
@@ -2304,88 +2526,35 @@ function findBaseSite(ang) {
  */
 function buildFortWalls(cx, cz, gateAng, teamColor) {
   const meshes = [];
-  const stone = toonMaterial({ color: 0x6a737e });
-  const accent = toonMaterial({
-    color: teamColor.clone().lerp(new THREE.Color(0x2a3038), 0.35),
-  });
   const floorMat = new THREE.MeshBasicMaterial({
-    color: teamColor.clone().lerp(new THREE.Color(0x1a1e28), 0.55),
+    color: teamColor.clone().lerp(new THREE.Color(0x1a1e28), 0.45),
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.65,
     depthWrite: false,
   });
-  const gateMat = new THREE.MeshBasicMaterial({
-    color: teamColor, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide,
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: teamColor,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+    depthWrite: false,
   });
-  const mats = [stone, accent, floorMat, gateMat];
+  const mats = [floorMat, ringMat];
 
-  const midR = BASE_WALL_R + BASE_WALL_T * 0.5;
-  const segArc = (Math.PI * 2) / BASE_WALL_SEGS;
-  const segLen = 2 * midR * Math.sin(segArc * 0.5) * 1.08;
-
-  for (let i = 0; i < BASE_WALL_SEGS; i++) {
-    const a0 = i * segArc;
-    let da = a0 + segArc * 0.5 - gateAng;
-    while (da > Math.PI) da -= Math.PI * 2;
-    while (da < -Math.PI) da += Math.PI * 2;
-    if (Math.abs(da) < BASE_GATE_HALF) continue;
-
-    const a = a0 + segArc * 0.5;
-    const wx = cx + Math.cos(a) * midR;
-    const wz = cz + Math.sin(a) * midR;
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(BASE_WALL_T, BASE_WALL_H, segLen), stone);
-    mesh.position.set(wx, BASE_WALL_H * 0.5, wz);
-    mesh.rotation.y = -a;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.userData.sharedMat = true;
-    scene.add(mesh);
-    meshes.push(mesh);
-
-    const cap = new THREE.Mesh(
-      new THREE.BoxGeometry(BASE_WALL_T * 1.15, 0.35, segLen * 0.45),
-      accent,
-    );
-    cap.position.set(wx, BASE_WALL_H + 0.15, wz);
-    cap.rotation.y = -a;
-    cap.castShadow = true;
-    cap.userData.sharedMat = true;
-    scene.add(cap);
-    meshes.push(cap);
-  }
-
-  for (const side of [-1, 1]) {
-    const a = gateAng + side * BASE_GATE_HALF;
-    const px = cx + Math.cos(a) * midR;
-    const pz = cz + Math.sin(a) * midR;
-    const pillar = new THREE.Mesh(
-      new THREE.BoxGeometry(1.15, BASE_WALL_H + 0.6, 1.15),
-      accent,
-    );
-    pillar.position.set(px, (BASE_WALL_H + 0.6) * 0.5, pz);
-    pillar.castShadow = true;
-    pillar.userData.sharedMat = true;
-    scene.add(pillar);
-    meshes.push(pillar);
-  }
-
-  const floor = new THREE.Mesh(new THREE.CircleGeometry(BASE_WALL_R - 0.15, 32), floorMat);
+  // Disque de sol du sanctuaire aux couleurs de la faction
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(BASE_WALL_R - 1.2, 32), floorMat);
   floor.rotation.x = -Math.PI / 2;
   floor.position.set(cx, 0.04, cz);
   floor.userData.sharedMat = true;
   scene.add(floor);
   meshes.push(floor);
 
-  const gateMark = new THREE.Mesh(
-    new THREE.RingGeometry(BASE_WALL_R - 0.2, BASE_WALL_R + BASE_WALL_T * 0.35, 24, 1,
-      gateAng - BASE_GATE_HALF, BASE_GATE_HALF * 2),
-    gateMat,
-  );
-  gateMark.rotation.x = -Math.PI / 2;
-  gateMark.position.set(cx, 0.05, cz);
-  gateMark.userData.sharedMat = true;
-  scene.add(gateMark);
-  meshes.push(gateMark);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(BASE_WALL_R - 1.4, BASE_WALL_R - 1.0, 32), ringMat);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.set(cx, 0.05, cz);
+  ring.userData.sharedMat = true;
+  scene.add(ring);
+  meshes.push(ring);
 
   return { meshes, mats };
 }
@@ -3069,6 +3238,11 @@ function updateHUD() {
   }
   rankEl.textContent = `${rank}ᵉ`;
   pctValEl.textContent = `${pct.toFixed(1)}%`;
+  const depositValEl = $('deposit-val');
+  if (depositValEl) {
+    const me = factions[0];
+    depositValEl.textContent = `${me ? (me.deposited || 0) : 0}/${WIN_DEPOSIT_GOAL}`;
+  }
 
   if (rank < lastRank) { sfxRankUp(); rankEl.classList.add('pulse'); setTimeout(() => rankEl.classList.remove('pulse'), 220); }
   lastRank = rank;
@@ -3095,6 +3269,32 @@ function drawMinimap() {
     miniGrad = g; miniGradW = W;
   }
   mctx.fillStyle = miniGrad; mctx.fillRect(0, 0, W, W);
+
+  // --- Sanctuaires de Base des Joueurs (Icône de Sanctuaire colorée) ---
+  if (teams && teams.length) {
+    for (const t of teams) {
+      const bx = c + t.baseX * s, bz = c + t.baseZ * s;
+      mctx.save();
+      mctx.translate(bx, bz);
+      mctx.beginPath();
+      mctx.arc(0, 0, 7.5 * k, 0, Math.PI * 2);
+      mctx.fillStyle = t.css;
+      mctx.shadowColor = t.css;
+      mctx.shadowBlur = 10 * k;
+      mctx.fill();
+      mctx.shadowBlur = 0;
+      mctx.lineWidth = 1.8 * k;
+      mctx.strokeStyle = '#ffffff';
+      mctx.stroke();
+
+      mctx.fillStyle = '#ffffff';
+      mctx.font = `bold ${Math.round(8 * k)}px sans-serif`;
+      mctx.textAlign = 'center';
+      mctx.textBaseline = 'middle';
+      mctx.fillText('🏛', 0, 0);
+      mctx.restore();
+    }
+  }
 
   /* --- Silhouette de l'île : tuiles plus claires pour la lisibilité. --- */
   if (island) {
@@ -3594,8 +3794,16 @@ function resetGame() {
     team.iconStamp = makeIconStamp(picks[t].sym);
     team.altarMesh = null;
     team.relicMesh = null;
-    team.wallMeshes = [];
-    team.wallMats = [];
+    const fort = buildFortWalls(site.x, site.z, gateAng, teamColor);
+    team.wallMeshes = fort.meshes;
+    team.wallMats = fort.mats;
+
+    if (sanctuaryModel) {
+      const sMesh = sanctuaryModel.clone(true);
+      sMesh.position.set(site.x, 0, site.z);
+      scene.add(sMesh);
+      team.sanctuaryMesh = sMesh;
+    }
     teams.push(team);
   }
 
@@ -3665,15 +3873,16 @@ function resetGame() {
     factions.push(f);
   }
 
-  // PNJ gris en grappes
+  // PNJ et esprits dorés en grappes
   let placed = 0;
-  while (placed < START_GRAYS) {
-    // une grappe naît au centre d'une tuile : les gris peuplent l'île, pas le vide
+  let attempts = 0;
+  while (placed < START_GRAYS && attempts < 5000) {
+    attempts++;
     const { x: cx, z: cz } = islandRandomPoint(island, 4, Infinity);
-    const n = 3 + (Math.random() * 5) | 0;
+    const n = 3 + ((Math.random() * 5) | 0);
     for (let k = 0; k < n && placed < START_GRAYS; k++) {
-      spawnAgent(cx + (Math.random() - 0.5) * 4, cz + (Math.random() - 0.5) * 4);
-      placed++;
+      const a = spawnAgent(cx + (Math.random() - 0.5) * 4, cz + (Math.random() - 0.5) * 4);
+      if (a) placed++;
     }
   }
   updateHUD();
@@ -3700,48 +3909,48 @@ function endGame(forced) {
   soundEngine.stopBiomeAmbient();
   $('hud').classList.add('hidden');
 
-  const scores = factions.map(factionScore).sort((a, b) => b.total - a.total);
+  // Classement final par pourcentage de territoire conquis (% de peinture)
+  const scores = factions.map(factionScore).sort((a, b) => b.pct - a.pct);
   const mine = scores.find(s => s.f.i === 0);
 
-  /* Multi : le classement vient de l'hôte P2P (chaque client y a remonté son
-     score), donc tous les écrans affichent le MÊME podium et le même vainqueur. */
   const netRank = multiMode ? net.getLeaderList() : null;
   const useNet = !!(netRank && netRank.length);
-  const myNetIdx = useNet ? netRank.findIndex((l) => net.isMe(l.sessionId)) : -1;
 
-  const rank = useNet && myNetIdx >= 0 ? myNetIdx + 1 : scores.indexOf(mine) + 1;
-  const victory = forced === false ? false : rank === 1;
+  const victory = (forced === false || forced === 'concede') ? false : (mine && (mine.f.deposited || 0) >= WIN_DEPOSIT_GOAL);
   lastVictory = victory;
-  const winner = scores[0];
-  const winnerName = useNet ? (netRank[0]?.name || '—') : winner.f.cult.name;
+  const winner = factions.find(f => (f.deposited || 0) >= WIN_DEPOSIT_GOAL) || scores[0].f;
+  const winnerName = useNet ? (netRank[0]?.name || '—') : winner.cult.name;
 
   const isCamp = (conquest !== null);
   const btnBack = $('btn-end-back');
   const btnRetry = $('retry');
   $('btn-end-lobby').classList.add('hidden');
 
-  if (multiMode) {
-    $('endTitle').textContent = victory ? 'Victoire en ligne !' : 'Défaite';
+  if (forced === 'concede' || forced === false) {
+    $('endTitle').textContent = 'Défaite';
+    $('endSub').textContent = 'Vous avez cédé la partie aux cultes rivaux.';
+    btnRetry.textContent = 'Nouvelle Chasse';
+    btnBack.classList.add('hidden');
+  } else if (multiMode) {
+    $('endTitle').textContent = victory ? 'Victoire !' : 'Défaite';
     $('endSub').textContent = victory
-      ? 'Votre couleur domine la vallée — personne ne vous a rattrapé.'
-      : `${winnerName} termine en tête de ce salon.`;
+      ? 'Vous avez déposé 60 esprits au sanctuaire de votre base !'
+      : `${winnerName} a déposé 60 esprits au sanctuaire avant vous.`;
     btnRetry.textContent = 'Quitter la session';
     btnBack.classList.add('hidden');
-    /* L'hôte peut relancer une partie avec les mêmes joueurs ; les invités
-       attendent son signal (retour phase:'lobby'). */
     $('btn-end-lobby').classList.toggle('hidden', !net.isHost());
   } else if (isCamp) {
     $('endTitle').textContent = victory ? 'Zone Conquise !' : 'Défaite';
     $('endSub').textContent = victory
-      ? `Votre couleur domine « ${conquest.region.name} » — la zone est à vous.`
-      : `La Faction « ${winnerName} » a recouvert « ${conquest.region.name} » de sa couleur.`;
+      ? `Votre sanctuaire est le premier à réunir 60 esprits dorés !`
+      : `Le Culte « ${winnerName} » a réuni 60 esprits dorés avant vous.`;
     btnRetry.textContent = victory ? 'Retour à la Carte' : 'Réessayer';
     btnBack.classList.toggle('hidden', victory);
   } else {
-    $('endTitle').textContent = victory ? 'Apothéose !' : 'Défaite';
+    $('endTitle').textContent = victory ? 'Victoire !' : 'Défaite';
     $('endSub').textContent = victory
-      ? 'À la tombée de la nuit, votre couleur domine la vallée.'
-      : `À la tombée de la nuit, le Culte ${winnerName} domine la vallée.`;
+      ? 'Vous avez déposé 60 esprits au sanctuaire de votre base !'
+      : `Le Culte ${winnerName} a déposé 60 esprits au sanctuaire avant vous.`;
     btnRetry.textContent = 'Nouvelle Chasse';
     btnBack.classList.add('hidden');
   }
@@ -3752,36 +3961,46 @@ function endGame(forced) {
   $('endTitle').style.backgroundClip = 'text';
   $('endTitle').style.color = 'transparent';
 
-  /* Classement final : chaque ligne montre le score total et la couverture. */
+  /* Classement des factions uniquement par % de territoire. */
   const podiumRows = useNet
     ? netRank.map((l) => ({
       css: '#' + ((l.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0'),
       label: `${l.name}${l.isBot ? ' (IA)' : ''}`,
       me: net.isMe(l.sessionId),
-      total: l.score,
       pct: l.pct,
     }))
     : scores.map((s) => ({
-      css: s.f.css, label: s.f.cult.name, me: s.f.i === 0, total: s.total, pct: s.pct,
+      css: s.f.css, label: s.f.cult.name, me: s.f.i === 0, pct: s.pct,
     }));
   const podium = podiumRows.map((r, i) => `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;
-        padding:3px 6px;border-radius:6px;${r.me ? 'background:rgba(255,255,255,.08);' : ''}">
+        padding:5px 8px;border-radius:6px;${r.me ? 'background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);' : ''}">
       <span style="display:flex;align-items:center;gap:6px;min-width:0;">
         <b>${i + 1}.</b>
         <span style="width:10px;height:10px;border-radius:50%;background:${r.css};flex:none;"></span>
         <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.label}${r.me ? ' (Vous)' : ''}</span>
       </span>
-      <span style="flex:none;"><b>${r.total}</b> pts · ${r.pct.toFixed(1)} %</span>
+      <span style="flex:none;font-weight:700;">${r.pct.toFixed(1)} %</span>
     </div>`).join('');
 
-  $('stats').innerHTML = [
-    [`${mine.total} pts`, `Score final — ${rank}ᵉ place`, 'full-width'],
-    [`+${mine.sPct}`, `Couverture ${mine.pct.toFixed(1)} %`, ''],
-    [`+${mine.sGris}`, `${mine.f.grisAbs} gris absorbés`, ''],
-    [`+${mine.sDist}`, `${Math.round(mine.f.dist)} m parcourus`, ''],
-    [`×${stats.bestStreak}`, 'Meilleure série', ''],
-  ].map(([v, k, cls]) => `<div class="cell ${cls || ''}"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('')
-    + `<div class="cell full-width" style="text-align:left;font-size:0.82rem;">${podium}</div>`;
+  const playerPaintPct = mine ? mine.pct : 0;
+  let rankGrade = 'C';
+  let rankColor = '#94a3b8';
+  if (playerPaintPct >= 40) { rankGrade = 'S'; rankColor = '#fbbf24'; }
+  else if (playerPaintPct >= 25) { rankGrade = 'A'; rankColor = '#a855f7'; }
+  else if (playerPaintPct >= 15) { rankGrade = 'B'; rankColor = '#38bdf8'; }
+  else { rankGrade = 'C'; rankColor = '#94a3b8'; }
+
+  // Le badge de rang n'est affiché qu'en cas de Victoire
+  const rankBadgeHtml = victory ? `<div class="cell full-width" style="text-align:center;padding:12px;background:rgba(15,23,42,0.95);border:2px solid ${rankColor};border-radius:10px;box-shadow:0 0 20px ${rankColor}66;">
+    <div style="font-family:'Cinzel',serif;font-size:2.4rem;font-weight:900;color:${rankColor};text-shadow:0 0 14px ${rankColor};">RANG ${rankGrade}</div>
+    <div style="font-size:0.9rem;color:#e2e8f0;margin-top:2px;">${playerPaintPct.toFixed(1)}% Territoire Conquis</div>
+  </div>` : '';
+
+  $('stats').innerHTML = rankBadgeHtml
+    + `<div class="cell full-width"><div class="v">${mine ? (mine.f.deposited || 0) : 0} / ${WIN_DEPOSIT_GOAL}</div><div class="k">Esprits Déposés au Sanctuaire</div></div>`
+    + `<div class="cell full-width" style="text-align:left;font-size:0.9rem;padding:10px;">`
+    + `<div style="font-size:0.85rem;color:#94a3b8;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Classement Territoire</div>`
+    + `${podium}</div>`;
 
   $('end').classList.remove('hidden');
   if (victory) sfxKill(); else sfxDeath();
@@ -4443,33 +4662,7 @@ function updateShields(dt) {
     + petite sphère noire pulsante. Le groupe suit le Leader ciblé via update. */
 function makeCurseGroup(color) {
   const g = new THREE.Group();
-  const col = new THREE.Color(color);
-  /* Anneau rouge tournant — hors sol, au-dessus du perso. */
-  const ringGeo = new THREE.RingGeometry(0.75, 0.95, 32).rotateX(-Math.PI / 2);
-  const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
-    color: col, transparent: true, opacity: 0.9,
-    depthWrite: false, side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-  }));
-  ring.position.y = 3.15;
-  g.add(ring);
-  /* Deuxième anneau contrarotatif — accentue le mouvement de rune. */
-  const ring2Geo = new THREE.RingGeometry(0.55, 0.7, 24).rotateX(-Math.PI / 2);
-  const ring2 = new THREE.Mesh(ring2Geo, new THREE.MeshBasicMaterial({
-    color: col, transparent: true, opacity: 0.75,
-    depthWrite: false, side: THREE.DoubleSide,
-    blending: THREE.AdditiveBlending,
-  }));
-  ring2.position.y = 3.22;
-  g.add(ring2);
-  /* Sphère centrale sombre — le point de fixation de la malédiction. */
-  const orbGeo = new THREE.SphereGeometry(0.22, 12, 8);
-  const orb = new THREE.Mesh(orbGeo, new THREE.MeshBasicMaterial({
-    color: 0x220000, transparent: true, opacity: 0.85, depthWrite: false,
-  }));
-  orb.position.y = 3.18;
-  g.add(orb);
-  g.userData = { ring, ring2, orb };
+  g.visible = false; // Désactivé à la demande de l'utilisateur (suppression de la boule noire et des anneaux)
   return g;
 }
 
@@ -4495,7 +4688,7 @@ function updateCurses(dt) {
     target.fuel = Math.max(0, (target.fuel || 0) - c.drainRate * dt);
     /* Anim des runes. */
     const ud = c.grp.userData;
-    if (ud) {
+    if (ud && ud.ring) {
       ud.ring.rotation.y += dt * 2.2;
       ud.ring2.rotation.y -= dt * 3.0;
       const pulse = 0.85 + 0.15 * Math.sin(elapsed * 7);
@@ -4666,9 +4859,56 @@ function updatePowerUI() {
   }
 }
 
+/* Dépôt des esprits élémentaires au Sanctuaire de Base */
+function checkBaseDeposits(dt) {
+  if (state !== 'play' || !teams || !teams.length) return;
+  for (const f of factions) {
+    if (!f || !f.alive) continue;
+    const team = teams[f.team];
+    if (!team) continue;
+
+    const dx = f.leader.x - team.baseX;
+    const dz = f.leader.z - team.baseZ;
+    const dBase = Math.hypot(dx, dz);
+
+    if (dBase < 6.8) {
+      let depositedThisTick = 0;
+      for (let i = 0; i < agents.length; i++) {
+        const a = agents[i];
+        if (!a || a.dead) continue;
+        if (a.followerOf === f.i) {
+          f.deposited = (f.deposited || 0) + 1;
+          f.count = Math.max(0, (f.count || 0) - 1);
+          depositedThisTick++;
+
+          spawnSoulBurst(a.x, a.z, f);
+          releaseFollowerSlot(a);
+          a.dead = true;
+          a.followerOf = -1;
+          a.discipleOf = -1;
+          hideAgent(a.id);
+          freeAgentIds.push(a.id);
+
+          if (f.deposited >= WIN_DEPOSIT_GOAL && state === 'play') {
+            endGame();
+            return;
+          }
+        }
+      }
+      if (depositedThisTick > 0) {
+        spawnShock(team.baseX, team.baseZ, f.color, 3.2, 0.4);
+        if (f.i === 0) {
+          soundEngine.playSFX('crystal', { volume: 0.85, rate: 1.25 });
+        }
+        updateHUD();
+      }
+    }
+  }
+}
+
 function update(dt) {
   elapsed += dt;
-  tryTriggerMatchEvent();
+  checkBaseDeposits(dt);
   tickWorldMods(dt);
 
   // recharge du sprint (cadence fixe, identique pour tous)
@@ -4718,6 +4958,7 @@ function update(dt) {
   _leaderTickCtx.leaderSpeed = leaderSpeed;
   _leaderTickCtx.aiThink = aiThink;
   _leaderTickCtx.skillMods = skillMods;
+  _leaderTickCtx.teams = teams;
   _leaderTickState.factions = factions;
   _leaderTickState.island = island;
   _leaderTickState.judgeR = judgeR;
@@ -4803,29 +5044,7 @@ function update(dt) {
           L'invité attend ce message : c'est la seule façon d'avoir un
           classement identique sur les deux écrans (chacun lisait sinon sa
           propre snapshot décalée de quelques centaines de ms). -- */
-    if (net.isHost() && elapsed >= MATCH_DUR && net.state.phase !== 'over') {
-      const finalData = factions.filter(f => f.sessionId).map(f => {
-        const s = factionScore(f);
-        return {
-          sid: f.sessionId,
-          x: f.leader.x, z: f.leader.z, dx: f.leader.dx, dz: f.leader.dz,
-          alive: f.alive,
-          score: s.total, pct: s.pct,
-          grisAbs: f.grisAbs | 0, count: f.count | 0,
-          playerName: f.cult.name, cultColor: f.cult.c, cultSym: f.cult.sym,
-          isBot: f.isBot, seatIndex: f.seatIndex ?? 0,
-        };
-      });
-      net.broadcastLeaders(finalData, elapsed);
-      net.endMatch();
-    }
     if (net.state.phase === 'over') { endGame(); return; }
-    /* -- Filet de sécurité (généreux) : si l'`over` de l'hôte ne parvient
-          jamais à l'invité (perte réseau, mise en veille…), on termine
-          quand même après 10 s au-delà du chrono officiel pour ne pas
-          laisser un joueur coincé. Le podium utilisera alors la dernière
-          snapshot reçue — pas idéal mais mieux qu'un jeu figé. -- */
-    if (!net.isHost() && elapsed >= MATCH_DUR + 10) { endGame(); return; }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
   paintUploadT -= dt;
@@ -4839,24 +5058,9 @@ function update(dt) {
   /* -- Leaders : répulsion douce (extrait dans src/sim/leader-tick.js) -- */
   _stepLeaderRepulsion(_leaderTickState, dt, _leaderTickCtx);
 
-  /* -- Mode Peinture : livraison, siphon, revenu de territoire et érosion
-        sont débranchés — la partie se joue à la couverture, au chrono. -- */
-
-  /* -- Le jour est le chrono : la partie s'ouvre à l'aube et se joue jusqu'à
-        la nuit tombée. Aucun compteur affiché — le ciel EST l'horloge. -- */
-  /* Fin sur chrono local en solo. En multi, l'invité NE ferme PAS ici (bloc
-     précédent — attend le message `over` de l'hôte), et l'hôte a déjà fermé
-     via net.endMatch() → phase='over'. */
-  if (!multiMode && elapsed >= MATCH_DUR) { endGame(); return; }
-  /* Clocher : trois coups quand il reste 30 s. */
-  if (!lateBellDone && MATCH_DUR - elapsed <= 30) {
-    lateBellDone = true;
-    soundEngine.playBellWarning();
-    banner('🔔 30 secondes !');
-  }
-  const dayT = Math.min(1, elapsed / MATCH_DUR);
-  applyDayCycle(dayT);
-  soundEngine.setMusicIntensity(dayT);
+  /* Éclairage diurne agréable et fixe (le jour ne passe plus vers la nuit) */
+  applyDayCycle(0.42);
+  soundEngine.setMusicIntensity(0.5);
   soundEngine.updateMusic(dt);
 
   discHalos.count = agents.length;
@@ -4886,8 +5090,10 @@ function update(dt) {
     _crowdTickCtx.spawnSoulBurst = spawnSoulBurst;
     _crowdTickCtx.tone = tone;
     _crowdTickCtx._convCol = _convCol;
+    _crowdTickCtx.stealSpiritFromLeader = stealSpiritFromLeader;
   }
   _stepCrowd(_crowdTickState, dt, _crowdTickCtx);
+  updateBurrowEvents(dt);
 
   for (const m of crowds) { m.instanceMatrix.needsUpdate = true; }
   discHalos.instanceMatrix.needsUpdate = true;
@@ -4924,8 +5130,8 @@ function update(dt) {
     }
     // léger roulis d'épaules sur le pas, calé sur l'horloge du shader
     const walk = Math.min(1, sp / 4);
-    g.userData.body.rotation.z = Math.sin(monkTimeU.value * 8 + f.i * 2) * 0.03 * walk;
-    g.userData.body.rotation.x = 0.06 * walk;
+    g.userData.body.rotation.z = 0;
+    g.userData.body.rotation.x = 0;
     /* Locomotion du moine riggé : fondu enchaîné marche / course / sprint selon
        la vitesse au sol, cadence du clip calée sur cette vitesse (à l'arrêt le
        clip gèle en douceur, la direction étant déjà lissée par l'inertie). */
@@ -5168,8 +5374,8 @@ function startGame() {
   joyId = null; joyEl.style.display = 'none';
   if (!conquest) {
     MAX_AGENTS = AGENT_CAP;
-    START_GRAYS = 90 * DENSITY;
   }
+  START_GRAYS = 300;
   /* Multi : biome et graine viennent de l'hôte P2P — même vallée pour tout le monde. */
   const netSeed = multiMode ? net.getSeed() : 0;
   const biomeKey = conquest
@@ -5301,6 +5507,8 @@ if (import.meta.env.DEV) {
   // essai rapide d'un perso : __leader('sorcerer') puis __play()
   window.__leader = (k) => { if (LEADERS[k]) { playerLeaderKey = k; return k; } return 'inconnu'; };
   window.__dbg = () => ({ scene, camera, factions, teams, island, agents, shrines, houses });
+  window.__foll = () => Object.fromEntries(Object.entries(followerMeshes).map(([k, v]) => [k, { count: v.mesh.count, cap: v.cap, freeSlots: v.freeSlots.length }]));
+  window.__ag = () => agents.map((a) => ({ id: a.id, v: variantOf(a.id), foll: a._followerSlot, disc: a._followerKey })).filter((a) => a.foll != null || a.disc);
   // inspection du multi : __net.getSlots(), __net.getLeaderList(), __net.state…
   window.__net = net;
   window.__ctl = () => ({ input, keys, multiMode, state, dir: playerDir(input, keys) });
@@ -5931,7 +6139,7 @@ $('btn-end-back').addEventListener('click', () => {
 /* ------------------------------- Céder la victoire ------------------------------- */
 $('btn-concede').addEventListener('click', () => {
   if (state === 'play') {
-    endGame(false);
+    endGame('concede');
   }
 });
 
@@ -5947,9 +6155,8 @@ setPlayHandler((ctx) => {
   const maxPopKey = `${ctx.world.iso}_${ctx.region.id}`;
   const maxPop = (save.conqMaxPop && save.conqMaxPop[maxPopKey]) || 500;
   
-  // Population allégée : moins de NPC = carte aérée + GPU plus calme.
-  MAX_AGENTS = Math.min(AGENT_CAP, Math.max(120, Math.round(maxPop * 0.35) * DENSITY));
-  START_GRAYS = Math.min(MAX_AGENTS, Math.max(55, Math.round(maxPop * 0.28)) * DENSITY);
+  // Population fixe : 250 esprits dorés + 50 villageois (300 agents au total)
+  START_GRAYS = 300;
   
   // Couleur du joueur = sa religion (save.playerColor), fallback couleur du pays
   const colorStr = ctx.playerColor || ctx.world.color;
@@ -5987,7 +6194,13 @@ function frame(now) {
     // ralenti dramatique (kill de Leader) : le temps s'étire un court instant
     if (slowmoT > 0) { slowmoT -= dt; dt *= 0.3; }
     if (eventFreeze) updateEventCard(dt);
-    else if (!paused) update(dt);   // gelé pendant pause / carte événement
+    else if (!paused) {
+      try {
+        update(dt);
+      } catch (err) {
+        console.error('[game loop error]', err);
+      }
+    }
   } else {
     // Vue d'attente du menu : magnifique orbite cinématographique au-dessus de la vallée
     applyDayCycle(0.42);

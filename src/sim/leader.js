@@ -18,10 +18,6 @@ export function leaderSpeed(f, ctx) {
   let v = vMax - (vMax - vMin) * t;
   if (f.leaderKey === 'nomad') v *= 1.20;
   if (f.boostT > 0) v *= BOOST_MULT;
-  if (f.slowT > 0) v *= 0.35;
-  const groundOwner = ctx.paintOwnerAt(f.leader.x, f.leader.z);
-  if (groundOwner === f.team) v *= 1.22;
-  else if (groundOwner >= 0 && groundOwner !== f.team) v *= 0.70;
   return v;
 }
 

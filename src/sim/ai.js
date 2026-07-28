@@ -100,6 +100,18 @@ export function aiThink(f, dt, ctx) {
     if (o === f) { myScore = s; continue; }
     if (s > bestRivalScore) { bestRivalScore = s; bestRival = o; }
   }
+
+  /* ---- 0) Dépôt au Sanctuaire de base si le leader a récolté des esprits ---- */
+  const team = ctx.teams && ctx.teams[f.team];
+  if (team && (f.count || 0) >= 4) {
+    const dBase = Math.hypot(team.baseX - L.x, team.baseZ - L.z);
+    const depositNeed = Math.min(3.5, (f.count || 0) * 0.45) * (1 + 12 / (10 + dBase));
+    if (depositNeed > 1.0) {
+      f.mode = 'deposit';
+      f.target = { x: team.baseX, z: team.baseZ };
+      return;
+    }
+  }
   const rivalTeam = bestRival ? bestRival.team : -1;
   const pressure = (bestRival && bestRivalScore > myScore)
     ? Math.min(1, (bestRivalScore - myScore) / 1000)

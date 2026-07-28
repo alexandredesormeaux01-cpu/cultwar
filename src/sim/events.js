@@ -4,8 +4,8 @@
 
 import { DISC_LVL_MAX } from './constants.js';
 
-/** Instants (secondes écoulées) où une carte tombe. Match 2 min → 0:45 et 1:30. */
-export const EVENT_TIMES = [45, 90];
+/** Événements désactivés — aucune carte ne tombe. */
+export const EVENT_TIMES = [];
 
 export const EVENT_SPIN_DUR = 3.8;
 export const EVENT_REVEAL_DUR = 4.8;

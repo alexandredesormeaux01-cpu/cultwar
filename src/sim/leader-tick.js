@@ -62,18 +62,38 @@ export function stepLeaders(state, input, dt, ctx) {
 
     let dx = 0, dz = 0;
     if (f.isBot) {
-      aiThink(f, dt);
+      /* Escape lock : après un blocage détecté, on force une cible d'évasion
+         pour ~1.5 s en ignorant aiThink — sinon l'IA repointe immédiatement
+         vers l'obstacle et l'anti-stuck ne sert à rien. */
+      if (f.leader._escapeT && f.leader._escapeT > 0) {
+        f.leader._escapeT -= dt;
+        aiThink(f, dt);
+        f.target = f.leader._escapeTarget;
+      } else {
+        aiThink(f, dt);
+      }
       if (f.target) {
         dx = f.target.x - f.leader.x; dz = f.target.z - f.leader.z;
         const n = Math.hypot(dx, dz);
         if (n > 0.5) {
+          const nx = dx / n, nz = dz / n;
           const steered = steerOnIsland(f.leader.x, f.leader.z, dx, dz, 3.4);
           if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
             dx = steered.x; dz = steered.z;
           } else {
+            /* Direction directe bloquée : essaie les deux côtés, garde le
+               meilleur ; si les deux échouent, garde la direction directe
+               brute — resolveIsland(true) déclenchera un saut si canJumpToward
+               valide. Sans ça le bot se bloque indéfiniment sur le bord. */
             const side = (f.i & 1) ? 1 : -1;
-            const along = steerOnIsland(f.leader.x, f.leader.z, -dz * side, dx * side, 3.2);
-            dx = along.x; dz = along.z;
+            const aA = steerOnIsland(f.leader.x, f.leader.z, -dz * side, dx * side, 3.2);
+            const aB = steerOnIsland(f.leader.x, f.leader.z,  dz * side, -dx * side, 3.2);
+            const scoreA = aA.x * nx + aA.z * nz;
+            const scoreB = aB.x * nx + aB.z * nz;
+            const pick = scoreB > scoreA ? aB : aA;
+            if (pick.x * pick.x + pick.z * pick.z > 1e-6) {
+              dx = pick.x; dz = pick.z;
+            } else { dx = nx; dz = nz; }
           }
         } else { dx = 0; dz = 0; }
       }
@@ -122,6 +142,54 @@ function finishLeaderStep(f, prevX, prevZ, dt, state, ctx) {
 
   const moved = Math.hypot(f.leader.x - prevX, f.leader.z - prevZ);
   f.dist = (f.dist || 0) + moved;
+
+  /* Anti-blocage :
+     - 0.6 s coincé → verrouille une cible d'évasion (point sol aléatoire à
+       6–10 u autour), l'IA ignore ses objectifs pendant 1.5 s le temps de
+       s'en sortir par un chemin latéral.
+     - 2.5 s coincé quand même (l'évasion elle-même échoue) → téléportation
+       vers le point solide le plus proche à ≥ 4 u : garantit qu'aucun bot
+       ne peut rester bloqué pour la partie. */
+  if (f.isBot) {
+    const wanted = Math.hypot(f.leader.dx, f.leader.dz);
+    if ((wanted > 0.5 || f.target) && moved < 0.05) {
+      f.leader._stuckT = (f.leader._stuckT || 0) + dt;
+      if (f.leader._stuckT > 2.5) {
+        /* Téléport de dernier recours. */
+        for (let tries = 0; tries < 8; tries++) {
+          const ang = Math.random() * Math.PI * 2;
+          const dist = 4 + Math.random() * 4;
+          const tx = f.leader.x + Math.cos(ang) * dist;
+          const tz = f.leader.z + Math.sin(ang) * dist;
+          if (isSolid(island, tx, tz)) {
+            f.leader.x = f.leader._safeX = tx;
+            f.leader.z = f.leader._safeZ = tz;
+            f.leader.dx = 0; f.leader.dz = 0;
+            f.leader.jmp = null;
+            f.leader._escapeT = 0;
+            f.leader._escapeTarget = null;
+            break;
+          }
+        }
+        f.leader._stuckT = 0;
+      } else if (f.leader._stuckT > 0.6 && !(f.leader._escapeT > 0)) {
+        /* Choix d'un point d'évasion solide à distance moyenne. */
+        for (let tries = 0; tries < 6; tries++) {
+          const ang = Math.random() * Math.PI * 2;
+          const dist = 6 + Math.random() * 4;
+          const tx = f.leader.x + Math.cos(ang) * dist;
+          const tz = f.leader.z + Math.sin(ang) * dist;
+          if (isSolid(island, tx, tz)) {
+            f.leader._escapeTarget = { x: tx, z: tz };
+            f.leader._escapeT = 1.5;
+            break;
+          }
+        }
+      }
+    } else {
+      f.leader._stuckT = 0;
+    }
+  }
   if (f.fuel > 0) {
     const painted = stampPaint(f);
     if (painted) {

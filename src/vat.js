@@ -181,7 +181,7 @@ function patchVATVertex(shader, vat, timeU, thickness = 0) {
       'vec3 _p1 = texture2D(uPosTex, vec2(_u, (_rb + _f1 + 0.5) * _iy)).xyz;',
       'vec3 transformed = mix(_p0, _p1, _ft);',
       'float _upper = smoothstep(0.15, 0.75, transformed.y);',
-      'float _lean  = _clip * _runBoost * 0.60 * _upper;',
+      'float _lean  = 0.0;',
       'float _lc = cos(_lean), _ls = sin(_lean);',
       'transformed = vec3(transformed.x, _lc * transformed.y - _ls * transformed.z, _ls * transformed.y + _lc * transformed.z);',
       'objectNormal = vec3(objectNormal.x, _lc * objectNormal.y - _ls * objectNormal.z, _ls * objectNormal.y + _lc * objectNormal.z);',
@@ -191,17 +191,34 @@ function patchVATVertex(shader, vat, timeU, thickness = 0) {
     ].join('\n'));
 }
 
-/* Matériau toon qui rejoue le VAT dans le vertex shader.
+/** Matériau toon qui rejoue le VAT dans le vertex shader.
    @param tex     texture couleur du modèle (map d'origine)
    @param vat     retour de bakeVAT
    @param timeU   uniforme de temps partagé { value } (avancé par la boucle)
    @param key     clé unique par variante (force une compilation séparée du shader) */
-export function makeVATMaterial(tex, vat, timeU, key = 'vat') {
+export function makeVATMaterial(tex, vat, timeU, key = 'vat', opts = {}) {
+  const { wildHalo = false, golden = false } = opts;
   const mat = toonMaterial({ map: tex || null });
-  mat.customProgramCacheKey = () => 'vat-' + key;
+  mat.customProgramCacheKey = () => 'vat-' + key + (wildHalo ? '-halo' : '') + (golden ? '-gold' : '');
   mat.onBeforeCompile = (shader) => {
     patchVATVertex(shader, vat, timeU, 0);
     patchToonOutline(shader);
+    /* Teinte d'Or céleste éclatant pour tous les esprits élémentaires neutres */
+    if (golden || wildHalo) {
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float uTime;')
+        .replace('#include <opaque_fragment>', [
+          '{',
+          '  vec3 vN = normalize(vNormal);',
+          '  vec3 vV = normalize(vViewPosition);',
+          '  float rim = pow(1.0 - max(dot(vN, vV), 0.0), 1.8);',
+          '  float pulse = 0.75 + 0.25 * sin(uTime * 3.2);',
+          '  vec3 gold = vec3(1.0, 0.76, 0.15);',
+          '  outgoingLight = mix(outgoingLight, gold, 0.85) + gold * rim * pulse * 1.8;',
+          '}',
+          '#include <opaque_fragment>',
+        ].join('\n'));
+    }
   };
   return mat;
 }

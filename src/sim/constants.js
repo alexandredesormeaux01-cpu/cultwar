@@ -6,12 +6,13 @@
 /* ---- Carte ---- */
 export const MAP_R = 60;               // rayon jouable de la vallée
 export const DENSITY = 1;              // multiplicateur de population (alléger GPU + carte)
-export const AGENT_CAP_MOBILE = 220;
-export const AGENT_CAP_DESKTOP = 480;
-export const START_GRAYS = 80 * DENSITY;
+export const AGENT_CAP_MOBILE = 350;
+export const AGENT_CAP_DESKTOP = 600;
+export const START_GRAYS = 300;
 
 /* ---- Factions & base ---- */
 export const NB_FACTIONS = 3;
+export const WIN_DEPOSIT_GOAL = 60;   // premier à 60 esprits déposés gagne
 export const SIEGE_R = 3.5;
 export const SIEGE_R2 = SIEGE_R * SIEGE_R;
 export const SIEGE_RATE = 0.5;

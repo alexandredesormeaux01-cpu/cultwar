@@ -418,16 +418,59 @@ export function stepCrowd(state, dt, ctx) {
           a.extractProgress = 0;
         }
       } else {
-        a.wt = (a.wt || 0) - dt;
-        if (a.wt <= 0) { a.wt = 2.5 + Math.random() * 4; a.wander = Math.random() * 6.28; }
-        let wx = Math.cos(a.wander || 0) * FOLLOWER_WANDER_SPD;
-        let wz = Math.sin(a.wander || 0) * FOLLOWER_WANDER_SPD;
-        const steered = steerOnIsland(a.x, a.z, wx, wz, 2.2);
-        if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
-          wx = steered.x * FOLLOWER_WANDER_SPD; wz = steered.z * FOLLOWER_WANDER_SPD;
-        } else { a.wander += 1.2; }
-        a.vx += (wx - a.vx) * Math.min(1, dt * 2);
-        a.vz += (wz - a.vz) * Math.min(1, dt * 2);
+        /* Cortège collant : les esprits convertis s'accrochent au Leader.
+           - Loin (> 2 u) : sprint à la vitesse du Leader (V_MAX 9.2), plus rapide
+             encore au-delà de 5 u pour rattraper les grands écarts.
+           - Proche : orbite serrée décalée par agent (id * 0.618) pour éviter
+             qu'ils se superposent tous à sa position exacte. */
+        const lx = f.leader.x, lz = f.leader.z;
+        const dxL = lx - a.x, dzL = lz - a.z;
+        const distL = Math.hypot(dxL, dzL) || 1;
+        const STICK_R = 2;   // rayon très serré = cortège collé au Leader
+        const jitter = ((a.id * 0.6180339) % 1) * 6.28;
+        let wx, wz, spdMag;
+        if (distL > STICK_R) {
+          /* Rattrapage : vitesse ≥ Leader pour ne jamais décrocher. */
+          const catchup = distL > 5 ? 11.5 : 9.2;
+          const perpX = -dzL / distL, perpZ = dxL / distL;
+          const wob = Math.sin(elapsed * 1.1 + jitter) * 0.35;
+          wx = (dxL / distL + perpX * wob) * catchup;
+          wz = (dzL / distL + perpZ * wob) * catchup;
+          spdMag = catchup;
+        } else {
+          /* Micro-orbite autour du Leader. */
+          const orbA = jitter + elapsed * 1.4;
+          const orbR = 1.4 + ((a.id * 0.371) % 1) * 0.6;
+          const tx = lx + Math.cos(orbA) * orbR;
+          const tz = lz + Math.sin(orbA) * orbR;
+          const dxT = tx - a.x, dzT = tz - a.z;
+          const dT = Math.hypot(dxT, dzT) || 1;
+          wx = (dxT / dT) * FOLLOWER_SPD;
+          wz = (dzT / dT) * FOLLOWER_SPD;
+          spdMag = FOLLOWER_SPD;
+        }
+        /* Anti-blocage sur bord : si la ligne vers le Leader traverse un trou,
+           on demande un saut si canJumpToward valide la direction, sinon on
+           dévie latéralement (comme les disciples). */
+        const nx = wx / (spdMag || 1), nz = wz / (spdMag || 1);
+        const blocked = islandPathBlocked(a.x, a.z, lx, lz, 2.6);
+        const jumpReady = blocked && canJumpToward(island, a.x, a.z, nx, nz);
+        if (blocked && !jumpReady) {
+          const side = (a.id & 1) ? 1 : -1;
+          const alongX = -nz * side, alongZ = nx * side;
+          const bx = alongX * 0.75 + nx * 0.25;
+          const bz = alongZ * 0.75 + nz * 0.25;
+          const dv = steerOnIsland(a.x, a.z, bx, bz, 2.6, side);
+          if (dv.x * dv.x + dv.z * dv.z > 1e-6) { wx = dv.x * spdMag; wz = dv.z * spdMag; }
+        } else {
+          const steered = steerOnIsland(a.x, a.z, wx, wz, 2.2);
+          if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
+            wx = steered.x * spdMag; wz = steered.z * spdMag;
+          }
+        }
+        /* Réponse plus vive (dt * 8) pour que le cortège colle vraiment. */
+        a.vx += (wx - a.vx) * Math.min(1, dt * 8);
+        a.vz += (wz - a.vz) * Math.min(1, dt * 8);
         if ((a.extractProgress || 0) > 0) {
           _setFCol({ r: 1, g: 1, b: 1 });
           a.converting = -1;
@@ -437,14 +480,17 @@ export function stepCrowd(state, dt, ctx) {
       }
 
       a.x += a.vx * dt; a.z += a.vz * dt;
-      resolveIsland(island, a, a.vx, a.vz, dt, false);
+      /* allowJumps=true : les convertis sautent les trous entre tuiles pour
+         suivre le Leader (même physique que les disciples). Sans ça ils
+         restent bloqués sur les bords quand le Leader saute d'une île à l'autre. */
+      resolveIsland(island, a, a.vx, a.vz, dt, true);
       const spd = Math.hypot(a.vx, a.vz);
       if (spd > 0.12) a.face = Math.atan2(a.vx, a.vz);
 
       tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
       if (a._followerSlot != null) {
         tmpS.set(1, 1, 1);
-        tmpP.set(a.x, 0, a.z);
+        tmpP.set(a.x, a.y || 0, a.z);
         tmpM.compose(tmpP, tmpQ, tmpS);
         updateFollowerTransform(a, tmpM, spd);
       } else {
@@ -609,7 +655,8 @@ export function stepCrowd(state, dt, ctx) {
       if (spd > 0.12) a.face = Math.atan2(a.vx, a.vz);
     }
 
-    const closestF = (nearF && nearD < CONV_R) ? nearF : null;
+    const isElemental = typeof variantOf !== 'undefined' ? variantOf(a.id) >= 3 : true;
+    const closestF = (isElemental && nearF && nearD < CONV_R) ? nearF : null;
     let scaleMul = 1;
     if (closestF) {
       a.convertingDisc = (nearC && nearC.disc) ? nearC.disc : null;
@@ -626,13 +673,19 @@ export function stepCrowd(state, dt, ctx) {
       scaleMul = u < 0.65
         ? 1 + u * 0.14
         : Math.max(0.12, 1.09 * (1 - (u - 0.65) / 0.35));
-      if (Math.random() < 0.12 + u * 0.55) spawnSoulBurst(a.x, a.z, closestF);
       if (a.extractProgress >= ritualNeed) {
         finishConvert(a, closestF, a.convertingDisc);
         if (a.dead) continue;
         scaleMul = 1.12;
       }
     } else {
+      if (!isElemental && nearF && nearD < 2.2 && (nearF.count || 0) > 0) {
+        a.stealCd = (a.stealCd || 0) - dt;
+        if (a.stealCd <= 0) {
+          a.stealCd = 3.5;
+          if (ctx.stealSpiritFromLeader) ctx.stealSpiritFromLeader(nearF);
+        }
+      }
       if ((a.extractProgress || 0) > 0 || (a.converting ?? -1) >= 0) {
         setAgentColor(a.id, GRAY);
       }
@@ -644,7 +697,7 @@ export function stepCrowd(state, dt, ctx) {
     tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
     const s = a.base * scaleMul * (a.stumbleT > 0 ? 0.92 : 1);
     tmpS.set(s, s, s);
-    tmpP.set(a.x, a.stumbleT > 0 ? 0.05 : 0, a.z);
+    tmpP.set(a.x, (a.y || 0) + (a.stumbleT > 0 ? 0.05 : 0), a.z);
     tmpM.compose(tmpP, tmpQ, tmpS);
     const cm = crowdOf(a.id), sl = slotOf(a.id);
     cm.setMatrixAt(sl, tmpM);

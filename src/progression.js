@@ -486,6 +486,96 @@ function seeded(seed) {
   const x = Math.sin(seed * 127.1 + seed * 311.7) * 43758.5453;
   return x - Math.floor(x);
 }
+/* -------- Nuages Cel-Shaded de Périmètre (Banques Vectorielles Unifiées) -------- */
+function drawStylizedCelCloud(ctx, x, y, scale, flipX = false, opacity = 1, variant = 0, dpr = 1) {
+  ctx.save();
+  ctx.translate(x, y);
+  const s = scale * dpr * 0.90;
+  if (flipX) ctx.scale(-s, s); else ctx.scale(s, s);
+  ctx.globalAlpha = opacity;
+
+  const outlineCol = '#090d16'; // Contour encre noir cel-shading net
+  const shadowCol = '#bae6fd';  // Ombre cyan pastel toon
+  const baseCol = '#ffffff';    // Blanc pur
+
+  // Définition des tracés vectoriels extérieurs unifiés (Continuous Outer Path)
+  const buildPath = (c) => {
+    c.beginPath();
+    if (variant === 0) {
+      // Banque de 3 grands dômes
+      c.moveTo(-50, 10);
+      c.arc(-30, -4, 18, Math.PI * 0.85, Math.PI * 1.75);
+      c.arc(0, -20, 24, Math.PI * 1.1, Math.PI * 1.88);
+      c.arc(30, -4, 18, Math.PI * 1.25, Math.PI * 0.15);
+      c.quadraticCurveTo(48, 14, 25, 14);
+      c.lineTo(-25, 14);
+      c.quadraticCurveTo(-48, 14, -50, 10);
+    } else if (variant === 1) {
+      // Banque étirée de 4 dômes
+      c.moveTo(-65, 12);
+      c.arc(-42, -2, 16, Math.PI * 0.85, Math.PI * 1.75);
+      c.arc(-15, -22, 22, Math.PI * 1.1, Math.PI * 1.85);
+      c.arc(18, -16, 18, Math.PI * 1.15, Math.PI * 1.9);
+      c.arc(45, -2, 15, Math.PI * 1.25, Math.PI * 0.15);
+      c.quadraticCurveTo(62, 15, 40, 15);
+      c.lineTo(-40, 15);
+      c.quadraticCurveTo(-62, 15, -65, 12);
+    } else {
+      // Banque compacte de 2 dômes
+      c.moveTo(-38, 8);
+      c.arc(-18, -5, 15, Math.PI * 0.85, Math.PI * 1.75);
+      c.arc(10, -15, 20, Math.PI * 1.1, Math.PI * 0.15);
+      c.quadraticCurveTo(35, 12, 15, 12);
+      c.lineTo(-15, 12);
+      c.quadraticCurveTo(-35, 12, -38, 8);
+    }
+    c.closePath();
+  };
+
+  // 1. Ombre cyan pastel portée décalée sous le nuage
+  ctx.save();
+  ctx.translate(0, 4);
+  ctx.fillStyle = shadowCol;
+  buildPath(ctx);
+  ctx.fill();
+  ctx.restore();
+
+  // 2. Corps principal blanc pur
+  ctx.fillStyle = baseCol;
+  buildPath(ctx);
+  ctx.fill();
+
+  // 3. Ombre toon interne découpée sur la moitié inférieure
+  ctx.save();
+  buildPath(ctx);
+  ctx.clip();
+  ctx.fillStyle = 'rgba(186, 230, 253, 0.65)';
+  ctx.fillRect(-80, 2, 160, 40);
+  ctx.restore();
+
+  // 4. Contour noir extérieur continu à l'encre (SANS croisement de cercles internes)
+  ctx.strokeStyle = outlineCol;
+  ctx.lineWidth = 2.6;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  buildPath(ctx);
+  ctx.stroke();
+
+  // 5. Amorces de volutes internes discrètes aux jonctions de dômes
+  ctx.beginPath();
+  if (variant === 0) {
+    ctx.arc(-15, -4, 8, Math.PI * 0.4, Math.PI * 1.05); ctx.stroke();
+    ctx.arc(15, -4, 8, Math.PI * 0.0, Math.PI * 0.65); ctx.stroke();
+  } else if (variant === 1) {
+    ctx.arc(-28, -4, 8, Math.PI * 0.4, Math.PI * 1.05); ctx.stroke();
+    ctx.arc(2, -6, 8, Math.PI * 0.3, Math.PI * 0.95); ctx.stroke();
+  } else {
+    ctx.arc(-4, -2, 6, Math.PI * 0.35, Math.PI * 1.05); ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 function createStarfield(canvas) {
   const ctx = canvas.getContext('2d', { alpha: true });
   let stars = [], shooting = [], nextShoot = 0, raf = 0, W = 0, H = 0;
@@ -515,51 +605,85 @@ function createStarfield(canvas) {
     if (now - last < 1000 / FPS) return;
     last = now;
     ctx.clearRect(0, 0, W, H);
-    // fond cosmique + nébuleuses
-    const bg = ctx.createRadialGradient(W*0.5, H*0.45, 0, W*0.5, H*0.5, W*0.75);
-    bg.addColorStop(0, rgba(TINT.inner, 0.20));
-    bg.addColorStop(0.4, rgba(TINT.outer, 0.12));
-    bg.addColorStop(1, 'rgb(3,8,16)');
-    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
-    for (const [cx, cy, rr, col, al] of [
-      [0.3, 0.35, 0.25, TINT.inner, 0.11], [0.7, 0.6, 0.2, TINT.arm, 0.09], [0.5, 0.85, 0.35, TINT.outer, 0.06],
-    ]) {
-      const n = ctx.createRadialGradient(W*cx, H*cy, 0, W*cx, H*cy, W*rr);
-      n.addColorStop(0, rgba(col, al)); n.addColorStop(1, 'transparent');
-      ctx.fillStyle = n; ctx.fillRect(0, 0, W, H);
-    }
-    const t = now / 1000;
-    for (const s of stars) {
-      const tw = 0.5 + 0.5 * Math.sin(t * s.tw + s.ph);
-      const a = s.opacity * (0.4 + tw * 0.6);
-      ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, 7);
-      ctx.fillStyle = `rgba(220,230,255,${a})`; ctx.fill();
-      if (s.size > 1.4 && tw > 0.85) {
-        ctx.beginPath(); ctx.arc(s.x, s.y, s.size * 2.5, 0, 7);
-        ctx.fillStyle = `rgba(180,200,255,${a * 0.15})`; ctx.fill();
+
+    const CARTOON_SKY = false;
+    if (CARTOON_SKY) {
+      // 1. Dégradé de Ciel Bleu Cel-Shaded Vibrant
+      const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+      skyGrad.addColorStop(0, '#38bdf8');    // Cyan / bleu ciel lumineux en haut
+      skyGrad.addColorStop(0.45, '#0284c7'); // Bleu roi céleste au centre
+      skyGrad.addColorStop(0.85, '#0369a1'); // Bleu océan profond
+      skyGrad.addColorStop(1, '#0c4a6e');    // Bleu nuit horizon
+      ctx.fillStyle = skyGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // 2. Halo de Soleil & Rayons Cel-Shaded en haut à gauche
+      const sunGrad = ctx.createRadialGradient(W * 0.2, H * 0.15, 0, W * 0.2, H * 0.15, Math.min(W, H) * 0.65);
+      sunGrad.addColorStop(0, 'rgba(255, 255, 255, 0.55)');
+      sunGrad.addColorStop(0.25, 'rgba(224, 242, 254, 0.30)');
+      sunGrad.addColorStop(0.65, 'rgba(56, 189, 248, 0.12)');
+      sunGrad.addColorStop(1, 'rgba(56, 189, 248, 0)');
+      ctx.fillStyle = sunGrad;
+      ctx.fillRect(0, 0, W, H);
+
+      // 3. Nuages d'arrière-plan vaporeux
+      const t = now / 1000;
+      const bgClouds = [
+        { x: ((W * 0.15 + t * 14) % (W + 280)) - 140, y: H * 0.18, scale: 0.85, variant: 0, opacity: 0.85 },
+        { x: ((W * 0.70 + t * 18) % (W + 280)) - 140, y: H * 0.24, scale: 0.70, variant: 1, opacity: 0.75 },
+        { x: ((W * 0.42 + t * 10) % (W + 280)) - 140, y: H * 0.75, scale: 0.75, variant: 2, opacity: 0.70 },
+        { x: ((W * 0.85 + t * 12) % (W + 280)) - 140, y: H * 0.82, scale: 0.60, variant: 0, opacity: 0.65 }
+      ];
+      for (const c of bgClouds) {
+        drawStylizedCelCloud(ctx, c.x, c.y, c.scale, false, c.opacity, c.variant, dprScale());
       }
+    } else {
+      // Fond cosmique + nébuleuses (Rendu original conservé)
+      const bg = ctx.createRadialGradient(W*0.5, H*0.45, 0, W*0.5, H*0.5, W*0.75);
+      bg.addColorStop(0, rgba(TINT.inner, 0.20));
+      bg.addColorStop(0.4, rgba(TINT.outer, 0.12));
+      bg.addColorStop(1, 'rgb(3,8,16)');
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+      for (const [cx, cy, rr, col, al] of [
+        [0.3, 0.35, 0.25, TINT.inner, 0.11], [0.7, 0.6, 0.2, TINT.arm, 0.09], [0.5, 0.85, 0.35, TINT.outer, 0.06],
+      ]) {
+        const n = ctx.createRadialGradient(W*cx, H*cy, 0, W*cx, H*cy, W*rr);
+        n.addColorStop(0, rgba(col, al)); n.addColorStop(1, 'transparent');
+        ctx.fillStyle = n; ctx.fillRect(0, 0, W, H);
+      }
+      const t = now / 1000;
+      for (const s of stars) {
+        const tw = 0.5 + 0.5 * Math.sin(t * s.tw + s.ph);
+        const a = s.opacity * (0.4 + tw * 0.6);
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, 7);
+        ctx.fillStyle = `rgba(220,230,255,${a})`; ctx.fill();
+        if (s.size > 1.4 && tw > 0.85) {
+          ctx.beginPath(); ctx.arc(s.x, s.y, s.size * 2.5, 0, 7);
+          ctx.fillStyle = `rgba(180,200,255,${a * 0.15})`; ctx.fill();
+        }
+      }
+      if (now > nextShoot) {
+        const sx = seeded(now) * W * 0.8 + W * 0.1, sy = seeded(now + 1) * H * 0.4;
+        const ang = Math.PI / 4 + seeded(now + 2) * 0.3, sp = 7 + seeded(now + 3) * 9;
+        shooting.push({ x: sx, y: sy, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: 0, max: 40 + seeded(now + 4) * 30, len: 60 + seeded(now + 5) * 80 });
+        nextShoot = now + 3000 + seeded(now + 6) * 5000;
+      }
+      shooting = shooting.filter((s) => {
+        s.x += s.vx; s.y += s.vy; s.life++;
+        const pr = s.life / s.max; if (pr >= 1) return false;
+        const fade = 1 - pr, sp = Math.hypot(s.vx, s.vy) || 1;
+        const tx = s.x - (s.vx / sp) * s.len, ty = s.y - (s.vy / sp) * s.len;
+        const grad = ctx.createLinearGradient(tx, ty, s.x, s.y);
+        grad.addColorStop(0, 'rgba(200,220,255,0)');
+        grad.addColorStop(0.6, `rgba(200,220,255,${fade * 0.5})`);
+        grad.addColorStop(1, `rgba(255,255,255,${fade * 0.9})`);
+        ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(s.x, s.y);
+        ctx.strokeStyle = grad; ctx.lineWidth = 1.5 * dprScale(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(s.x, s.y, 1.5 * dprScale(), 0, 7);
+        ctx.fillStyle = `rgba(255,255,255,${fade})`; ctx.fill();
+        return true;
+      });
     }
-    if (now > nextShoot) {
-      const sx = seeded(now) * W * 0.8 + W * 0.1, sy = seeded(now + 1) * H * 0.4;
-      const ang = Math.PI / 4 + seeded(now + 2) * 0.3, sp = 7 + seeded(now + 3) * 9;
-      shooting.push({ x: sx, y: sy, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, life: 0, max: 40 + seeded(now + 4) * 30, len: 60 + seeded(now + 5) * 80 });
-      nextShoot = now + 3000 + seeded(now + 6) * 5000;
-    }
-    shooting = shooting.filter((s) => {
-      s.x += s.vx; s.y += s.vy; s.life++;
-      const pr = s.life / s.max; if (pr >= 1) return false;
-      const fade = 1 - pr, sp = Math.hypot(s.vx, s.vy) || 1;
-      const tx = s.x - (s.vx / sp) * s.len, ty = s.y - (s.vy / sp) * s.len;
-      const grad = ctx.createLinearGradient(tx, ty, s.x, s.y);
-      grad.addColorStop(0, 'rgba(200,220,255,0)');
-      grad.addColorStop(0.6, `rgba(200,220,255,${fade * 0.5})`);
-      grad.addColorStop(1, `rgba(255,255,255,${fade * 0.9})`);
-      ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(s.x, s.y);
-      ctx.strokeStyle = grad; ctx.lineWidth = 1.5 * dprScale(); ctx.stroke();
-      ctx.beginPath(); ctx.arc(s.x, s.y, 1.5 * dprScale(), 0, 7);
-      ctx.fillStyle = `rgba(255,255,255,${fade})`; ctx.fill();
-      return true;
-    });
   }
   const dprScale = () => Math.min(devicePixelRatio || 1, 1.5);
   resize();
@@ -612,11 +736,19 @@ function createGlobe(canvas, opts) {
     cx = W / 2; cy = H / 2;
   }
 
-  function project(lat, lon) {
+  const ORBITING_CLOUDS = [
+    { lat: 0.20, lon: 0.4, alt: 1.28, scale: 0.85, speed: 0.00030, variant: 0, flip: false },
+    { lat: -0.30, lon: 2.2, alt: 1.34, scale: 0.95, speed: 0.00024, variant: 1, flip: true },
+    { lat: 0.45, lon: 3.9, alt: 1.25, scale: 0.75, speed: 0.00035, variant: 2, flip: false },
+    { lat: -0.15, lon: 5.5, alt: 1.38, scale: 0.90, speed: 0.00022, variant: 0, flip: true }
+  ];
+
+  function project(lat, lon, alt = 1.0) {
+    const rAlt = R * alt;
     const x0 = Math.cos(lat) * Math.sin(lon), y0 = Math.sin(lat), z0 = Math.cos(lat) * Math.cos(lon);
     const x1 = x0 * Math.cos(rotY) - z0 * Math.sin(rotY), z1 = x0 * Math.sin(rotY) + z0 * Math.cos(rotY);
     const y2 = y0 * Math.cos(rotX) - z1 * Math.sin(rotX), z2 = y0 * Math.sin(rotX) + z1 * Math.cos(rotX);
-    return { x: cx + x1 * R, y: cy - y2 * R, z: z2 };
+    return { x: cx + x1 * rAlt, y: cy - y2 * rAlt, z: z2 };
   }
   function interpHorizon(a, b) { const t = a.z / (a.z - b.z); return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y), z: 0 }; }
   function clipRing(pts) {
@@ -640,181 +772,447 @@ function createGlobe(canvas, opts) {
   function render() {
     const save = loadSave();
     ctx.clearRect(0, 0, W, H);
-    // ombre portée
-    ctx.fillStyle = 'rgba(15,23,42,0.28)';
-    ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.92, R * 0.68, R * 0.12, 0, 0, 7); ctx.fill();
-    // atmosphère
-    const atmo = ctx.createRadialGradient(cx, cy, R * 0.98, cx, cy, R * 1.18);
-    atmo.addColorStop(0, 'rgba(147,197,253,0.35)');
-    atmo.addColorStop(0.5, 'rgba(96,165,250,0.12)');
-    atmo.addColorStop(1, 'rgba(59,130,246,0)');
-    ctx.fillStyle = atmo; ctx.beginPath(); ctx.arc(cx, cy, R * 1.18, 0, 7); ctx.fill();
+    
+    // Toggle de style : passer à false pour retrouver le rendu original immédiatement
+    const CARTOON_STYLE = true;
 
-    const lightAngle = Math.atan2(-1, -1), lx = Math.cos(lightAngle), ly = Math.sin(lightAngle);
-    ctx.save();
-    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.clip();
-    // océan
-    const ocean = ctx.createRadialGradient(cx - R * 0.25, cy - R * 0.3, R * 0.1, cx, cy, R);
-    ocean.addColorStop(0, '#60a5fa'); ocean.addColorStop(0.45, '#3b82f6');
-    ocean.addColorStop(0.85, '#1d4ed8'); ocean.addColorStop(1, '#1e3a8a');
-    ctx.fillStyle = ocean; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
-    // reflet
-    const gloss = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.42, 0, cx - R * 0.1, cy - R * 0.05, R * 0.85);
-    gloss.addColorStop(0, 'rgba(255,255,255,0.55)'); gloss.addColorStop(0.25, 'rgba(191,219,254,0.28)');
-    gloss.addColorStop(0.6, 'rgba(59,130,246,0.05)'); gloss.addColorStop(1, 'rgba(30,64,175,0)');
-    ctx.fillStyle = gloss; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
-    // bande lumineuse
-    const ol = ctx.createLinearGradient(cx + lx * R, cy + ly * R, cx - lx * R, cy - ly * R);
-    ol.addColorStop(0, 'rgba(186,230,253,0.45)'); ol.addColorStop(0.4, 'rgba(96,165,250,0.15)');
-    ol.addColorStop(0.6, 'rgba(30,64,175,0)'); ol.addColorStop(1, 'rgba(15,23,42,0.08)');
-    ctx.fillStyle = ol; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
-    // méridiens
-    ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 0.8 * dpr;
-    for (let lat = -60; lat <= 60; lat += 30) {
-      ctx.beginPath(); let first = true;
-      for (let lon = -180; lon <= 180; lon += 8) { const p = project(lat*DEG, lon*DEG); if (p.z < 0) { first = true; continue; } first ? (ctx.moveTo(p.x,p.y), first=false) : ctx.lineTo(p.x,p.y); }
-      ctx.stroke();
-    }
-    for (let lon = -180; lon < 180; lon += 30) {
-      ctx.beginPath(); let first = true;
-      for (let lat = -85; lat <= 85; lat += 8) { const p = project(lat*DEG, lon*DEG); if (p.z < 0) { first = true; continue; } first ? (ctx.moveTo(p.x,p.y), first=false) : ctx.lineTo(p.x,p.y); }
-      ctx.stroke();
-    }
-    // terres (painter's sort)
-    if (SHAPES) {
-      const polys = [];
-      for (const shape of SHAPES) {
-        const clipped = [];
-        for (const ring of shape.rings) {
-          const proj = ring.map((pt) => project(pt.lat, pt.lon));
-          for (const sub of clipRing(proj)) clipped.push(sub);
+    if (CARTOON_STYLE) {
+      // ==================== RENDU CEL-SHADED / CARTOON ====================
+      
+      // 1. Halo d'atmosphère cel-shaded (2 anneaux concentriques néon/cyan à bordures franches)
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.18)';
+      ctx.beginPath(); ctx.arc(cx, cy, R * 1.15, 0, Math.PI * 2); ctx.fill();
+      
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.35)';
+      ctx.beginPath(); ctx.arc(cx, cy, R * 1.05, 0, Math.PI * 2); ctx.fill();
+
+      ctx.save();
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.clip();
+
+      // 3. Océan Cel-Shaded (3 zones de couleur franches, ombres & reflets toon)
+      // Base océan bleu roi toon
+      ctx.fillStyle = '#2563eb';
+      ctx.fillRect(cx - R - 4, cy - R - 4, (R + 4) * 2, (R + 4) * 2);
+
+      // Ombre douce bas-droit (bleu marine cel-shade)
+      ctx.fillStyle = '#1d4ed8';
+      ctx.beginPath();
+      ctx.arc(cx + R * 0.22, cy + R * 0.22, R * 0.95, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Ombre subtile bordure
+      ctx.fillStyle = '#1e3a8a';
+      ctx.beginPath();
+      ctx.arc(cx + R * 0.35, cy + R * 0.35, R * 0.88, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Zone principale de lumière cel-shade (bleu ciel lumineux)
+      ctx.fillStyle = '#3b82f6';
+      ctx.beginPath();
+      ctx.arc(cx - R * 0.12, cy - R * 0.12, R * 0.85, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Reflet bright cel-band en haut à gauche (cyan cartoon)
+      ctx.fillStyle = '#60a5fa';
+      ctx.beginPath();
+      ctx.arc(cx - R * 0.35, cy - R * 0.35, R * 0.62, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Reflet glossy spot style comic (spot blanc pur avec bordure franche)
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+      ctx.beginPath();
+      ctx.ellipse(cx - R * 0.45, cy - R * 0.45, R * 0.18, R * 0.10, -Math.PI / 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 5. Méridiens & Parallèles (Grille toon dessinée)
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)'; 
+      ctx.lineWidth = 1.2 * dpr;
+      for (let lat = -60; lat <= 60; lat += 30) {
+        ctx.beginPath(); let first = true;
+        for (let lon = -180; lon <= 180; lon += 8) { 
+          const p = project(lat*DEG, lon*DEG); 
+          if (p.z < 0) { first = true; continue; } 
+          first ? (ctx.moveTo(p.x,p.y), first=false) : ctx.lineTo(p.x,p.y); 
         }
-        if (!clipped.length) continue;
-        const outer = clipped[0];
-        const avgZ = outer.reduce((s, p) => s + p.z, 0) / outer.length;
-        polys.push({ rings: clipped, col: landColors(shape), countryId: shape.countryId, avgZ });
+        ctx.stroke();
       }
-      polys.sort((a, b) => a.avgZ - b.avgZ);
-      // Ensemble des pays jouables (accessibles) → mis en surbrillance (caché ~400ms).
-      const nowMs = performance.now();
-      if (!accSet || nowMs - accT > 400) {
-        accSet = new Set();
-        for (const w of WORLDS) {
-          if (w.iso === save.startIso || canEnterCountry(save, w.iso)) accSet.add(w.iso);
+      for (let lon = -180; lon < 180; lon += 30) {
+        ctx.beginPath(); let first = true;
+        for (let lat = -85; lat <= 85; lat += 8) { 
+          const p = project(lat*DEG, lon*DEG); 
+          if (p.z < 0) { first = true; continue; } 
+          first ? (ctx.moveTo(p.x,p.y), first=false) : ctx.lineTo(p.x,p.y); 
         }
-        accT = nowMs;
+        ctx.stroke();
       }
-      const accessible = accSet;
-      const hlPolys = [];
-      const fogPolys = [];
-      for (const poly of polys) {
-        // terres à plat (pas d'extrusion 3D)
-        let fillStyle = poly.col.color;
-        let isAccessible = false;
-        let discovered = true;
-        if (poly.countryId && ISO_WORLD[poly.countryId] !== undefined) {
-          discovered = isDiscovered(save, poly.countryId);
-          if (discovered) {
-            const w = WORLDS[ISO_WORLD[poly.countryId]];
-            const rel = getWorldReligion(save, w);
-            fillStyle = rel.color;
-            isAccessible = accessible.has(poly.countryId);
-          } else {
-            // Brouillard : terre inconnue, silhouette à peine visible.
-            fillStyle = '#20293a';
+
+      // 6. Terres & Pays avec contours à l'encre cel-shading (Ink Outlines)
+      if (SHAPES) {
+        const polys = [];
+        for (const shape of SHAPES) {
+          const clipped = [];
+          for (const ring of shape.rings) {
+            const proj = ring.map((pt) => project(pt.lat, pt.lon));
+            for (const sub of clipRing(proj)) clipped.push(sub);
           }
+          if (!clipped.length) continue;
+          const outer = clipped[0];
+          const avgZ = outer.reduce((s, p) => s + p.z, 0) / outer.length;
+          polys.push({ rings: clipped, col: landColors(shape), countryId: shape.countryId, avgZ });
         }
-        ctx.fillStyle = fillStyle;
-        for (const ring of poly.rings) {
-          ctx.beginPath();
-          ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-          ctx.closePath(); ctx.fill();
+        polys.sort((a, b) => a.avgZ - b.avgZ);
+
+        const nowMs = performance.now();
+        if (!accSet || nowMs - accT > 400) {
+          accSet = new Set();
+          for (const w of WORLDS) {
+            if (w.iso === save.startIso || canEnterCountry(save, w.iso)) accSet.add(w.iso);
+          }
+          accT = nowMs;
         }
-        if (isAccessible) hlPolys.push(poly);
-        if (!discovered) fogPolys.push(poly);
+        const accessible = accSet;
+        const hlPolys = [];
+        const fogPolys = [];
+
+        for (const poly of polys) {
+          let fillStyle = poly.col.color;
+          let isAccessible = false;
+          let discovered = true;
+          if (poly.countryId && ISO_WORLD[poly.countryId] !== undefined) {
+            discovered = isDiscovered(save, poly.countryId);
+            if (discovered) {
+              const w = WORLDS[ISO_WORLD[poly.countryId]];
+              const rel = getWorldReligion(save, w);
+              fillStyle = rel.color;
+              isAccessible = accessible.has(poly.countryId);
+            } else {
+              fillStyle = '#1e293b'; // Brouillard slate sombre toon
+            }
+          }
+
+          // Remplissage couleur vive pop du pays
+          ctx.fillStyle = fillStyle;
+          for (const ring of poly.rings) {
+            ctx.beginPath();
+            ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+            ctx.closePath(); 
+            ctx.fill();
+          }
+
+          // Contour à l'encre noir cel-shading sur les côtes et frontières
+          ctx.strokeStyle = '#090d16';
+          ctx.lineWidth = 1.6 * dpr;
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          for (const ring of poly.rings) {
+            ctx.beginPath();
+            ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+            ctx.closePath(); 
+            ctx.stroke();
+          }
+
+          if (isAccessible) hlPolys.push(poly);
+          if (!discovered) fogPolys.push(poly);
+        }
+
+        // Voile Trame toon sur les terres inexplorées
+        if (fogPolys.length) {
+          ctx.save();
+          ctx.fillStyle = '#0f172a';
+          ctx.globalAlpha = 0.40;
+          for (const poly of fogPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath(); 
+              ctx.fill();
+            }
+          }
+          ctx.restore();
+        }
+
+        // Surbrillance Cel-Shading des pays jouables : double contour néon/jaune comics
+        if (hlPolys.length) {
+          const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.005);
+          ctx.save();
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          
+          // Tracé néon jaune/doré vibrant
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = (3.0 + pulse * 1.5) * dpr;
+          for (const poly of hlPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath(); 
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+        }
       }
-      // Voile de brume par-dessus les terres inconnues (léger halo grisâtre).
-      if (fogPolys.length) {
+      ctx.restore(); // fin du clip de la sphère
+
+      // 7. Contour à l'encre noir épais autour du globe complet (Globe Ink Outline)
+      ctx.save();
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
+      ctx.lineWidth = 4.2 * dpr;
+      ctx.strokeStyle = '#090d16';
+      ctx.stroke();
+
+      // Trait interne de contour cyan lumineux
+      ctx.lineWidth = 1.6 * dpr;
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.75)';
+      ctx.stroke();
+      ctx.restore();
+
+
+
+      // 9. Pins des Mondes - Style Comic / Cartoon Badges
+      pinScreen.length = 0;
+      const activeWorlds = WORLDS.filter(w => {
+        if (!isDiscovered(save, w.iso)) return false;
+        if (w.iso === save.startIso) return true;
+        return canEnterCountry(save, w.iso);
+      });
+      for (const w of activeWorlds) {
+        const p = project(w.lat, w.lon);
+        const visible = p.z > 0.02;
+        pinScreen.push({ world: w, x: p.x, y: p.y, visible });
+        if (!visible) continue;
+        const rel = getWorldReligion(save, w);
+        const unlocked = worldUnlocked(save, w.id);
+        const rr = 10 * dpr;
+
         ctx.save();
-        ctx.globalAlpha = 0.5;
-        ctx.fillStyle = '#3a4658';
-        for (const poly of fogPolys) {
+        // Ombre portée décalée style comic (drop shadow noir net)
+        ctx.fillStyle = '#090d16';
+        ctx.beginPath();
+        ctx.arc(p.x + 2.5 * dpr, p.y + 3 * dpr, rr * 1.05, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Pulsation comic pour les mondes accessibles/débloqués
+        if (unlocked) {
+          const pulsePin = 1 + 0.15 * Math.sin(performance.now() * 0.006 + w.id);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, rr * 1.35 * pulsePin, 0, Math.PI * 2);
+          ctx.fillStyle = rel.color + '44';
+          ctx.fill();
+          ctx.strokeStyle = rel.color;
+          ctx.lineWidth = 1.5 * dpr;
+          ctx.stroke();
+        }
+
+        // Pastille centrale avec contour noir épais (Ink ring)
+        ctx.beginPath(); 
+        ctx.arc(p.x, p.y, rr, 0, Math.PI * 2);
+        ctx.fillStyle = unlocked ? rel.color : '#475569';
+        ctx.fill(); 
+        ctx.lineWidth = 2.8 * dpr; 
+        ctx.strokeStyle = '#090d16'; 
+        ctx.stroke();
+
+        // Anneau intérieur blanc net
+        ctx.lineWidth = 1.2 * dpr;
+        ctx.strokeStyle = '#ffffff';
+        ctx.stroke();
+
+        // Symbole ou cadenas
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#fff'; 
+        ctx.textAlign = 'center'; 
+        ctx.textBaseline = 'middle';
+        ctx.font = `bold ${12 * dpr}px sans-serif`;
+
+        if (unlocked) {
+          if (rel.sym.startsWith('data:image/') || rel.sym.startsWith('http')) {
+            const img = getCachedImage(rel.sym, render);
+            if (img) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, rr * 0.82, 0, Math.PI * 2);
+              ctx.clip();
+              ctx.drawImage(img, p.x - rr * 0.82, p.y - rr * 0.82, rr * 1.64, rr * 1.64);
+              ctx.restore();
+            }
+          } else {
+            ctx.fillText(rel.sym, p.x, p.y + dpr);
+          }
+        } else {
+          ctx.fillText('🔒', p.x, p.y + dpr);
+        }
+        ctx.restore();
+      }
+    } else {
+      // --- ANCIEN RENDU STANDARD (POUR ROLLBACK RAPIDE SANS RIEN BRISER) ---
+      ctx.fillStyle = 'rgba(15,23,42,0.28)';
+      ctx.beginPath(); ctx.ellipse(cx, cy + R * 0.92, R * 0.68, R * 0.12, 0, 0, 7); ctx.fill();
+
+      const atmo = ctx.createRadialGradient(cx, cy, R * 0.98, cx, cy, R * 1.18);
+      atmo.addColorStop(0, 'rgba(147,197,253,0.35)');
+      atmo.addColorStop(0.5, 'rgba(96,165,250,0.12)');
+      atmo.addColorStop(1, 'rgba(59,130,246,0)');
+      ctx.fillStyle = atmo; ctx.beginPath(); ctx.arc(cx, cy, R * 1.18, 0, 7); ctx.fill();
+
+      const lightAngle = Math.atan2(-1, -1), lx = Math.cos(lightAngle), ly = Math.sin(lightAngle);
+      ctx.save();
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.clip();
+
+      const ocean = ctx.createRadialGradient(cx - R * 0.25, cy - R * 0.3, R * 0.1, cx, cy, R);
+      ocean.addColorStop(0, '#60a5fa'); ocean.addColorStop(0.45, '#3b82f6');
+      ocean.addColorStop(0.85, '#1d4ed8'); ocean.addColorStop(1, '#1e3a8a');
+      ctx.fillStyle = ocean; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+
+      const gloss = ctx.createRadialGradient(cx - R * 0.35, cy - R * 0.42, 0, cx - R * 0.1, cy - R * 0.05, R * 0.85);
+      gloss.addColorStop(0, 'rgba(255,255,255,0.55)'); gloss.addColorStop(0.25, 'rgba(191,219,254,0.28)');
+      gloss.addColorStop(0.6, 'rgba(59,130,246,0.05)'); gloss.addColorStop(1, 'rgba(30,64,175,0)');
+      ctx.fillStyle = gloss; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+
+      const ol = ctx.createLinearGradient(cx + lx * R, cy + ly * R, cx - lx * R, cy - ly * R);
+      ol.addColorStop(0, 'rgba(186,230,253,0.45)'); ol.addColorStop(0.4, 'rgba(96,165,250,0.15)');
+      ol.addColorStop(0.6, 'rgba(30,64,175,0)'); ol.addColorStop(1, 'rgba(15,23,42,0.08)');
+      ctx.fillStyle = ol; ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 0.8 * dpr;
+      for (let lat = -60; lat <= 60; lat += 30) {
+        ctx.beginPath(); let first = true;
+        for (let lon = -180; lon <= 180; lon += 8) { const p = project(lat*DEG, lon*DEG); if (p.z < 0) { first = true; continue; } first ? (ctx.moveTo(p.x,p.y), first=false) : ctx.lineTo(p.x,p.y); }
+        ctx.stroke();
+      }
+      for (let lon = -180; lon < 180; lon += 30) {
+        ctx.beginPath(); let first = true;
+        for (let lat = -85; lat <= 85; lat += 8) { const p = project(lat*DEG, lon*DEG); if (p.z < 0) { first = true; continue; } first ? (ctx.moveTo(p.x,p.y), first=false) : ctx.lineTo(p.x,p.y); }
+        ctx.stroke();
+      }
+
+      if (SHAPES) {
+        const polys = [];
+        for (const shape of SHAPES) {
+          const clipped = [];
+          for (const ring of shape.rings) {
+            const proj = ring.map((pt) => project(pt.lat, pt.lon));
+            for (const sub of clipRing(proj)) clipped.push(sub);
+          }
+          if (!clipped.length) continue;
+          const outer = clipped[0];
+          const avgZ = outer.reduce((s, p) => s + p.z, 0) / outer.length;
+          polys.push({ rings: clipped, col: landColors(shape), countryId: shape.countryId, avgZ });
+        }
+        polys.sort((a, b) => a.avgZ - b.avgZ);
+
+        const nowMs = performance.now();
+        if (!accSet || nowMs - accT > 400) {
+          accSet = new Set();
+          for (const w of WORLDS) {
+            if (w.iso === save.startIso || canEnterCountry(save, w.iso)) accSet.add(w.iso);
+          }
+          accT = nowMs;
+        }
+        const accessible = accSet;
+        const hlPolys = [];
+        const fogPolys = [];
+        for (const poly of polys) {
+          let fillStyle = poly.col.color;
+          let isAccessible = false;
+          let discovered = true;
+          if (poly.countryId && ISO_WORLD[poly.countryId] !== undefined) {
+            discovered = isDiscovered(save, poly.countryId);
+            if (discovered) {
+              const w = WORLDS[ISO_WORLD[poly.countryId]];
+              const rel = getWorldReligion(save, w);
+              fillStyle = rel.color;
+              isAccessible = accessible.has(poly.countryId);
+            } else {
+              fillStyle = '#20293a';
+            }
+          }
+          ctx.fillStyle = fillStyle;
           for (const ring of poly.rings) {
             ctx.beginPath();
             ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
             ctx.closePath(); ctx.fill();
           }
+          if (isAccessible) hlPolys.push(poly);
+          if (!discovered) fogPolys.push(poly);
         }
-        ctx.restore();
-      }
-      // Surbrillance des pays jouables : contour doré pulsant, par-dessus les terres.
-      if (hlPolys.length) {
-        const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.004);
-        ctx.save();
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.shadowColor = '#ffe259';
-        ctx.shadowBlur = 10 * dpr * pulse;
-        ctx.strokeStyle = `rgba(255,226,89,${0.7 + 0.3 * pulse})`;
-        ctx.lineWidth = 2.2 * dpr;
-        for (const poly of hlPolys) {
-          for (const ring of poly.rings) {
-            ctx.beginPath();
-            ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-            ctx.closePath(); ctx.stroke();
+        if (fogPolys.length) {
+          ctx.save();
+          ctx.globalAlpha = 0.5;
+          ctx.fillStyle = '#3a4658';
+          for (const poly of fogPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath(); ctx.fill();
+            }
           }
+          ctx.restore();
         }
-        ctx.restore();
+        if (hlPolys.length) {
+          const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.004);
+          ctx.save();
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+          ctx.shadowColor = '#ffe259';
+          ctx.shadowBlur = 10 * dpr * pulse;
+          ctx.strokeStyle = `rgba(255,226,89,${0.7 + 0.3 * pulse})`;
+          ctx.lineWidth = 2.2 * dpr;
+          for (const poly of hlPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath(); ctx.stroke();
+            }
+          }
+          ctx.restore();
+        }
       }
-    }
-    ctx.restore();
+      ctx.restore();
 
-    // pins des mondes : pays de d�part + tous les pays o� le joueur est majoritaire + voisins accessibles
-    pinScreen.length = 0;
-    const activeWorlds = WORLDS.filter(w => {
-      if (!isDiscovered(save, w.iso)) return false;   // masqué par le brouillard
-      if (w.iso === save.startIso) return true;
-      return canEnterCountry(save, w.iso);
-    });
-    for (const w of activeWorlds) {
-      const p = project(w.lat, w.lon);
-      const visible = p.z > 0.02;
-      pinScreen.push({ world: w, x: p.x, y: p.y, visible });
-      if (!visible) continue;
-      const rel = getWorldReligion(save, w);
-      const unlocked = worldUnlocked(save, w.id);
-      const rr = 9 * dpr;
-      // halo
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 2.6);
-      g.addColorStop(0, rel.color); g.addColorStop(0.5, rel.color + '88'); g.addColorStop(1, 'transparent');
-      ctx.globalAlpha = unlocked ? 0.9 : 0.4;
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, rr * 2.6, 0, 7); ctx.fill();
-      // pastille
-      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, 7);
-      ctx.fillStyle = unlocked ? rel.color : '#5b6472';
-      ctx.fill(); ctx.lineWidth = 2.4 * dpr; ctx.strokeStyle = '#fff'; ctx.stroke();
-      // symbole ou cadenas
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.font = `${12 * dpr}px serif`;
-      if (unlocked) {
-        if (rel.sym.startsWith('data:image/') || rel.sym.startsWith('http')) {
-          const img = getCachedImage(rel.sym, render);
-          if (img) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, rr * 0.82, 0, Math.PI * 2);
-            ctx.clip();
-            ctx.drawImage(img, p.x - rr * 0.82, p.y - rr * 0.82, rr * 1.64, rr * 1.64);
-            ctx.restore();
+      pinScreen.length = 0;
+      const activeWorlds = WORLDS.filter(w => {
+        if (!isDiscovered(save, w.iso)) return false;
+        if (w.iso === save.startIso) return true;
+        return canEnterCountry(save, w.iso);
+      });
+      for (const w of activeWorlds) {
+        const p = project(w.lat, w.lon);
+        const visible = p.z > 0.02;
+        pinScreen.push({ world: w, x: p.x, y: p.y, visible });
+        if (!visible) continue;
+        const rel = getWorldReligion(save, w);
+        const unlocked = worldUnlocked(save, w.id);
+        const rr = 9 * dpr;
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rr * 2.6);
+        g.addColorStop(0, rel.color); g.addColorStop(0.5, rel.color + '88'); g.addColorStop(1, 'transparent');
+        ctx.globalAlpha = unlocked ? 0.9 : 0.4;
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, rr * 2.6, 0, 7); ctx.fill();
+        ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, 7);
+        ctx.fillStyle = unlocked ? rel.color : '#5b6472';
+        ctx.fill(); ctx.lineWidth = 2.4 * dpr; ctx.strokeStyle = '#fff'; ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = `${12 * dpr}px serif`;
+        if (unlocked) {
+          if (rel.sym.startsWith('data:image/') || rel.sym.startsWith('http')) {
+            const img = getCachedImage(rel.sym, render);
+            if (img) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, rr * 0.82, 0, Math.PI * 2);
+              ctx.clip();
+              ctx.drawImage(img, p.x - rr * 0.82, p.y - rr * 0.82, rr * 1.64, rr * 1.64);
+              ctx.restore();
+            }
+          } else {
+            ctx.fillText(rel.sym, p.x, p.y + dpr);
           }
         } else {
-          ctx.fillText(rel.sym, p.x, p.y + dpr);
+          ctx.fillText('🔒', p.x, p.y + dpr);
         }
-      } else {
-        ctx.fillText('🔒', p.x, p.y + dpr);
+        ctx.globalAlpha = 1;
       }
-      ctx.globalAlpha = 1;
     }
   }
 
