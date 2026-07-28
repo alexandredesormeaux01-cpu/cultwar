@@ -162,7 +162,6 @@ scene.fog = new THREE.Fog(0x9fdcff, 70, 165);
 window.__cult = {
   scene, renderer,
   info: () => ({ ...renderer.info.render, programs: renderer.info.programs.length }),
-  /* Debug : accès aux factions (temporaire, retiré une fois la Phase 1 stable). */
   facs: () => factions,
   toggleNature() {
     let n = 0;
@@ -1345,9 +1344,43 @@ function setupVillager(mesh, gltf, opts = {}) {
 }
 
 const gltfLoader = new GLTFLoader();
-VILLAGER_MODELS.forEach((v, i) => {
-  gltfLoader.load(v.url, (gltf) => setupVillager(crowds[i], gltf, v));
-});
+
+function mobileDownscaleTextures(gltf, maxSize = 512) {
+  if (!_isMobile) return;
+  gltf.scene.traverse((child) => {
+    if (!child.isMesh || !child.material) return;
+    const mat = child.material;
+    const tex = mat.map;
+    if (!tex || !tex.image || tex.image.width <= maxSize) return;
+    const img = tex.image;
+    const ratio = maxSize / Math.max(img.width, img.height);
+    const w = Math.round(img.width * ratio);
+    const h = Math.round(img.height * ratio);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    tex.image = cv;
+    tex.needsUpdate = true;
+  });
+}
+
+{
+  let queue = VILLAGER_MODELS.map((v, i) => ({ v, i }));
+  function loadNext() {
+    if (!queue.length) return;
+    const { v, i } = queue.shift();
+    gltfLoader.load(v.url, (gltf) => {
+      mobileDownscaleTextures(gltf);
+      setupVillager(crowds[i], gltf, v);
+      loadNext();
+    }, undefined, (err) => {
+      console.warn('[villager] failed to load', v.url, err);
+      loadNext();
+    });
+  }
+  loadNext();
+}
 
 /* Cristal-bombe de peinture : le modèle est normalisé (≈1,7 u de haut, pieds
    au sol) puis cloné à chaque apparition. */
@@ -1368,6 +1401,7 @@ gltfLoader.load('assets/models/paint_crystal.glb', (gltf) => {
 /* Modèle 3D du Sanctuaire de Base (Arcane Stone Sanctuary GLB) */
 let sanctuaryModel = null;
 gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
+  mobileDownscaleTextures(gltf);
   const g = gltf.scene;
   const box = new THREE.Box3().setFromObject(g);
   const h = Math.max(0.001, box.max.y - box.min.y);
@@ -1391,6 +1425,7 @@ gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
 /* Modèle 3D du Trou de Terrier (Burrow Hole GLB) */
 let burrowHoleModel = null;
 gltfLoader.load('assets/models/burrow_hole.glb', (gltf) => {
+  mobileDownscaleTextures(gltf);
   const g = gltf.scene;
   const box = new THREE.Box3().setFromObject(g);
   const h = Math.max(0.001, box.max.y - box.min.y);
@@ -1537,21 +1572,20 @@ function updateBurrowEvents(dt) {
 let monkModel = null, monkTexture = null, monkClips = null;
 for (const [key, def] of Object.entries(LEADERS)) {
   gltfLoader.load(def.url, (gltf) => {
+    mobileDownscaleTextures(gltf);
     let tex = null;
     gltf.scene.traverse((child) => {
       if (child.isMesh && child.material && child.material.map && !tex) tex = child.material.map;
     });
     leaderAssets[key] = { model: gltf.scene, texture: tex, clips: gltf.animations };
     if (key === 'monk') { monkModel = gltf.scene; monkTexture = tex; monkClips = gltf.animations; }
-  });
-  // Le follower prend la forme de l'esprit élémentaire assigné, pas du Leader
-  // lui-même. Chargement séparé (les navigateurs cachent l'URL → pas de re-DL
-  // si l'élémentaire est aussi dans VILLAGER_MODELS).
+  }, undefined, (err) => console.warn('[leader] failed to load', def.url, err));
   gltfLoader.load(LEADER_ELEMENT[key], (elGltf) => {
+    mobileDownscaleTextures(elGltf);
     let elTex = null;
     elGltf.scene.traverse((c) => { if (c.isMesh && c.material?.map && !elTex) elTex = c.material.map; });
     buildFollowerMesh(key, elGltf, elTex);
-  });
+  }, undefined, (err) => console.warn('[follower] failed to load', LEADER_ELEMENT[key], err));
 }
 
 function buildFollowerMesh(key, gltf, tex) {

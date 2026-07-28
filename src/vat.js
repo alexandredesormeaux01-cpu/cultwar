@@ -111,8 +111,13 @@ export function bakeVAT(gltf, opts = {}) {
     }
   }
 
-  const posTex = new THREE.DataTexture(posData, vCount, totalFrames, THREE.RGBAFormat, THREE.HalfFloatType);
-  const normTex = new THREE.DataTexture(normData, vCount, totalFrames, THREE.RGBAFormat, THREE.HalfFloatType);
+  const halfPos = new Uint16Array(posData.length);
+  const halfNorm = new Uint16Array(normData.length);
+  for (let i = 0; i < posData.length; i++) halfPos[i] = THREE.DataUtils.toHalfFloat(posData[i]);
+  for (let i = 0; i < normData.length; i++) halfNorm[i] = THREE.DataUtils.toHalfFloat(normData[i]);
+
+  const posTex = new THREE.DataTexture(halfPos, vCount, totalFrames, THREE.RGBAFormat, THREE.HalfFloatType);
+  const normTex = new THREE.DataTexture(halfNorm, vCount, totalFrames, THREE.RGBAFormat, THREE.HalfFloatType);
   for (const t of [posTex, normTex]) {
     t.minFilter = THREE.NearestFilter;   // pas d'interpolation GPU : les colonnes
     t.magFilter = THREE.NearestFilter;   // (sommets) sont indépendantes ; on lerp
