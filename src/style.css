@@ -381,6 +381,124 @@ button.big:active { transform: scale(.95); }
   pointer-events: auto;
 }
 
+/* ---- Course aux esprits — jauge verticale, bord gauche ----
+   Symétrique des cadres de disciples à droite : même grammaire de cadre rond,
+   mais la position le long de la jauge porte l'information. Le dégradé va du
+   rouge (départ, en bas) au vert (objectif, en haut) : monter = gagner. */
+#hud-race {
+  position: absolute;
+  left: calc(14px + env(safe-area-inset-left));
+  top: 50%;
+  transform: translateY(-50%);
+  height: min(46vh, 380px);
+  min-height: 200px;
+  width: 18px;
+  pointer-events: none;
+  z-index: 4;
+}
+.race-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    to top,
+    #e23127 0%, #ef5a22 18%, #f79c1c 40%, #e9d02f 62%, #b6d63a 80%, #5ec24a 100%
+  );
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow:
+    0 6px 18px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(0, 0, 0, 0.35),
+    inset 0 0 10px rgba(0, 0, 0, 0.22);
+}
+/* Objectif, en tête de jauge. */
+.race-goal {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translate(-50%, -6px);
+  font-family: Cinzel, Georgia, serif;
+  font-size: 11px;
+  font-weight: 800;
+  color: #dff5cf;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+  white-space: nowrap;
+}
+
+/* Un culte sur la jauge : --p = progression 0→1, --dx = décalage anti-collision */
+.race-mark {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--p, 0) * 100%);
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  transform: translate(calc(-50% + var(--dx, 0px)), 50%);
+  /* La position glisse, elle ne saute pas : on suit la remontée d'un rival. */
+  transition: bottom 0.45s cubic-bezier(0.3, 0.9, 0.3, 1), transform 0.3s ease;
+  z-index: 2;
+}
+.race-mark img {
+  position: absolute;
+  inset: 2px;
+  width: calc(100% - 4px);
+  height: calc(100% - 4px);
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center 22%;
+  display: block;
+  background: #0a1528;
+  border: 2px solid var(--race-ring, #7cf);
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.55),
+    0 0 10px color-mix(in srgb, var(--race-ring, #7cf) 55%, transparent);
+}
+/* Le culte du joueur : toujours au premier plan, plus grand, cerclé de blanc. */
+.race-mark.me {
+  width: 46px;
+  height: 46px;
+  z-index: 6;
+}
+.race-mark.me img {
+  border-width: 2.5px;
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.92),
+    0 4px 14px rgba(0, 0, 0, 0.6),
+    0 0 16px color-mix(in srgb, var(--race-ring, #7cf) 70%, transparent);
+}
+/* Rang inscrit dans le cadre. */
+.race-rank {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: rgba(12, 10, 22, 0.94);
+  border: 1.5px solid rgba(255, 255, 255, 0.55);
+  color: #fff;
+  font-family: Cinzel, Georgia, serif;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  z-index: 3;
+}
+/* Le meneur porte l'or, comme la pastille de niveau max des disciples. */
+.race-mark.lead .race-rank {
+  background: #ffe000;
+  border-color: #fff3a0;
+  color: #1a1200;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 8px rgba(255, 224, 0, 0.6);
+}
+.race-mark.dead {
+  opacity: 0.4;
+  filter: grayscale(1);
+}
+
 /* Disciples — cadres ronds, bord droit, espacés régulièrement */
 #hud-disciples {
   position: absolute;
@@ -542,6 +660,17 @@ button.big:active { transform: scale(.95); }
 }
 
 @media (max-width: 720px) {
+  #hud-race {
+    left: calc(8px + env(safe-area-inset-left));
+    height: min(42vh, 300px);
+    min-height: 160px;
+    width: 14px;
+  }
+  .race-mark { width: 32px; height: 32px; }
+  .race-mark.me { width: 39px; height: 39px; }
+  .race-rank { min-width: 16px; height: 16px; font-size: 9px; }
+  .race-goal { font-size: 10px; }
+
   #hud-disciples {
     right: calc(6px + env(safe-area-inset-right));
     gap: 12px;

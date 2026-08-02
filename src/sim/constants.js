@@ -12,7 +12,7 @@ export const START_GRAYS = 300;
 
 /* ---- Factions & base ---- */
 export const NB_FACTIONS = 3;
-export const WIN_DEPOSIT_GOAL = 60;   // premier à 60 esprits déposés gagne
+export const GOAL = 60;              // premier culte à 60 esprits déposés au sanctuaire : victoire
 export const SIEGE_R = 3.5;
 export const SIEGE_R2 = SIEGE_R * SIEGE_R;
 export const SIEGE_RATE = 0.5;
@@ -25,8 +25,6 @@ export const BASE_SPAWN_R = 3.2;
 
 /* ---- Livraison / dépôt ---- */
 export const DEPOSIT_RATE = 26;
-export const GOAL_RATIO = 0.35;
-export const GOAL_MIN = 80;
 
 /* ---- Mode partie ---- */
 export const MATCH_DUR = 120;

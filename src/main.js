@@ -26,10 +26,10 @@ import { bakeVAT, makeVATMaterial, makeVATOutlineMaterial } from './vat.js';
 import { soundEngine } from './soundEngine.js';
 import {
   MAP_R, DENSITY, AGENT_CAP_MOBILE, AGENT_CAP_DESKTOP,
-  START_GRAYS as START_GRAYS_CONST, NB_FACTIONS, WIN_DEPOSIT_GOAL,
+  START_GRAYS as START_GRAYS_CONST, NB_FACTIONS, GOAL,
   SIEGE_R, SIEGE_R2, SIEGE_RATE,
   BASE_WALL_R, BASE_WALL_T, BASE_WALL_H, BASE_GATE_HALF, BASE_WALL_SEGS, BASE_SPAWN_R,
-  DEPOSIT_RATE, GOAL_RATIO, GOAL_MIN,
+  DEPOSIT_RATE,
   MATCH_DUR, FUEL_MAX, FUEL_PER_UNIT, FUEL_PER_GRAY,
   SCORE_PER_PCT, SCORE_PER_GRAY, SCORE_PER_DIST, PAINT_TRAIL_R,
   SIPHON_BASE, SIPHON_RATIO_MIN, SIPHON_RATIO_CAP,
@@ -901,7 +901,6 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
 let agents = [];        // { x,z,vx,vz,f, u, ang, base, pop, delay, wt, wx, wz }
 let factions = [];      // { i, cult, color, alive, count, leader:{x,z,dx,dz}, grp, isBot, aggr, boostT, target }
 let teams = [];         // { id, baseX, baseZ, wallR, gateAng, … } — une base par culte
-let GOAL = 200;         // objectif de croyants déposés (fixé par resetGame)
 let grayCount = 0;
 /* Habitations conquérables. buildMap() peut être appelée avant startGame() (menu),
    d'où le tampon pendingHouses qui est adopté par startGame — sinon on garderait
@@ -964,6 +963,15 @@ const LEADER_ELEMENT = {
   amazon:   'assets/models/elemental_rigged.glb',         // feu — guerrière
   alien:    'assets/models/elemental_air_rigged.glb',     // air — flotte, étranger
   chief:    'assets/models/elemental_water_rigged.glb',   // eau — source vitale
+};
+/* Portrait carré de chaque Leader — lobby, sauvegarde et jauge de course. */
+const LEADER_AVATARS = {
+  monk: 'assets/monk_avatar.png',
+  sorcerer: 'assets/sorcerer_avatar.png',
+  nomad: 'assets/nomad_avatar.png',
+  amazon: 'assets/amazon_avatar.png',
+  alien: 'assets/alien_avatar.png',
+  chief: 'assets/chief_avatar.png',
 };
 const leaderAssets = {};   // key → { model, texture, clips }
 const followerMeshes = {}; // leaderKey → { mesh, outline, freeSlots[], color[] }
@@ -2060,13 +2068,13 @@ function updateDeposits(dt) {
       const mark = Math.floor(GOAL * frac);
       if (before < mark && f.deposited >= mark && f.deposited < GOAL) {
         banner(f.i === 0
-          ? `🏛 ${f.deposited}/${GOAL} cristaux déposés !`
+          ? `🏛 ${f.deposited}/${GOAL} esprits déposés !`
           : `⚠ Le Culte ${f.cult.name} atteint ${f.deposited}/${GOAL} !`);
       }
     }
     if (f.deposited >= GOAL) {
       banner(f.i === 0
-        ? `🏆 Objectif atteint — ${GOAL} cristaux à l'abri !`
+        ? `🏆 Objectif atteint — ${GOAL} esprits à l'abri !`
         : `💀 Le Culte ${f.cult.name} a rempli son objectif…`);
       endGame(f.i === 0);
       return;
@@ -3096,6 +3104,85 @@ function updateFuelUI() {
   }
 }
 
+/* ---- Course aux esprits (bord gauche) ----
+   Une jauge 0 → GOAL le long de laquelle chaque culte est posé à sa hauteur de
+   dépôt. Le rang se lit à la position, le chiffre dans le cadre le confirme.
+   Le culte du joueur passe toujours devant les autres. */
+const raceEl = $('hud-race');
+const raceGoalEl = raceEl && raceEl.querySelector('.race-goal');
+const raceMarks = new Map();   // index de faction → élément, réutilisé entre frames
+let raceSig = '';
+
+/* Deux cultes au coude-à-coude se recouvrent : au-delà d'un écart de moins de
+   RACE_MIN_GAP, on les décale latéralement en alternance plutôt que de mentir
+   sur leur hauteur. */
+const RACE_MIN_GAP = 0.075;
+const RACE_DX = 17;
+
+function updateRaceUI() {
+  if (!raceEl) return;
+
+  const rows = factions
+    .map((f) => ({
+      i: f.i,
+      key: f.leaderKey || 'monk',
+      css: f.css || '#7cf',
+      name: (f.cult && f.cult.name) || 'Culte',
+      alive: !!f.alive,
+      done: f.deposited || 0,
+      p: Math.max(0, Math.min(1, (f.deposited || 0) / Math.max(1, GOAL))),
+    }))
+    .sort((a, b) => b.done - a.done || a.i - b.i);
+
+  const sig = rows.map((r) => `${r.i}:${r.done}:${r.alive ? 1 : 0}`).join('|') + '|' + GOAL;
+  if (sig === raceSig) return;
+  raceSig = sig;
+
+  if (raceGoalEl) raceGoalEl.textContent = `🏛 ${GOAL}`;
+
+  for (const [i, el] of raceMarks) {
+    if (!factions.some((f) => f.i === i)) { el.remove(); raceMarks.delete(i); }
+  }
+
+  let side = 1;
+  for (let n = 0; n < rows.length; n++) {
+    const r = rows[n];
+    let el = raceMarks.get(r.i);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'race-mark';
+      const img = document.createElement('img');
+      img.alt = '';
+      img.draggable = false;
+      const rank = document.createElement('span');
+      rank.className = 'race-rank';
+      el.append(img, rank);
+      raceEl.appendChild(el);
+      raceMarks.set(r.i, el);
+    }
+
+    /* Décalage seulement quand le voisin du dessus est trop proche ; sinon le
+       cadre reprend sa place sur l'axe de la jauge. */
+    const prev = rows[n - 1];
+    let dx = 0;
+    if (prev && Math.abs(prev.p - r.p) < RACE_MIN_GAP) { side = -side; dx = side * RACE_DX; }
+    else side = 1;
+    el.style.setProperty('--dx', dx + 'px');
+
+    const src = LEADER_AVATARS[r.key] || LEADER_AVATARS.monk;
+    const img = el.querySelector('img');
+    if (!img.getAttribute('src') || !img.getAttribute('src').endsWith(src)) img.src = src;
+
+    el.style.setProperty('--p', String(r.p));
+    el.style.setProperty('--race-ring', r.css);
+    el.classList.toggle('me', r.i === 0);
+    el.classList.toggle('lead', n === 0 && r.done > 0);
+    el.classList.toggle('dead', !r.alive);
+    el.querySelector('.race-rank').textContent = String(n + 1);
+    el.title = `${r.i === 0 ? 'Votre culte' : 'Culte ' + r.name} — ${n + 1}ᵉ, ${r.done}/${GOAL} esprits`;
+  }
+}
+
 /* Cadres disciples (bord droit) : 1 cadre = 1 place de disciple du joueur.
    Portrait = l'esprit élémentaire du leader ; anneau jaune = XP ; pastille =
    niveau.
@@ -3310,7 +3397,7 @@ function updateHUD() {
   const depositValEl = $('deposit-val');
   if (depositValEl) {
     const me = factions[0];
-    depositValEl.textContent = `${me ? (me.deposited || 0) : 0}/${WIN_DEPOSIT_GOAL}`;
+    depositValEl.textContent = `${me ? (me.deposited || 0) : 0}/${GOAL}`;
   }
 
   if (rank < lastRank) { sfxRankUp(); rankEl.classList.add('pulse'); setTimeout(() => rankEl.classList.remove('pulse'), 220); }
@@ -3689,8 +3776,6 @@ function resetGame() {
     fm.freeSlots.length = 0;
     for (let i = fm.cap - 1; i >= 0; i--) fm.freeSlots.push(i);
   }
-  // objectif de la course : proportionnel à la population de départ de la carte
-  GOAL = Math.max(GOAL_MIN, Math.round(START_GRAYS * GOAL_RATIO));
   // adoption des habitations construites par buildMap : chacune reçoit son état
   // de départ (pleine, non assiégée). On repeint aussi les instances au cas où
   // une partie précédente les avait teintées.
@@ -3732,6 +3817,12 @@ function resetGame() {
   fervorPct = -1;
   discHudSig = '';
   if (discHudEl) discHudEl.replaceChildren();
+  discSlots.length = 0;   // les cadres viennent d'être détachés du DOM
+  /* Les cultes changent de leader d'une partie à l'autre : on repart de zéro
+     plutôt que de garder des cadres au mauvais avatar. */
+  raceSig = '';
+  for (const el of raceMarks.values()) el.remove();
+  raceMarks.clear();
   clearFx();
   clearPaint();
   for (const b of bombs) scene.remove(b.grp);
@@ -3985,9 +4076,9 @@ function endGame(forced) {
   const netRank = multiMode ? net.getLeaderList() : null;
   const useNet = !!(netRank && netRank.length);
 
-  const victory = (forced === false || forced === 'concede') ? false : (mine && (mine.f.deposited || 0) >= WIN_DEPOSIT_GOAL);
+  const victory = (forced === false || forced === 'concede') ? false : (mine && (mine.f.deposited || 0) >= GOAL);
   lastVictory = victory;
-  const winner = factions.find(f => (f.deposited || 0) >= WIN_DEPOSIT_GOAL) || scores[0].f;
+  const winner = factions.find(f => (f.deposited || 0) >= GOAL) || scores[0].f;
   const winnerName = useNet ? (netRank[0]?.name || '—') : winner.cult.name;
 
   const isCamp = (conquest !== null);
@@ -4066,7 +4157,7 @@ function endGame(forced) {
   </div>` : '';
 
   $('stats').innerHTML = rankBadgeHtml
-    + `<div class="cell full-width"><div class="v">${mine ? (mine.f.deposited || 0) : 0} / ${WIN_DEPOSIT_GOAL}</div><div class="k">Esprits Déposés au Sanctuaire</div></div>`
+    + `<div class="cell full-width"><div class="v">${mine ? (mine.f.deposited || 0) : 0} / ${GOAL}</div><div class="k">Esprits Déposés au Sanctuaire</div></div>`
     + `<div class="cell full-width" style="text-align:left;font-size:0.9rem;padding:10px;">`
     + `<div style="font-size:0.85rem;color:#94a3b8;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Classement Territoire</div>`
     + `${podium}</div>`;
@@ -4958,7 +5049,7 @@ function checkBaseDeposits(dt) {
           hideAgent(a.id);
           freeAgentIds.push(a.id);
 
-          if (f.deposited >= WIN_DEPOSIT_GOAL && state === 'play') {
+          if (f.deposited >= GOAL && state === 'play') {
             endGame();
             return;
           }
@@ -5253,6 +5344,7 @@ function update(dt) {
   /* -- Jauge de peinture (remplace la Ferveur dans la barre du HUD) -- */
   updateFuelUI();
   updateDisciplesUI();
+  updateRaceUI();
 
   updateShocks(dt);
   updateParticles(dt);
@@ -5267,7 +5359,7 @@ function update(dt) {
     return;
   }
 
-  /* -- Victoire : premier culte à GOAL croyants déposés (voir updateDeposits) -- */
+  /* -- Victoire : premier culte à GOAL esprits déposés (voir updateDeposits) -- */
   winT -= dt;
   if (winT <= 0) winT = 0.5;
 
@@ -5399,8 +5491,7 @@ function updateMainMenu() {
     
     const leaderAvatarEl = $('save-leader-avatar');
     if (leaderAvatarEl) {
-      // Table simple : id du perso → fichier avatar dans public/assets/
-      const AVATARS = { monk: 'assets/monk_avatar.png', sorcerer: 'assets/sorcerer_avatar.png', nomad: 'assets/nomad_avatar.png', amazon: 'assets/amazon_avatar.png', alien: 'assets/alien_avatar.png', chief: 'assets/chief_avatar.png' };
+      const AVATARS = LEADER_AVATARS;
       const src = AVATARS[save.playerLeader || 'monk'];
       leaderAvatarEl.style.backgroundImage = src ? `url('${src}')` : 'none';
     }
@@ -5668,14 +5759,7 @@ function showMultiLobby() {
 
 const DIFF_LABEL = { easy: 'Facile', normal: 'Normal', hard: 'Difficile' };
 const DIFF_CYCLE = ['easy', 'normal', 'hard'];
-const LOBBY_AVATARS = {
-  monk: 'assets/monk_avatar.png',
-  sorcerer: 'assets/sorcerer_avatar.png',
-  nomad: 'assets/nomad_avatar.png',
-  amazon: 'assets/amazon_avatar.png',
-  alien: 'assets/alien_avatar.png',
-  chief: 'assets/chief_avatar.png',
-};
+const LOBBY_AVATARS = LEADER_AVATARS;
 const LOBBY_PORTRAITS = {
   monk: 'assets/monk_leader.png',
   sorcerer: 'assets/sorcerer_leader.png',
