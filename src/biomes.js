@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { makeGLTFLoader } from './gltf.js';
 
 /* Tactile : densités / outlines allégés (mode Belle plus fluide sur téléphone). */
 const _isCoarse = matchMedia('(pointer: coarse)').matches;
@@ -997,7 +997,7 @@ function desaturate(tex) {
 }
 
 export function loadGrass(url) {
-  new GLTFLoader().load(url, (gltf) => {
+  makeGLTFLoader().load(url, (gltf) => {
     gltf.scene.updateWorldMatrix(true, true);
     let map = null;
     const geos = [];
@@ -1060,7 +1060,7 @@ let treeAssets = null;          // [{ geo, map }] indexé comme ci-dessus
 const treesWaiting = [];
 
 export function loadTrees(url) {
-  new GLTFLoader().load(url, (gltf) => {
+  makeGLTFLoader().load(url, (gltf) => {
     gltf.scene.updateWorldMatrix(true, true);
     const out = [];
     gltf.scene.traverse((child) => {
@@ -1150,7 +1150,7 @@ function normalizeParts(parts) {
 }
 
 export function loadNature() {
-  const loader = new GLTFLoader();
+  const loader = makeGLTFLoader();
   const acc = {};
   let pending = Object.keys(NATURE_FILES).length;
   const done = () => {

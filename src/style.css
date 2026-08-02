@@ -403,9 +403,12 @@ button.big:active { transform: scale(.95); }
   position: relative;
   background: transparent;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
-  opacity: 0;
-  transform: scale(0.55);
-  animation: disc-frame-in 0.38s cubic-bezier(0.22, 1.2, 0.36, 1) forwards;
+  /* Les cadres sont permanents : ils naissent visibles. Seul le passage
+     vide → rempli est animé, via .filling. */
+  transition: box-shadow 0.3s ease;
+}
+.disc-frame.filling {
+  animation: disc-frame-in 0.42s cubic-bezier(0.22, 1.2, 0.36, 1);
 }
 .disc-frame-xp {
   position: absolute;
@@ -485,7 +488,56 @@ button.big:active { transform: scale(.95); }
   color: #1a1200;
   border-color: #fff3a0;
 }
+/* ---- Slot vide : la place existe, l'esprit n'est pas encore là ----
+   Cadre éteint, anneau XP neutre, silhouette d'esprit en creux. Le contraste
+   avec un cadre rempli (portrait lumineux + anneau doré) doit être immédiat. */
+.disc-frame.empty {
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+}
+.disc-frame.empty .disc-frame-xp {
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: none;
+}
+.disc-frame.empty .disc-frame-clip {
+  background:
+    radial-gradient(circle at 50% 35%, #101c33, #060b16 70%) padding-box,
+    linear-gradient(145deg, rgba(255, 255, 255, 0.22), rgba(120, 150, 190, 0.12) 40%, rgba(20, 28, 42, 0.9)) border-box;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.07) inset,
+    0 4px 10px rgba(0, 0, 0, 0.4) inset;
+}
+.disc-frame.empty .disc-frame-clip img {
+  /* Le portrait, s'il est déjà chargé, sert de silhouette : écrasé en noir et
+     à peine visible — on garde la forme de l'esprit sans le révéler. */
+  filter: brightness(0) contrast(1);
+  opacity: 0.34;
+}
+/* Repli tant qu'aucun portrait n'est cuit : une silhouette générique dessinée
+   en CSS (tête + corps), pour que le cadre ne soit jamais un trou noir —
+   y compris un cadre rempli si le rendu du portrait a échoué. */
+.disc-frame .disc-frame-clip::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 26%;
+  width: 62%;
+  height: 62%;
+  transform: translateX(-50%);
+  background:
+    radial-gradient(circle at 50% 18%, rgba(150, 180, 220, 0.3) 0 20%, transparent 21%),
+    radial-gradient(ellipse 60% 50% at 50% 92%, rgba(150, 180, 220, 0.26) 0 70%, transparent 71%);
+  z-index: 1;
+  pointer-events: none;
+}
+#hud-disciples.portrait-ready .disc-frame .disc-frame-clip::before {
+  display: none;
+}
+.disc-frame.empty .disc-lvl {
+  opacity: 0;
+}
+
 @keyframes disc-frame-in {
+  from { opacity: 0.2; transform: scale(0.55); }
   to { opacity: 1; transform: scale(1); }
 }
 

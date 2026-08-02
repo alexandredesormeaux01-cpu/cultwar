@@ -111,6 +111,8 @@ export function bakeVAT(gltf, opts = {}) {
     }
   }
 
+  /* HalfFloat : les GPU Android ne garantissent pas le vertex texture fetch en
+     RGBA32F — la lecture renvoie 0 et tous les sommets s'effondrent (invisible). */
   const halfPos = new Uint16Array(posData.length);
   const halfNorm = new Uint16Array(normData.length);
   for (let i = 0; i < posData.length; i++) halfPos[i] = THREE.DataUtils.toHalfFloat(posData[i]);
@@ -212,10 +214,16 @@ export function makeVATMaterial(tex, vat, timeU, key = 'vat', opts = {}) {
     if (golden || wildHalo) {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nuniform float uTime;')
-        .replace('#include <dithering_fragment>', [
-          '#include <dithering_fragment>',
-          '  vec3 goldCol = vec3(1.0, 0.76, 0.15);',
-          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, goldCol, 0.82);',
+        .replace('#include <opaque_fragment>', [
+          '{',
+          '  vec3 vN = normalize(vNormal);',
+          '  vec3 vV = normalize(vViewPosition);',
+          '  float rim = pow(1.0 - max(dot(vN, vV), 0.0), 1.8);',
+          '  float pulse = 0.75 + 0.25 * sin(uTime * 3.2);',
+          '  vec3 gold = vec3(1.0, 0.76, 0.15);',
+          '  outgoingLight = mix(outgoingLight, gold, 0.85) + gold * rim * pulse * 1.8;',
+          '}',
+          '#include <opaque_fragment>',
         ].join('\n'));
     }
   };

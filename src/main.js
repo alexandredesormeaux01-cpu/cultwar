@@ -1,7 +1,8 @@
 import './style.css';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { gltfLoader, makeGLTFLoader } from './gltf.js';
+import { renderSpiritPortrait, getSpiritPortrait } from './spirit-portrait.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { openProgression, setPlayHandler, getGlobalStats, formatBelievers } from './progression.js';
 import {
@@ -1343,7 +1344,7 @@ function setupVillager(mesh, gltf, opts = {}) {
   if (out) out.renderOrder = 2;
 }
 
-const gltfLoader = new GLTFLoader();
+
 
 function mobileDownscaleTextures(gltf, maxSize = 512) {
   if (!_isMobile) return;
@@ -1365,6 +1366,8 @@ function mobileDownscaleTextures(gltf, maxSize = 512) {
   });
 }
 
+/* Chargement séquentiel : la cuisson VAT est lourde (CPU + VRAM) — en parallèle
+   elle sature la mémoire des mobiles et fait échouer les modèles suivants. */
 {
   let queue = VILLAGER_MODELS.map((v, i) => ({ v, i }));
   function loadNext() {
@@ -1585,7 +1588,11 @@ for (const [key, def] of Object.entries(LEADERS)) {
     mobileDownscaleTextures(elGltf);
     let elTex = null;
     elGltf.scene.traverse((c) => { if (c.isMesh && c.material?.map && !elTex) elTex = c.material.map; });
+    /* Portrait AVANT bakeVAT : la cuisson laisse la scène figée sur la dernière
+       frame de course, bras en pleine foulée — mauvaise pose de portrait. */
+    renderSpiritPortrait(renderer, elGltf.scene, key);
     buildFollowerMesh(key, elGltf, elTex);
+    updateDisciplesUI(true);
   }, undefined, (err) => console.warn('[follower] failed to load', LEADER_ELEMENT[key], err));
 }
 
@@ -3089,72 +3096,99 @@ function updateFuelUI() {
   }
 }
 
-/* Cadres disciples (bord droit) : 1 cadre = 1 disciple du joueur.
-   Avatar = variante PNJ ; contour jaune = XP ; pastille = niveau. */
-const DISC_AVATARS = {
-  [PEASANT]: 'assets/peasant_avatar.png',
-  [DAMSEL]: 'assets/damsel_avatar.png',
-  [KNIGHT]: 'assets/knight_avatar.png',
-};
+/* Cadres disciples (bord droit) : 1 cadre = 1 place de disciple du joueur.
+   Portrait = l'esprit élémentaire du leader ; anneau jaune = XP ; pastille =
+   niveau.
+   Les cadres sont PERMANENTS : il y en a toujours autant que le plafond de
+   disciples (bonus « Apôtres » compris). Un slot vide reste une silhouette
+   éteinte — le joueur voit d'emblée combien de places il lui reste à remplir,
+   et le HUD ne saute plus à chaque conversion. */
 const discHudEl = $('hud-disciples');
 let discHudSig = '';
-function updateDisciplesUI() {
+const discSlots = [];   // cadres réutilisés d'une frame à l'autre, jamais recréés
+
+function makeDiscSlot() {
+  const frame = document.createElement('div');
+  frame.className = 'disc-frame empty';
+  const xpRing = document.createElement('div');
+  xpRing.className = 'disc-frame-xp';
+  const clip = document.createElement('div');
+  clip.className = 'disc-frame-clip';
+  const img = document.createElement('img');
+  img.alt = '';
+  img.draggable = false;
+  clip.appendChild(img);
+  const badge = document.createElement('span');
+  badge.className = 'disc-lvl';
+  frame.append(xpRing, clip, badge);
+  discHudEl.appendChild(frame);
+  discSlots.push(frame);
+  return frame;
+}
+
+/** @param {boolean} force  recalcule même si la signature n'a pas bougé
+    (le portrait de l'esprit arrive après coup, au chargement du GLB). */
+function updateDisciplesUI(force = false) {
   if (!discHudEl) return;
+  const f = factions[0];
   const list = [];
   for (const a of agents) {
     if (a && !a.dead && (a.discipleOf ?? -1) === 0) list.push(a);
   }
   list.sort((a, b) => a.id - b.id);
-  const ring = (factions[0] && factions[0].css) || '#7cf';
+
+  const ring = (f && f.css) || '#7cf';
+  const portrait = getSpiritPortrait((f && f.leaderKey) || 'monk');
+  /* Le plafond peut grandir en cours de partie (compétence Apôtres) : les
+     cadres vides suivent, sans jamais descendre sous le nombre de disciples. */
+  const slotCount = Math.max(list.length, f ? discipleCap(f) : list.length);
+
   const sig = list.map((a) =>
-    a.id + ':' + variantOf(a.id) + ':' + (a.discLvl || 1) + ':' + (a.discXp || 0)
-  ).join('|') + '|' + ring;
-  if (sig === discHudSig) return;
+    a.id + ':' + (a.discLvl || 1) + ':' + (a.discXp || 0)
+  ).join('|') + '|' + ring + '|' + slotCount + '|' + (portrait ? 1 : 0);
+  if (sig === discHudSig && !force) return;
   discHudSig = sig;
 
-  const want = new Set(list.map((a) => a.id));
-  for (const child of [...discHudEl.children]) {
-    if (!want.has(+child.dataset.id)) child.remove();
-  }
+  while (discSlots.length < slotCount) makeDiscSlot();
+  while (discSlots.length > slotCount) discSlots.pop().remove();
+  /* Dès qu'un portrait existe, la silhouette CSS de repli s'efface. */
+  discHudEl.classList.toggle('portrait-ready', !!portrait);
 
-  for (const a of list) {
-    let frame = discHudEl.querySelector(`[data-id="${a.id}"]`);
-    const lvl = a.discLvl || 1;
-    const xp = discXpFrac(a);
-    if (!frame) {
-      frame = document.createElement('div');
-      frame.className = 'disc-frame';
-      frame.dataset.id = String(a.id);
-      const xpRing = document.createElement('div');
-      xpRing.className = 'disc-frame-xp';
-      const clip = document.createElement('div');
-      clip.className = 'disc-frame-clip';
-      const img = document.createElement('img');
-      img.src = DISC_AVATARS[variantOf(a.id)] || DISC_AVATARS[PEASANT];
-      img.alt = '';
-      img.draggable = false;
-      clip.appendChild(img);
-      const badge = document.createElement('span');
-      badge.className = 'disc-lvl';
-      frame.appendChild(xpRing);
-      frame.appendChild(clip);
-      frame.appendChild(badge);
-      discHudEl.appendChild(frame);
-    }
+  for (let i = 0; i < discSlots.length; i++) {
+    const frame = discSlots[i];
+    const a = list[i];
     frame.style.setProperty('--disc-ring', ring);
-    frame.style.setProperty('--xp', String(xp));
-    frame.classList.toggle('max', lvl >= DISC_LVL_MAX);
-    const badge = frame.querySelector('.disc-lvl');
-    if (badge) badge.textContent = String(lvl);
-    frame.title = lvl >= DISC_LVL_MAX
-      ? `Disciple niv. ${lvl} (max)`
-      : `Disciple niv. ${lvl} — ${a.discXp || 0}/${discXpNeed(lvl)}`;
-  }
 
-  /* Garder l'ordre id croissant. */
-  for (const a of list) {
-    const frame = discHudEl.querySelector(`[data-id="${a.id}"]`);
-    if (frame) discHudEl.appendChild(frame);
+    /* Le portrait alimente aussi les slots vides : le CSS l'y écrase en
+       silhouette noire, ce qui donne une place « en attente d'esprit »
+       plutôt qu'un disque vide. */
+    const img = frame.querySelector('img');
+    if (portrait && img.getAttribute('src') !== portrait) img.src = portrait;
+
+    if (!a) {
+      frame.classList.add('empty');
+      frame.classList.remove('max');
+      frame.style.setProperty('--xp', '0');
+      frame.querySelector('.disc-lvl').textContent = '';
+      frame.title = 'Place de disciple libre';
+      continue;
+    }
+
+    const lvl = a.discLvl || 1;
+    const wasEmpty = frame.classList.contains('empty');
+    frame.classList.remove('empty');
+    /* Rejoue l'animation d'apparition seulement quand le slot se remplit. */
+    if (wasEmpty) {
+      frame.classList.remove('filling');
+      void frame.offsetWidth;   // force le redémarrage de l'animation CSS
+      frame.classList.add('filling');
+    }
+    frame.style.setProperty('--xp', String(discXpFrac(a)));
+    frame.classList.toggle('max', lvl >= DISC_LVL_MAX);
+    frame.querySelector('.disc-lvl').textContent = String(lvl);
+    frame.title = lvl >= DISC_LVL_MAX
+      ? `Esprit niv. ${lvl} (max)`
+      : `Esprit niv. ${lvl} — ${a.discXp || 0}/${discXpNeed(lvl)} XP`;
   }
 }
 
