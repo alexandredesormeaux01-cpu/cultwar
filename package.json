@@ -12,12 +12,14 @@
     "server:smoke-test": "node scripts/server-smoke-test.mjs",
     "build:admin1": "node scripts/build-admin1.mjs",
     "android:icons": "node scripts/build-android-icons.mjs",
-    "android:sync": "npm run build && npx cap sync android",
+    "android:sync": "npm run build && node scripts/prune-android-assets.mjs && npx cap sync android",
     "android:open": "npx cap open android",
     "android:run": "npm run android:sync && npx cap run android",
     "android:apk": "npm run android:sync && cd android && .\\gradlew.bat assembleDebug",
     "models:optimize": "node scripts/optimize-models.mjs",
-    "check:scope": "node scripts/check-scope.mjs"
+    "check:scope": "node scripts/check-scope.mjs",
+    "optimize:images": "node scripts/optimize-images.mjs",
+    "optimize:geojson": "node scripts/optimize-geojson.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.2",

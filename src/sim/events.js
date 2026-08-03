@@ -10,7 +10,7 @@ export const EVENT_TIMES = [];
 export const EVENT_SPIN_DUR = 3.8;
 export const EVENT_REVEAL_DUR = 4.8;
 
-const art = (id) => `assets/events/${id}.png`;
+const art = (id) => `assets/events/${id}.webp`;
 
 /** Catalogue. `tone` : good | bad | chaos — style de la carte. */
 export const EVENT_DECK = [

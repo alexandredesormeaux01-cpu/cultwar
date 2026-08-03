@@ -1003,12 +1003,12 @@ const LEADER_ELEMENT = {
 };
 /* Portrait carré de chaque Leader — lobby, sauvegarde et jauge de course. */
 const LEADER_AVATARS = {
-  monk: 'assets/monk_avatar.png',
-  sorcerer: 'assets/sorcerer_avatar.png',
-  nomad: 'assets/nomad_avatar.png',
-  amazon: 'assets/amazon_avatar.png',
-  alien: 'assets/alien_avatar.png',
-  chief: 'assets/chief_avatar.png',
+  monk: 'assets/monk_avatar.webp',
+  sorcerer: 'assets/sorcerer_avatar.webp',
+  nomad: 'assets/nomad_avatar.webp',
+  amazon: 'assets/amazon_avatar.webp',
+  alien: 'assets/alien_avatar.webp',
+  chief: 'assets/chief_avatar.webp',
 };
 /* Élément de chaque Leader, sous forme de clé courte : c'est lui qui donne sa
    couleur et son motif au souffle d'aspiration. */
@@ -5411,7 +5411,7 @@ function paintEventCard(ev) {
 
   const artEl = eventArtEl();
   const artFrame = artEl?.parentElement;
-  const src = ev.art || (ev.id ? `assets/events/${ev.id}.png` : '');
+  const src = ev.art || (ev.id ? `assets/events/${ev.id}.webp` : '');
   if (artEl && src) {
     if (artEl.getAttribute('src') !== src) artEl.src = src;
     artEl.alt = ev.title || '';
@@ -6934,12 +6934,12 @@ const DIFF_LABEL = { easy: 'Facile', normal: 'Normal', hard: 'Difficile' };
 const DIFF_CYCLE = ['easy', 'normal', 'hard'];
 const LOBBY_AVATARS = LEADER_AVATARS;
 const LOBBY_PORTRAITS = {
-  monk: 'assets/monk_leader.png',
-  sorcerer: 'assets/sorcerer_leader.png',
-  nomad: 'assets/nomad_leader.png',
-  amazon: 'assets/amazon_leader.png',
-  alien: 'assets/alien_leader.png',
-  chief: 'assets/chief_leader.png',
+  monk: 'assets/monk_leader.webp',
+  sorcerer: 'assets/sorcerer_leader.webp',
+  nomad: 'assets/nomad_leader.webp',
+  amazon: 'assets/amazon_leader.webp',
+  alien: 'assets/alien_leader.webp',
+  chief: 'assets/chief_leader.webp',
 };
 const LOBBY_LEADER_NAMES = {
   monk: 'Petit Moine', sorcerer: 'Sombre Sorcier', nomad: 'Nomade',

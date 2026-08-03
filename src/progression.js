@@ -66,8 +66,8 @@ const LEADERS = [
     perk: '✨ Aura d\'attraction étendue (+15%)',
     color: '#ffe259',
     bgGradient: 'linear-gradient(135deg, rgba(255, 226, 89, 0.2), rgba(255, 179, 0, 0.08))',
-    img: 'assets/monk_leader.png',
-    avatar: 'assets/monk_avatar.png',
+    img: 'assets/monk_leader.webp',
+    avatar: 'assets/monk_avatar.webp',
     stats: { vitesse: 75, conversion: 90, ferveur: 85 }
   },
   {
@@ -78,8 +78,8 @@ const LEADERS = [
     perk: '🔮 Siphon de peinture accru (+20%)',
     color: '#c084fc',
     bgGradient: 'linear-gradient(135deg, rgba(192, 132, 252, 0.2), rgba(126, 34, 206, 0.08))',
-    img: 'assets/sorcerer_leader.png',
-    avatar: 'assets/sorcerer_avatar.png',
+    img: 'assets/sorcerer_leader.webp',
+    avatar: 'assets/sorcerer_avatar.webp',
     stats: { vitesse: 70, conversion: 85, ferveur: 95 }
   },
   {
@@ -90,8 +90,8 @@ const LEADERS = [
     perk: '⚡ Agilité du désert (+20% Vitesse)',
     color: '#f97316',
     bgGradient: 'linear-gradient(135deg, rgba(249, 115, 22, 0.2), rgba(194, 65, 12, 0.08))',
-    img: 'assets/nomad_leader.png',
-    avatar: 'assets/nomad_avatar.png',
+    img: 'assets/nomad_leader.webp',
+    avatar: 'assets/nomad_avatar.webp',
     stats: { vitesse: 95, conversion: 75, ferveur: 80 }
   },
   {
@@ -102,8 +102,8 @@ const LEADERS = [
     perk: '🛡️ Impulsion de foule (+15% Ferveur)',
     color: '#06b6d4',
     bgGradient: 'linear-gradient(135deg, rgba(6, 182, 212, 0.2), rgba(14, 116, 144, 0.08))',
-    img: 'assets/amazon_leader.png',
-    avatar: 'assets/amazon_avatar.png',
+    img: 'assets/amazon_leader.webp',
+    avatar: 'assets/amazon_avatar.webp',
     stats: { vitesse: 85, conversion: 80, ferveur: 90 }
   },
   {
@@ -114,8 +114,8 @@ const LEADERS = [
     perk: '👽 Aura psychique (+10% Toutes stats)',
     color: '#a3e635',
     bgGradient: 'linear-gradient(135deg, rgba(163, 230, 53, 0.2), rgba(77, 124, 15, 0.08))',
-    img: 'assets/alien_leader.png',
-    avatar: 'assets/alien_avatar.png',
+    img: 'assets/alien_leader.webp',
+    avatar: 'assets/alien_avatar.webp',
     stats: { vitesse: 78, conversion: 82, ferveur: 82 }
   },
   {
@@ -126,8 +126,8 @@ const LEADERS = [
     perk: '🪶 Bénédiction ancestrale (+15% Conversion)',
     color: '#d97706',
     bgGradient: 'linear-gradient(135deg, rgba(217, 119, 6, 0.2), rgba(146, 64, 14, 0.08))',
-    img: 'assets/chief_leader.png',
-    avatar: 'assets/chief_avatar.png',
+    img: 'assets/chief_leader.webp',
+    avatar: 'assets/chief_avatar.webp',
     stats: { vitesse: 72, conversion: 95, ferveur: 85 }
   },
 ];

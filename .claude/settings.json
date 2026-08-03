@@ -32,7 +32,27 @@
       "Bash(node --check src/sim/leader-tick.js)",
       "Bash(node --check src/main.js)",
       "Bash(npx eslint *)",
-      "Bash(node -e \"console.log\\(JSON.stringify\\(require\\('./package.json'\\).scripts\\)\\)\")"
+      "Bash(node -e \"console.log\\(JSON.stringify\\(require\\('./package.json'\\).scripts\\)\\)\")",
+      "Bash(git log *)",
+      "PowerShell(Test-Path android\\\\app\\\\build; Get-ChildItem android\\\\app -Force | Select-Object Name; \\(Get-Content android\\\\app\\\\build.gradle | Select-String -Pattern \"buildDir|outputs|applicationId|namespace\"\\))",
+      "PowerShell(Get-ChildItem C:\\\\Cult.io\\\\public -Recurse -Directory | ForEach-Object { $s=\\(Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum\\).Sum; [PSCustomObject]@{Dir=$_.FullName.Replace\\('C:\\\\Cult.io\\\\public\\\\',''\\); MB=[math]::Round\\($s/1MB,1\\)} } | Sort-Object MB -Descending | Select-Object -First 20)",
+      "PowerShell(Get-ChildItem C:\\\\Cult.io\\\\public -Recurse -File | Sort-Object Length -Descending | Select-Object -First 30 @{n='MB';e={[math]::Round\\($_.Length/1MB,2\\)}}, @{n='Path';e={$_.FullName.Replace\\('C:\\\\Cult.io\\\\public\\\\',''\\)}})",
+      "Bash(node -e \"const p=require\\('./package.json'\\);console.log\\(JSON.stringify\\({dep:p.dependencies,dev:p.devDependencies},null,1\\)\\)\")",
+      "Bash(git rm *)",
+      "Bash(node scripts/optimize-images.mjs --dry)",
+      "Bash(node scripts/optimize-images.mjs)",
+      "Bash(node scripts/optimize-geojson.mjs --dry)",
+      "Bash(node scripts/optimize-geojson.mjs)",
+      "Bash(node scripts/prune-android-assets.mjs --dry)",
+      "PowerShell(Get-ChildItem C:\\\\Cult.io\\\\android\\\\app\\\\build\\\\outputs\\\\apk\\\\debug\\\\app-debug.apk | Select-Object @{n='MB';e={[math]::Round\\($_.Length/1MB,1\\)}}, LastWriteTime)",
+      "PowerShell($z=[System.IO.Compression.ZipFile]::OpenRead\\('C:\\\\Cult.io\\\\android\\\\app\\\\build\\\\outputs\\\\apk\\\\debug\\\\app-debug.apk'\\); $z.Entries | Sort-Object Length -Descending | Select-Object -First 15 @{n='MB';e={[math]::Round\\($_.Length/1MB,2\\)}}, FullName; $z.Dispose\\(\\))",
+      "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead\\('C:\\\\Cult.io\\\\android\\\\app\\\\build\\\\outputs\\\\apk\\\\debug\\\\app-debug.apk'\\); $z.Entries | Sort-Object Length -Descending | Select-Object -First 15 @{n='MB';e={[math]::Round\\($_.Length/1MB,2\\)}}, FullName; $z.Dispose\\(\\))",
+      "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead\\('C:\\\\Cult.io\\\\android\\\\app\\\\build\\\\outputs\\\\apk\\\\debug\\\\app-debug.apk'\\); $s=\\($z.Entries | Measure-Object Length -Sum\\).Sum; $c=\\($z.Entries | Measure-Object Compressedlength -Sum\\).Sum; \"entries: $\\($z.Entries.Count\\)\"; \"uncompressed MB: $\\([math]::Round\\($s/1MB,1\\)\\)\"; \"compressed MB: $\\([math]::Round\\($c/1MB,1\\)\\)\"; $z.Entries | Group-Object { \\($_.FullName -split '/'\\)[0..2] -join '/' } | Sort-Object { \\($_.Group | Measure-Object Length -Sum\\).Sum } -Descending | Select-Object -First 8 Name, Count, @{n='MB';e={[math]::Round\\(\\(\\($_.Group | Measure-Object Length -Sum\\).Sum\\)/1MB,1\\)}}; $z.Dispose\\(\\))",
+      "Bash(unzip -l /c/Cult.io/android/app/build/outputs/apk/debug/app-debug.apk)",
+      "Bash(./gradlew.bat clean *)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
     ]
   }
 }
