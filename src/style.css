@@ -381,13 +381,102 @@ button.big:active { transform: scale(.95); }
   pointer-events: auto;
 }
 
+/* ---- Lancer de toile — action principale, pouce droit ----
+   Volontairement plus gros que les pouvoirs de la barre du haut : c'est le
+   geste central du jeu, pas une capacité parmi d'autres. */
+#net-btn {
+  position: absolute;
+  right: calc(18px + env(safe-area-inset-right));
+  bottom: calc(26px + env(safe-area-inset-bottom));
+  width: 104px;
+  height: 104px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  background: radial-gradient(circle at 50% 35%, rgba(60, 90, 140, 0.75), rgba(10, 14, 32, 0.85));
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    inset 0 0 18px rgba(120, 190, 255, 0.18);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 5;
+  transition: transform 0.09s ease, box-shadow 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+#net-btn .net-ico {
+  width: 62px;
+  height: 62px;
+  background-image: var(--net-ico, none);
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+}
+/* Repli tant que la vignette du filet n'est pas cuite. */
+#net-btn .net-ico::after {
+  content: '🕸️';
+  font-size: 34px;
+  line-height: 62px;
+  display: block;
+  text-align: center;
+}
+#net-btn.has-ico .net-ico::after { content: none; }
+/* Recharge : un voile conique qui se vide, comme les pouvoirs de la barre.
+   --cd va de 1 (vient d'être lancée) à 0 (prête). */
+#net-btn .net-cd {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from -90deg,
+    rgba(4, 8, 20, 0.72) 0 calc(var(--cd, 0) * 360deg),
+    transparent calc(var(--cd, 0) * 360deg)
+  );
+}
+#net-btn.cooling { filter: saturate(0.5); }
+#net-btn .lbl {
+  font-family: Cinzel, Georgia, serif;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: #dbeaff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+#net-btn:active,
+#net-btn.swinging {
+  transform: scale(0.92);
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.6),
+    inset 0 0 26px rgba(150, 210, 255, 0.4);
+}
+#net-btn.hidden { display: none; }
+
+@media (max-width: 720px) {
+  #net-btn {
+    width: 88px;
+    height: 88px;
+    right: calc(12px + env(safe-area-inset-right));
+    bottom: calc(18px + env(safe-area-inset-bottom));
+  }
+  #net-btn .net-ico { width: 52px; height: 52px; }
+  #net-btn .lbl { font-size: 10px; }
+}
+
 /* ---- Course aux esprits — jauge verticale, bord gauche ----
    Symétrique des cadres de disciples à droite : même grammaire de cadre rond,
    mais la position le long de la jauge porte l'information. Le dégradé va du
    rouge (départ, en bas) au vert (objectif, en haut) : monter = gagner. */
 #hud-race {
   position: absolute;
-  left: calc(14px + env(safe-area-inset-left));
+  left: calc(30px + env(safe-area-inset-left));
   top: 50%;
   transform: translateY(-50%);
   height: min(46vh, 380px);
@@ -424,7 +513,8 @@ button.big:active { transform: scale(.95); }
   white-space: nowrap;
 }
 
-/* Un culte sur la jauge : --p = progression 0→1, --dx = décalage anti-collision */
+/* Un culte sur la jauge : --p = position 0→1 (progression, corrigée pour que
+   deux cadres ne se chevauchent jamais — voir stackRacePositions). */
 .race-mark {
   position: absolute;
   left: 50%;
@@ -432,7 +522,7 @@ button.big:active { transform: scale(.95); }
   width: 38px;
   height: 38px;
   border-radius: 50%;
-  transform: translate(calc(-50% + var(--dx, 0px)), 50%);
+  transform: translate(-50%, 50%);
   /* La position glisse, elle ne saute pas : on suit la remontée d'un rival. */
   transition: bottom 0.45s cubic-bezier(0.3, 0.9, 0.3, 1), transform 0.3s ease;
   z-index: 2;
@@ -456,7 +546,7 @@ button.big:active { transform: scale(.95); }
 .race-mark.me {
   width: 46px;
   height: 46px;
-  z-index: 6;
+  z-index: 10;
 }
 .race-mark.me img {
   border-width: 2.5px;
@@ -661,7 +751,7 @@ button.big:active { transform: scale(.95); }
 
 @media (max-width: 720px) {
   #hud-race {
-    left: calc(8px + env(safe-area-inset-left));
+    left: calc(24px + env(safe-area-inset-left));
     height: min(42vh, 300px);
     min-height: 160px;
     width: 14px;
@@ -3273,4 +3363,124 @@ button.btn-secondary:hover {
 @media (max-width: 480px) and (max-height: 720px) {
   .lobby-card-desc { display: none; }
   .lobby-card-portrait { width: 62px; height: 62px; }
+}
+
+/* Chrono de fin de partie : rouge et pulsant dans les 30 dernières secondes. */
+#time-val.urgent {
+  color: #ff6a5a;
+  animation: time-urgent 1s ease-in-out infinite;
+}
+@keyframes time-urgent {
+  50% { opacity: 0.55; }
+}
+
+/* Panneau d'erreur (voir index.html) */
+#crash {
+  position: fixed;
+  inset: auto 8px 8px 8px;
+  max-height: 45vh;
+  overflow: auto;
+  z-index: 9999;
+  background: rgba(40, 6, 10, 0.96);
+  border: 1px solid #ff6a5a;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #ffd9d4;
+  font: 11px/1.45 ui-monospace, monospace;
+  white-space: pre-wrap;
+}
+#crash.hidden { display: none; }
+#crash pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+
+/* ---- Cortège : inventaire des six éléments ----
+   Sous la bannière, au centre. C'est l'information qu'on consulte en marchant
+   vers un autel : « ai-je de quoi l'alimenter ? ». Elle doit donc se lire sans
+   quitter la route des yeux — pastilles larges, chiffres épais, et tout ce qui
+   est à zéro s'efface pour laisser ressortir ce qu'on possède. */
+#hud-spirits {
+  position: absolute;
+  top: calc(178px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  pointer-events: none;
+  z-index: 4;
+}
+.spirit-chip {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: rgba(10, 14, 30, 0.66);
+  border: 2px solid var(--elem, #888);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45),
+              inset 0 0 12px color-mix(in srgb, var(--elem, #888) 30%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: opacity 0.2s ease, transform 0.18s ease;
+}
+/* Rien à déposer : la pastille s'efface sans disparaître — savoir ce qui
+   MANQUE compte autant que savoir ce qu'on a. */
+.spirit-chip.vide { opacity: 0.28; }
+.spirit-chip.plein { transform: translateY(-2px); }
+.spirit-chip img {
+  position: absolute;
+  inset: 2px;
+  width: calc(100% - 4px);
+  height: calc(100% - 4px);
+  object-fit: cover;
+  object-position: center 24%;
+  border-radius: 9px;
+  display: block;
+}
+/* Repli tant que le portrait 3D n'est pas cuit : le symbole de l'élément. */
+.spirit-chip .sym {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+}
+.spirit-chip.has-img .sym { display: none; }
+.spirit-chip .n {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(8, 10, 22, 0.95);
+  border: 1.5px solid var(--elem, #888);
+  color: #fff;
+  font-family: Cinzel, Georgia, serif;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.spirit-chip.plein .n {
+  background: var(--elem, #888);
+  color: #0b0e1a;
+}
+
+@media (max-width: 720px) {
+  #hud-spirits {
+    top: calc(150px + env(safe-area-inset-top));
+    gap: 5px;
+  }
+  .spirit-chip { width: 36px; height: 36px; border-radius: 10px; }
+  .spirit-chip .n { min-width: 17px; height: 17px; font-size: 10px; }
+  .spirit-chip .sym { font-size: 16px; }
+}
+
+/* Souffle en cours : le bouton reste enfoncé et pulse tant qu on maintient. */
+#net-btn.swinging { animation: net-hold 0.6s ease-in-out infinite; }
+@keyframes net-hold {
+  50% { box-shadow: 0 4px 12px rgba(0,0,0,.6), inset 0 0 34px rgba(150,210,255,.62); }
 }

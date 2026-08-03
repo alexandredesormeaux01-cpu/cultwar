@@ -81,14 +81,40 @@ export function aiThink(f, dt, ctx) {
     else f.bombTarget = null;
   }
 
+  /* Poursuite continue d'un esprit : il fuit, donc une cible figée entre deux
+     réflexions ferait courir le bot vers du vide. */
+  if (f.mode === 'hunt' && f.huntTarget && !f.huntTarget.dead) {
+    f.target = { x: f.huntTarget.x, z: f.huntTarget.z };
+  }
+
   f.aiT -= dt;
   if (f.aiT > 0) return;
   const T = AI_TUNING[difficulty] || AI_TUNING.normal;
   f.aiT = T.think[0] + Math.random() * T.think[1];
+  const matchLeft = Math.max(0, MATCH_DUR - elapsed);
+
+  /* ---- Priorité absolue : la boucle du jeu actuel ----
+     Chasser les esprits du bon élément puis les porter à un sanctuaire. Tout
+     ce qui suit (cristaux, expansion, raids) appartient à l'ancienne règle et
+     ne s'applique que si cette décision n'a rien à proposer. */
+  if (ctx.altarGoal) {
+    const g = ctx.altarGoal(f);
+    if (g) {
+      f.mode = g.mode;
+      f.target = g.pt;
+      f.huntTarget = g.spirit || null;
+      f.bombTarget = null;
+      f.grayTarget = null;
+      /* Le même final que les autres branches : sans lui les bots de la boucle
+         actuelle ne sprintaient jamais et pouvaient viser un point hors-île,
+         ce qui les collait au bord jusqu'à l'anti-blocage. */
+      finalizeTarget(f, T, matchLeft, ctx);
+      return;
+    }
+  }
 
   const L = f.leader;
   const fuelR = (f.fuel || 0) / FUEL_MAX;
-  const matchLeft = Math.max(0, MATCH_DUR - elapsed);
   const lateGame = 1 - Math.min(1, matchLeft / MATCH_DUR);
   const aggr = Math.min(1, Math.max(0, f.aggr ?? 0.5));
 
@@ -257,24 +283,34 @@ export function aiThink(f, dt, ctx) {
     }
   }
 
-  /* Sprint : cristaux, raids, longues traversées. */
-  if (f.target) {
-    const dT = Math.hypot(f.target.x - L.x, f.target.z - L.z);
-    const wantBoost =
-      (f.mode === 'bomb' && dT > 5 && dT < 28) ||
-      (f.mode === 'raid' && dT > 8) ||
-      dT > 22 ||
-      (matchLeft < 18 && f.mode !== 'refuel');
-    if (wantBoost && Math.random() < T.boost) doBoost(f);
+  finalizeTarget(f, T, matchLeft, ctx);
+}
+
+/* Sprint + validité de la cible. Commun à TOUTES les branches de décision :
+   une cible hors-île ou hors-anneau est le premier facteur de blocage, un bot
+   poussant alors indéfiniment contre le vide. */
+function finalizeTarget(f, T, matchLeft, ctx) {
+  const { island, isSolid, nearestSolidPoint, doBoost } = ctx;
+  const L = f.leader;
+  if (!f.target) return;
+
+  const tLim = MAP_R - 4;
+  const dc = Math.hypot(f.target.x, f.target.z);
+  if (dc > tLim) { f.target.x *= (tLim - 2) / dc; f.target.z *= (tLim - 2) / dc; }
+  if (!isSolid(island, f.target.x, f.target.z)) {
+    const p = nearestSolidPoint(island, f.target.x, f.target.z);
+    f.target.x = p.x; f.target.z = p.z;
   }
 
-  if (f.target) {
-    const tLim = MAP_R - 4;
-    const dc = Math.hypot(f.target.x, f.target.z);
-    if (dc > tLim) { f.target.x *= (tLim - 2) / dc; f.target.z *= (tLim - 2) / dc; }
-    if (!isSolid(island, f.target.x, f.target.z)) {
-      const p = nearestSolidPoint(island, f.target.x, f.target.z);
-      f.target.x = p.x; f.target.z = p.z;
-    }
-  }
+  const dT = Math.hypot(f.target.x - L.x, f.target.z - L.z);
+  const wantBoost =
+    /* Boucle actuelle : fondre sur un esprit qui fuit, et courir livrer. */
+    (f.mode === 'hunt' && dT > 6) ||
+    (f.mode === 'altar' && dT > 7) ||
+    (f.mode === 'deposit' && dT > 10) ||
+    (f.mode === 'bomb' && dT > 5 && dT < 28) ||
+    (f.mode === 'raid' && dT > 8) ||
+    dT > 22 ||
+    (matchLeft < 18 && f.mode !== 'refuel');
+  if (wantBoost && Math.random() < T.boost) doBoost(f);
 }

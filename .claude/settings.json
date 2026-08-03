@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(sed -i \"s|  content: '🥅';|  content: '🕸️';|\" src/style.css)",
+      "Bash(sed -i 's|^  CONV_R, CONV_RITUAL_T, FLEE_R,|  CONV_R, CONV_RITUAL_T, FLEE_R, CONV_BY_PROXIMITY,|' src/sim/crowd-tick.js)",
+      "Bash(sed -i 's|    const inEnemyConvR = enemyC \\\\&\\\\& enemyD < CONV_R;|    const inEnemyConvR = CONV_BY_PROXIMITY \\\\&\\\\& enemyC \\\\&\\\\& enemyD < CONV_R;|' src/sim/crowd-tick.js)",
+      "Bash(sed -i 's|    const closestF = \\(isElemental \\\\&\\\\& nearF \\\\&\\\\& nearD < CONV_R\\) ? nearF : null;|    const closestF = \\(CONV_BY_PROXIMITY \\\\&\\\\& isElemental \\\\&\\\\& nearF \\\\&\\\\& nearD < CONV_R\\) ? nearF : null;|' src/sim/crowd-tick.js)",
+      "Bash(sed -i 's|function makeWebTexture\\(size = 512\\) {|function makeWebTexture\\(size = 1024\\) {|' src/main.js)",
+      "Bash(grep -n \"\\\\$\\('power-\\\\|\\\\$\\('rally'\\)\\\\|\\\\$\\('hud-paint-orb'\\)\\\\|\\\\$\\('paint-orb\" src/main.js)",
+      "Bash(grep -n \"VILLAGER_MODELS.map\\(\\(v, i\\)\\\\|const { v, i } = queue\" -A 3 src/main.js)",
+      "Bash(sed -i '5,6d' scratch/_fix.mjs)",
+      "Bash(node scratch/_fix.mjs)",
+      "Bash(sed -i '7,8d' scratch/_fix.mjs)",
+      "Bash(node scratch/_win.mjs)",
+      "Bash(node scratch/_hud.mjs)",
+      "Bash(node -e \"console.log\\('agents de départ =', Math.round\\(40*3*\\(30/25\\)\\), '→ esprits', Math.round\\(40*3*\\(30/25\\)\\)*25/30, ', villageois', Math.round\\(40*3*\\(30/25\\)\\)*5/30\\)\")",
+      "Bash(git diff *)",
+      "Bash(node scratch/_guard.mjs)",
+      "Bash(sed -i \"s|  else if \\(n.type === 'FunctionDeclaration' || n.type === 'ClassDeclaration'\\) add\\(n.id \\\\&\\\\& n.id.name\\);|  else if \\(n.type === 'FunctionDeclaration' \\\\|\\\\| n.type === 'ClassDeclaration'\\) { add\\(n.id \\\\&\\\\& n.id.name\\); \\(n.params \\\\|\\\\| []\\).forEach\\(pat\\); }|\" scratch/_scope.mjs)",
+      "Bash(node scratch/_scope.mjs src/main.js)",
+      "Bash(awk 'NR<=6318 && /^function |^const .*= *\\\\\\(|^  \\\\/\\\\* --/' src/main.js)",
+      "Bash(awk -F: '$1<6318')",
+      "Bash(awk 'NR>=5997 && NR<=6318 && /function /{print NR\": \"$0}' src/main.js)",
+      "Bash(awk 'NR>=6100 && NR<=6318 && /return;/{print NR\": \"$0}' src/main.js)",
+      "Bash(node scripts/check-scope.mjs src/main.js src/biomes.js src/sim/leader-tick.js)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(node scratch/_altarmodel.mjs)",
+      "Bash(sed -i '5,7d' scratch/_aspirui.mjs)",
+      "Bash(node scratch/_aspirui.mjs)",
+      "Bash(node --check src/sim/ai.js)",
+      "Bash(node --check src/sim/leader-tick.js)",
+      "Bash(node --check src/main.js)",
+      "Bash(npx eslint *)",
+      "Bash(node -e \"console.log\\(JSON.stringify\\(require\\('./package.json'\\).scripts\\)\\)\")"
+    ]
+  }
+}

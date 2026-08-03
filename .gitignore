@@ -16,3 +16,6 @@ android/.idea/
 *.aab
 *.keystore
 *.jks
+
+# Brouillons locaux (scripts de patch jetables)
+scratch/

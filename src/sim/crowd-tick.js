@@ -7,13 +7,13 @@
    tourne headless. */
 
 import {
-  CONV_R, CONV_RITUAL_T, FLEE_R,
-  DISC_HUNT_R, DISC_FLEE_R, DISC_DETOUR_T, DISC_PAINT_R, DISC_SEP_R,
+  CONV_R, CONV_RITUAL_T, FLEE_R, CONV_BY_PROXIMITY,
+  DISC_HUNT_R, DISC_FLEE_R, DISC_DETOUR_T, DISC_SEP_R,
   DISC_BOMB_R, DISC_FUEL_CRITICAL, DISC_FUEL_COMFORT,
   FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD, DISCIPLE_FORM_SCALE,
   FUEL_MAX,
 } from './constants.js';
-import { discSpd, discPaintMul } from './disciples.js';
+import { discSpd } from './disciples.js';
 
 export function stepCrowd(state, dt, ctx) {
   const {
@@ -27,7 +27,6 @@ export function stepCrowd(state, dt, ctx) {
     // conversion
     finishConvert,
     // peinture
-    stampPaintAt,
     // rendu / audio (injectés, no-ops sur serveur)
     setAgentColor, setDiscHalo, hideDiscHalo,
     crowdOf, slotOf, trimCrowdCounts,
@@ -304,12 +303,9 @@ export function stepCrowd(state, dt, ctx) {
       a.x += a.vx * dt; a.z += a.vz * dt;
       resolveIsland(island, a, a.vx, a.vz, dt, true);
 
+      /* Les disciples ne peignent plus non plus : le territoire vient
+         exclusivement des sanctuaires. */
       const paintedMove = Math.hypot(a.x - prevX, a.z - prevZ);
-      a._paintAcc = (a._paintAcc || 0) + paintedMove;
-      if (!a.jmp && a._paintAcc > 0.35) {
-        stampPaintAt(f, a.x, a.z, DISC_PAINT_R * discPaintMul(a));
-        a._paintAcc = 0;
-      }
 
       if (!a.jmp) {
         const moved = paintedMove;
@@ -381,7 +377,7 @@ export function stepCrowd(state, dt, ctx) {
 
       a.vx = a.vx || 0; a.vz = a.vz || 0;
 
-      const inEnemyConvR = enemyC && enemyD < CONV_R;
+      const inEnemyConvR = CONV_BY_PROXIMITY && enemyC && enemyD < CONV_R;
       if (inEnemyConvR) {
         a.convertingDisc = (enemyC.disc) ? enemyC.disc : null;
         if ((a.converting ?? -1) !== enemyC.f.i) {
@@ -514,6 +510,16 @@ export function stepCrowd(state, dt, ctx) {
     const threatX = nearC ? nearC.x : 0;
     const threatZ = nearC ? nearC.z : 0;
     const fromDisciple = !!(nearC && nearC.disc);
+    /* Distance au LEADER le plus proche, mesurée à part. Les disciples
+       escortent leur Leader, donc ils sont presque toujours le converter le
+       plus proche : sans cette mesure séparée, l'esprit ne voyait jamais le
+       Leader arriver et fuyait à l'allure « disciple », bien trop lente. */
+    let leaderD = 1e9;
+    for (const c of converters) {
+      if (c.disc) continue;
+      const d = Math.hypot(c.x - a.x, c.z - a.z);
+      if (d < leaderD) leaderD = d;
+    }
     let fleeR = fromDisciple ? DISC_FLEE_R : FLEE_R;
     if (grayPanic) fleeR *= 1.4;
 
@@ -530,9 +536,15 @@ export function stepCrowd(state, dt, ctx) {
       const fx = ax / n, fz = az / n;
       const crowdFear = Math.min(1, (nearF.count || 0) / 35);
       const urgency = Math.min(1, (1 - nearD / fleeR) * (0.75 + crowdFear * 0.45));
-      const fleeSpd = (fromDisciple
+      let fleeSpd = (fromDisciple
         ? 3.6 + urgency * 2.2
         : 4.8 + urgency * 3.8 + crowdFear * 1.2) * (grayPanic ? 1.28 : 1);
+      /* Sprint de panique : sous 3,5 unités, l'esprit passe devant un Leader à
+         allure normale (7,3 → 9,2). Une simple course-poursuite ne doit RIEN
+         donner — on attrape à la toile, ou en l'acculant. Le boost du Leader
+         reste plus rapide : il permet de coincer, ce qui déclenche le plongeon
+         souterrain (voir updateSpiritDives). */
+      if (leaderD < 4.5) fleeSpd = Math.max(fleeSpd, 10.4);
 
       /* Bias perso stable : la meute s'éventaille au lieu de tout foncer
          dans le même coin / la même péninsule. */
@@ -606,7 +618,12 @@ export function stepCrowd(state, dt, ctx) {
         tz += sepZ * (1.8 + urgency);
       }
 
-      if (a.stumbleT <= 0 && urgency > 0.4 && Math.random() < dt * (0.35 + urgency)) {
+      /* Le trébuchement donne du charme à la fuite de loin, mais à bout portant
+         il offrait l'esprit au Leader : ramené à 25 % de sa vitesse une fois par
+         seconde, aucun sprint ne tient. On le coupe sous 4,5 unités — c'est là
+         que la poursuite doit être perdue d'avance. */
+      if (a.stumbleT <= 0 && urgency > 0.4 && leaderD > 5.5
+          && Math.random() < dt * (0.35 + urgency)) {
         a.stumbleT = 0.18 + Math.random() * 0.16;
       }
       if (a.stumbleT > 0) { tx *= 0.25; tz *= 0.25; }
@@ -656,7 +673,7 @@ export function stepCrowd(state, dt, ctx) {
     }
 
     const isElemental = typeof variantOf !== 'undefined' ? variantOf(a.id) >= 3 : true;
-    const closestF = (isElemental && nearF && nearD < CONV_R) ? nearF : null;
+    const closestF = (CONV_BY_PROXIMITY && isElemental && nearF && nearD < CONV_R) ? nearF : null;
     let scaleMul = 1;
     if (closestF) {
       a.convertingDisc = (nearC && nearC.disc) ? nearC.disc : null;

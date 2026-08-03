@@ -1,4 +1,21 @@
 import './style.css';
+
+/* ---- Report d'erreur à l'écran ----
+   Une exception dans startGame laisse le menu affiché sans le moindre indice,
+   et sur téléphone il n'y a pas de console pour aller voir. On l'affiche. */
+function showCrash(what, err) {
+  try {
+    const box = document.getElementById('crash');
+    const msg = document.getElementById('crash-msg');
+    if (!box || !msg) return;
+    msg.textContent = (msg.textContent ? msg.textContent + String.fromCharCode(10, 10) : '')
+      + what + ' : ' + (err && err.stack ? err.stack : err);
+    box.classList.remove('hidden');
+  } catch { /* on ne casse pas le rapport d'erreur */ }
+}
+window.addEventListener('error', (e) => showCrash('Erreur', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => showCrash('Promesse rejetée', e.reason));
+
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { gltfLoader, makeGLTFLoader } from './gltf.js';
@@ -22,11 +39,12 @@ import {
   initCrystals, updateCrystals, spawnSoulBurst,
   resetCrystals,
 } from './crystals.js';
+import { IS_MOBILE, describeDevice } from './device.js';
 import { bakeVAT, makeVATMaterial, makeVATOutlineMaterial } from './vat.js';
 import { soundEngine } from './soundEngine.js';
 import {
   MAP_R, DENSITY, AGENT_CAP_MOBILE, AGENT_CAP_DESKTOP,
-  START_GRAYS as START_GRAYS_CONST, NB_FACTIONS, GOAL,
+  START_GRAYS as START_GRAYS_CONST, NB_FACTIONS, WIN_PCT,
   SIEGE_R, SIEGE_R2, SIEGE_RATE,
   BASE_WALL_R, BASE_WALL_T, BASE_WALL_H, BASE_GATE_HALF, BASE_WALL_SEGS, BASE_SPAWN_R,
   DEPOSIT_RATE,
@@ -47,7 +65,6 @@ import {
   V_MAX, V_MIN, N_REF, LEADER_RESP, CAM_RESP, CAM_LOOK_RESP,
 } from './sim/constants.js';
 import { createAgent, resetAgent, createFaction, createTeam } from './sim/state.js';
-import { POWER_DEFS, getPowerDef, tickPowerCds } from './sim/powers.js';
 import { discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac } from './sim/disciples.js';
 import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap, inOwnBase as _inOwnBase } from './sim/leader.js';
 import { effects } from './sim/effects.js';
@@ -83,7 +100,7 @@ let skillMods = getSkillMods();
 /* ============================== Config ==============================
    Les constantes de gameplay sont désormais dans src/sim/constants.js
    (pour que le futur serveur headless puisse les partager). */
-const _isMobile = matchMedia('(pointer: coarse)').matches;
+const _isMobile = IS_MOBILE;
 const AGENT_CAP = _isMobile ? AGENT_CAP_MOBILE : AGENT_CAP_DESKTOP;
 let MAX_AGENTS = AGENT_CAP;
 let START_GRAYS = START_GRAYS_CONST;
@@ -124,7 +141,7 @@ let camDistMul = CAM_DIST_MUL[currentCamDist];
    l'escalier des contours BackSide bien plus efficacement que monter le DPR.
    Le DPR est en contrepartie tenu bas pour garder la charge fillrate ≤ à ce
    qu'on avait avant. Desktop inchangé. */
-const isCoarse = matchMedia('(pointer: coarse)').matches;
+const isCoarse = IS_MOBILE;
 const GRAPHICS = isCoarse ? {
   low:  { maxDpr: 1.0,  aa: true, shadows: false },
   mid:  { maxDpr: 1.1,  aa: true, shadows: false },
@@ -163,6 +180,26 @@ scene.fog = new THREE.Fog(0x9fdcff, 70, 165);
 window.__cult = {
   scene, renderer,
   info: () => ({ ...renderer.info.render, programs: renderer.info.programs.length }),
+  /* Pourquoi le jeu se croit-il sur mobile ? (contours, plafonds, fps) */
+  env: () => ({ ...describeDevice(), graphics: currentGraphics }),
+  /* État des contours cartoon : présents ? dessinés ? visibles ? */
+  outlines() {
+    const rows = [];
+    const scan = (label, mesh) => {
+      const o = mesh && mesh.userData.outlineMesh;
+      rows.push({
+        mesh: label,
+        instances: mesh ? mesh.count : 0,
+        outline: !!o,
+        outlineCount: o ? o.count : 0,
+        inScene: o ? !!o.parent : false,
+        visible: o ? o.visible && o.material.visible : false,
+      });
+    };
+    crowds.forEach((m, i) => scan('crowd[' + i + ']', m));
+    for (const k of Object.keys(followerMeshes)) scan('follower:' + k, followerMeshes[k].mesh);
+    return rows;
+  },
   facs: () => factions,
   toggleNature() {
     let n = 0;
@@ -973,6 +1010,13 @@ const LEADER_AVATARS = {
   alien: 'assets/alien_avatar.png',
   chief: 'assets/chief_avatar.png',
 };
+/* Élément de chaque Leader, sous forme de clé courte : c'est lui qui donne sa
+   couleur et son motif au souffle d'aspiration. */
+const LEADER_ELEM_KEY = {
+  monk: 'light', sorcerer: 'ether', nomad: 'earth',
+  amazon: 'fire', alien: 'air', chief: 'water',
+};
+
 const leaderAssets = {};   // key → { model, texture, clips }
 const followerMeshes = {}; // leaderKey → { mesh, outline, freeSlots[], color[] }
 const FOLLOWER_MESH_CAP = 400;
@@ -1015,15 +1059,16 @@ const VILLAGER_MODELS = [
   { url: 'assets/models/knight_blocky.glb', scale: 1.18 },
   // Élémentaires : 6 variantes riggées (feu source Meshy + 5 transferts par
   // plus-proche-voisin depuis le squelette du feu). Rétrécis à 0.6× — petit perso.
-  // wildHalo : rim doré pulsant tant qu'ils sont neutres — signal « proie premium ».
-  // Une fois absorbés, ils passent au follower mesh (sans halo) → distinction auto.
+  // Plus de teinte dorée : c'est la couleur d'origine de chaque élémentaire qui
+  // porte l'information, puisque les autels réclament un type précis. Un esprit
+  // doit se reconnaître de loin à sa couleur, pas à un halo générique.
   // TODO : optimiser les textures (10–27 Mo → WebP 512 comme les autres villageois).
-  { url: 'assets/models/elemental_rigged.glb', scale: 0.6, wildHalo: true, golden: true },        // FIRE
-  { url: 'assets/models/elemental_water_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // WATER
-  { url: 'assets/models/elemental_air_rigged.glb', scale: 0.6, wildHalo: true, golden: true },    // AIR
-  { url: 'assets/models/elemental_light_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // LIGHT
-  { url: 'assets/models/elemental_earth_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // EARTH
-  { url: 'assets/models/elemental_ether_rigged.glb', scale: 0.6, wildHalo: true, golden: true },  // ETHER
+  { url: 'assets/models/elemental_rigged.glb', scale: 0.6 },        // FIRE
+  { url: 'assets/models/elemental_water_rigged.glb', scale: 0.6 },  // WATER
+  { url: 'assets/models/elemental_air_rigged.glb', scale: 0.6 },    // AIR
+  { url: 'assets/models/elemental_light_rigged.glb', scale: 0.6 },  // LIGHT
+  { url: 'assets/models/elemental_earth_rigged.glb', scale: 0.6 },  // EARTH
+  { url: 'assets/models/elemental_ether_rigged.glb', scale: 0.6 },  // ETHER
 ];
 
 // Chapeau : le masque n'est pas fiable par couleur (l'atlas Meshy mêle la paille et la
@@ -1265,6 +1310,7 @@ function tagHatVertices(geo) {
 
 function setupVillager(mesh, gltf, opts = {}) {
   const { hue, tintable = false, hatTint = false, scale = 1, gaitScale = 1, wildHalo = false, golden = false } = opts;
+
   let tex = null;
   gltf.scene.traverse((child) => {
     if (child.isMesh && child.material && child.material.map) tex = child.material.map;
@@ -1383,7 +1429,7 @@ function mobileDownscaleTextures(gltf, maxSize = 512) {
     const { v, i } = queue.shift();
     gltfLoader.load(v.url, (gltf) => {
       mobileDownscaleTextures(gltf);
-      try { setupVillager(crowds[i], gltf, v); }
+      try { setupVillager(crowds[i], gltf, { ...v, variant: i }); }
       catch (e) { console.error('[villager] setup failed', v.url, e); }
       loadNext();
     }, undefined, (err) => {
@@ -1433,6 +1479,524 @@ gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
 }, undefined, (err) => {
   console.warn('[sanctuary] Load warning:', err);
 });
+
+/* --------------------------- Aspiration des esprits ---------------------------
+   La toile demandait quatre gestes entre « je vois un esprit » et « je l'ai » :
+   lancer, attendre, marcher, récolter. Aucun réglage ne rendait ça rapide, et
+   une fois posée elle ne renvoyait plus rien au joueur.
+
+   Ici on maintient le bouton : un cône s'ouvre devant le Leader et tire les
+   esprits vers lui. Ils résistent — leur IA de fuite pousse en sens inverse —
+   donc chaque frame dit au joueur s'il est en train de gagner. Au contact,
+   l'esprit rejoint le cortège.
+
+   L'interaction entre joueurs sort de la géométrie, sans une ligne de combat :
+   deux Leaders qui aspirent la même proie additionnent leurs forces, et
+   l'esprit glisse vers celui qui tire le plus fort. On se dispute une prise en
+   la tirant, et le vainqueur se lit à l'écran.
+
+   Chaque Leader a son élément (LEADER_ELEMENT), donc son propre souffle :
+   couleur, motif et vitesse de rotation en découlent — six effets distincts
+   sans six assets à produire. */
+const ASPIR_R = 9.5;          // portée du cône
+const ASPIR_ARC = 0.62;       // demi-angle (~35°)
+const ASPIR_PULL = 15.0;      // vitesse d'attraction à bout portant
+const ASPIR_GRAB = 1.7;       // distance de prise
+const ASPIR_Y = 1.15;         // hauteur de l'axe du souffle
+
+/* Recette de débris par élément. Aucun cône n'est dessiné : le souffle ne se
+   voit qu'à travers ce qu'il emporte — c'est plus lisible et bien plus vivant
+   qu'un volume translucide, qui restait immobile quoi qu'il arrive.
+   `mix` donne la proportion feuille / caillou / volute. */
+const ASPIR_STYLE = {
+  fire:  { spin: 2.6, mix: [0.25, 0.15, 0.60] },   // braises et souffle chaud
+  water: { spin: 1.5, mix: [0.15, 0.10, 0.75] },   // embruns
+  air:   { spin: 3.4, mix: [0.45, 0.10, 0.45] },   // feuilles emportées
+  light: { spin: 0.9, mix: [0.10, 0.05, 0.85] },   // volutes lumineuses
+  earth: { spin: 1.2, mix: [0.30, 0.50, 0.20] },   // cailloux et poussière
+  ether: { spin: 2.2, mix: [0.20, 0.20, 0.60] },   // éclats occultes
+};
+
+/** Prépare la couleur et la recette d'un culte — sans aucun mesh à afficher. */
+function ensureAspirStyle(f) {
+  if (f._aspirCol) return;
+  const key = LEADER_ELEM_KEY[f.leaderKey] || 'ether';
+  const e = ELEMENTS.find((x) => x.key === key) || ELEMENTS[5];
+  f._aspirStyle = ASPIR_STYLE[key] || ASPIR_STYLE.ether;
+  f._aspirCol = new THREE.Color(e.col);
+}
+/** Orientation visuelle du Leader — celle que le joueur voit, donc celle sur
+    laquelle il vise. Repli sur le vecteur vitesse si le corps n'est pas prêt. */
+function leaderFace(f) {
+  const body = f.grp && f.grp.userData && f.grp.userData.body;
+  if (body) return body.rotation.y;
+  return Math.atan2(f.leader.dx || 0, f.leader.dz || 1);
+}
+
+function startAspir(f) {
+  if (!f || !f.alive) return false;
+  if (!f.aspir) soundEngine.playSFX('paint_orb', { volume: 0.35, rate: 0.75 });
+  f.aspir = true;
+  return true;
+}
+function stopAspir(f) { if (f) f.aspir = false; }
+
+/* Accumulateur de traction : plusieurs Leaders peuvent tirer le même esprit, et
+   c'est la somme des forces qui décide. On agrège d'abord, on applique ensuite —
+   sinon le dernier culte traité écraserait les autres. */
+const _pullX = new Map(), _pullZ = new Map(), _pullBy = new Map();
+
+
+/* ---- Bourrasque : tout ce que le souffle emporte ----
+   Aucun cône n'est dessiné. L'aspiration ne se voit qu'à travers la matière
+   qu'elle arrache au sol : feuilles qui tournoient, cailloux qui décollent,
+   volutes de vent. Un volume translucide restait immobile quoi qu'il arrive ;
+   des débris disent à chaque frame d'où souffle le vent et à quelle vitesse.
+
+   Trois familles, trois textures, trois nuages — donc trois appels de rendu au
+   total quel que soit le nombre de cultes. La couleur par sommet distingue les
+   six éléments à l'intérieur de chaque famille. */
+const WIND_MAX = 320;
+const KINDS = ['leaf', 'stone', 'wisp'];
+
+/** Petites textures dessinées une fois : une feuille, un caillou, une volute. */
+function makeDebrisTexture(kind) {
+  const S = 64;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  g.translate(S / 2, S / 2);
+
+  if (kind === 'leaf') {
+    /* Amande nervurée : la forme la plus lisible à quelques pixels. */
+    g.fillStyle = '#fff';
+    g.beginPath();
+    g.moveTo(0, -26);
+    g.quadraticCurveTo(20, -6, 0, 26);
+    g.quadraticCurveTo(-20, -6, 0, -26);
+    g.fill();
+    g.strokeStyle = 'rgba(0,0,0,0.35)';
+    g.lineWidth = 2.5;
+    g.beginPath();
+    g.moveTo(0, -22); g.lineTo(0, 22);
+    g.stroke();
+  } else if (kind === 'stone') {
+    /* Éclat anguleux, pas un disque : un caillou doit avoir des arêtes. */
+    g.fillStyle = '#fff';
+    g.beginPath();
+    const pts = [[0, -20], [16, -8], [13, 12], [-4, 20], [-17, 6], [-13, -12]];
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.closePath();
+    g.fill();
+    g.strokeStyle = 'rgba(0,0,0,0.4)';
+    g.lineWidth = 3;
+    g.stroke();
+  } else {
+    /* Volute : virgule floue, sans contour — c'est le vent lui-même. */
+    const grd = g.createRadialGradient(0, 0, 0, 0, 0, 30);
+    grd.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grd.addColorStop(0.45, 'rgba(255,255,255,0.35)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.beginPath();
+    g.ellipse(0, 0, 30, 12, -0.5, 0, 7);
+    g.fill();
+  }
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const _windPos = {}, _windCol = {}, _windPts = {};
+const _wind = [];
+
+function ensureWindPoints(kind) {
+  if (_windPts[kind]) return _windPts[kind];
+  _windPos[kind] = new Float32Array(WIND_MAX * 3);
+  _windCol[kind] = new Float32Array(WIND_MAX * 3);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(_windPos[kind], 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(_windCol[kind], 3));
+  geo.setDrawRange(0, 0);
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+    map: makeDebrisTexture(kind),
+    size: kind === 'wisp' ? 0.95 : kind === 'leaf' ? 0.6 : 0.4,
+    sizeAttenuation: true,
+    vertexColors: true,
+    transparent: true,
+    alphaTest: 0.02,
+    depthWrite: false,
+    /* Les volutes s'ajoutent (lumière), feuilles et cailloux se composent
+       normalement : de la matière ne doit pas briller. */
+    blending: kind === 'wisp' ? THREE.AdditiveBlending : THREE.NormalBlending,
+    toneMapped: false,
+  }));
+  pts.frustumCulled = false;
+  pts.renderOrder = 5;
+  scene.add(pts);
+  setCharLayer(pts);
+  _windPts[kind] = pts;
+  return pts;
+}
+
+/** Sème un débris, arraché au sol à la bouche du souffle. */
+function spawnWind(f, col, style) {
+  /* Plafond global aligné sur la taille des tampons : au-delà, des débris
+     seraient calculés puis jetés au rendu. */
+  if (_wind.length >= WIND_MAX) return;
+  const mix = (style && style.mix) || [0.2, 0.2, 0.6];
+  const r = Math.random();
+  const kind = r < mix[0] ? 'leaf' : r < mix[0] + mix[1] ? 'stone' : 'wisp';
+  const spin = (style && style.spin) || 2;
+  _wind.push({
+    f, col, kind,
+    t: 0,                                   // 0 = bouche du souffle, 1 = Leader
+    ang: Math.random() * Math.PI * 2,
+    rad: 0.15 + Math.random() * 0.85,
+    spin: (Math.random() < 0.5 ? -1 : 1) * spin * (0.6 + Math.random() * 0.8),
+    spd: 0.8 + Math.random() * 0.6,
+    /* Feuilles et cailloux partent du SOL et décollent en chemin ; les volutes
+       naissent déjà en l'air. C'est ce décollage qui raconte l'arrachement. */
+    y0: kind === 'wisp' ? 0.6 + Math.random() * 1.2 : 0.05 + Math.random() * 0.2,
+    lift: kind === 'wisp' ? 0.3 : 0.9 + Math.random() * 0.9,
+    tumble: Math.random() * 6.28,
+  });
+}
+
+function updateWind(dt) {
+  /* Les tampons doivent exister AVANT qu'on y écrive. Les créer à la fin de la
+     fonction, comme c'était le cas, faisait échouer la toute première frame de
+     souffle sur un tableau indéfini — et l'exception emportait avec elle la fin
+     de update(), caméra comprise. */
+  for (const kind of KINDS) ensureWindPoints(kind);
+
+  const n = { leaf: 0, stone: 0, wisp: 0 };
+  for (let i = _wind.length - 1; i >= 0; i--) {
+    const w = _wind[i];
+    const f = w.f;
+    if (!f || !f.alive) { _wind.splice(i, 1); continue; }
+
+    /* Accélération à l'approche : le débris met bien moins de temps à parcourir
+       la dernière moitié que la première. Un flux qui se resserre se lit comme
+       une succion ; à vitesse constante, ce ne serait que de la pluie. */
+    w.t += dt * w.spd * (0.75 + w.t * w.t * 3.4);
+    if (w.t >= 1) { _wind.splice(i, 1); continue; }
+
+    const kind = w.kind;
+    if (n[kind] >= WIND_MAX) continue;
+    w.ang += dt * w.spin * (1 + w.t * 2);   // la spirale se serre en approchant
+    w.tumble += dt * 7;
+
+    const ang = leaderFace(f);
+    const d = ASPIR_R * (1 - w.t);
+    const r = Math.tan(ASPIR_ARC) * d * w.rad;
+    const cx = f.leader.x + Math.sin(ang) * d;
+    const cz = f.leader.z + Math.cos(ang) * d;
+    const px = Math.cos(ang), pz = -Math.sin(ang);
+    const o = Math.cos(w.ang) * r;
+
+    const arr = _windPos[kind], carr = _windCol[kind];
+    const j = n[kind] * 3;
+    arr[j]     = cx + px * o;
+    arr[j + 1] = w.y0 + w.lift * w.t + Math.sin(w.ang) * r * 0.35;
+    arr[j + 2] = cz + pz * o;
+
+    /* Fondu d'entrée ET de sortie : un débris qui apparaît net au bord du cône
+       trahit la limite invisible du souffle. */
+    const fade = Math.min(1, w.t / 0.12) * (1 - Math.max(0, (w.t - 0.8) / 0.2));
+    carr[j]     = w.col.r * fade;
+    carr[j + 1] = w.col.g * fade;
+    carr[j + 2] = w.col.b * fade;
+    n[kind]++;
+  }
+
+  for (const kind of KINDS) {
+    const pts = _windPts[kind];
+    pts.geometry.setDrawRange(0, n[kind]);
+    pts.geometry.attributes.position.needsUpdate = true;
+    pts.geometry.attributes.color.needsUpdate = true;
+    pts.visible = n[kind] > 0;
+  }
+}
+
+function clearWind() {
+  _wind.length = 0;
+  for (const kind of KINDS) {
+    const pts = _windPts[kind];
+    if (pts) { pts.geometry.setDrawRange(0, 0); pts.visible = false; }
+  }
+}
+
+function updateAspiration(dt) {
+  _pullX.clear(); _pullZ.clear(); _pullBy.clear();
+  updateWind(dt);
+
+  for (const f of factions) {
+    if (!f || !f.alive || !f.leader) continue;
+    ensureAspirStyle(f);
+    const on = !!f.aspir;
+
+    /* Le souffle monte et retombe en fondu : couper net le débit produirait un
+       trou visible dans le flux au relâchement. */
+    f._aspirVis = (f._aspirVis || 0) + (on ? dt * 8 : -dt * 4);
+    f._aspirVis = Math.max(0, Math.min(1, f._aspirVis));
+
+    /* Débit constant, indépendant de la fréquence d'images. */
+    if (f._aspirVis > 0.02) {
+      f._windAcc = (f._windAcc || 0) + dt * 95 * f._aspirVis;
+      let emit = f._windAcc | 0;
+      f._windAcc -= emit;
+      while (emit-- > 0) spawnWind(f, f._aspirCol, f._aspirStyle);
+    }
+
+    if (!on) continue;
+
+    const ang = leaderFace(f);
+    const fx = Math.sin(ang), fz = Math.cos(ang);
+    const cosArc = Math.cos(ASPIR_ARC);
+
+    for (const a of agents) {
+      if (!a || a.dead) continue;
+      if (variantOf(a.id) < ELEM_FIRST) continue;      // seuls les esprits
+      if ((a.discipleOf ?? -1) >= 0) continue;
+      if ((a.followerOf ?? -1) === f.i) continue;      // déjà à nous
+      if (a._dive != null) continue;                   // en pleine fuite sous terre
+
+      const dx = a.x - f.leader.x, dz = a.z - f.leader.z;
+      const d = Math.hypot(dx, dz);
+      if (d > ASPIR_R || d < 1e-3) continue;
+      const dot = (dx / d) * fx + (dz / d) * fz;
+      if (dot < cosArc) continue;
+
+      /* Plus l'esprit est proche de l'axe et du Leader, plus il est tiré fort.
+         Le cône a donc un « cœur » où l'on gagne le bras de fer, et des bords
+         où il faut se replacer. */
+      const axis = (dot - cosArc) / (1 - cosArc);
+      const near = 1 - d / ASPIR_R;
+      const force = ASPIR_PULL * (0.35 + 0.65 * axis) * (0.45 + 0.55 * near);
+
+      _pullX.set(a, (_pullX.get(a) || 0) - (dx / d) * force);
+      _pullZ.set(a, (_pullZ.get(a) || 0) - (dz / d) * force);
+      /* Le culte le plus proche récolte si l'esprit atteint le contact. */
+      const prev = _pullBy.get(a);
+      if (!prev || d < prev.d) _pullBy.set(a, { f, d });
+    }
+  }
+
+  if (!_pullX.size) return;
+
+  for (const [a, px] of _pullX) {
+    const pz = _pullZ.get(a) || 0;
+    /* On déplace directement : la simulation vient d'appliquer la fuite, donc
+       le résultat visible est bien la différence entre les deux — l'esprit
+       tremble et recule quand il résiste, avance quand il perd. */
+    a.x += px * dt;
+    a.z += pz * dt;
+    a._aspirT = elapsed;
+
+    const owner = _pullBy.get(a);
+    if (!owner) continue;
+    const d = Math.hypot(a.x - owner.f.leader.x, a.z - owner.f.leader.z);
+    if (d > ASPIR_GRAB) continue;
+
+    const stolen = (a.followerOf ?? -1) >= 0;
+    finishConvert(a, owner.f);
+    spawnShock(a.x, a.z, owner.f.color, stolen ? 2.2 : 1.5, 0.3);
+    if (owner.f.i === 0) {
+      bumpStreak();
+      if (stolen) banner('✦ Esprit arraché à un rival !');
+    }
+  }
+}
+
+/* ---- L'aspiration côté IA ----
+   Un bot aspire dès qu'un esprit capturable entre dans son cône, et relâche
+   sinon. Rien de plus : la difficulté vient déjà de sa navigation. */
+function updateBotAspir() {
+  for (const f of factions) {
+    if (!f || !f.alive || f.i === 0 || !f.isBot) continue;
+    const ang = leaderFace(f);
+    const fx = Math.sin(ang), fz = Math.cos(ang);
+    const cosArc = Math.cos(ASPIR_ARC);
+    let want = false;
+    for (const a of agents) {
+      if (!a || a.dead) continue;
+      if (variantOf(a.id) < ELEM_FIRST) continue;
+      if ((a.discipleOf ?? -1) >= 0) continue;
+      if ((a.followerOf ?? -1) === f.i) continue;
+      const dx = a.x - f.leader.x, dz = a.z - f.leader.z;
+      const d = Math.hypot(dx, dz);
+      if (d > ASPIR_R || d < 1e-3) continue;
+      if ((dx / d) * fx + (dz / d) * fz < cosArc) continue;
+      want = true;
+      break;
+    }
+    f.aspir = want;
+  }
+}
+
+/** Coupe tous les souffles entre deux parties. */
+function clearAspiration() {
+  for (const f of factions) {
+    if (!f) continue;
+    f.aspir = false;
+    f._aspirVis = 0;
+  }
+}
+
+/* ------------------- Plongeon souterrain des esprits acculés -------------------
+   Un esprit ne se laisse jamais prendre à la course : il sprinte dès qu'on
+   l'approche. Mais on peut l'acculer — contre le vide, dans un cul-de-sac, ou
+   au boost. Plutôt que de le laisser coincé sans issue (frustrant des deux
+   côtés), il saute, plonge dans un trou et ressort ailleurs sur la carte.
+
+   « Acculé » se mesure au FAIT, pas à l'intention : un Leader tout près ET un
+   esprit qui n'arrive plus à s'éloigner. Un test de distance seul se
+   déclencherait pendant une poursuite normale. */
+const HOLE_Y = 0.42;          // au-dessus des ondulations du sol (±0.35)
+const DIVE_NEAR_R = 3.2;      // distance de Leader qui met la pression
+const DIVE_STUCK_T = 0.5;     // durée sans échappatoire avant de plonger
+const DIVE_GAIN = 0.35;       // terrain repris par seconde en dessous duquel
+                              // on considère qu'il ne s'en sort pas
+const DIVE_UP = 0.30;         // temps de saut
+const DIVE_DOWN = 0.26;       // temps de plongée
+const DIVE_OUT = 0.34;        // temps de résurgence
+const DIVE_TOTAL = DIVE_UP + DIVE_DOWN + DIVE_OUT;
+
+/* Trous : un disque sombre à bord adouci, mis en commun. Le .glb de terrier est
+   trop lourd (57 k triangles) pour être cloné à chaque plongeon. */
+let _holeGeo = null, _holeMat = null;
+const holes = [], holePool = [];
+function spawnHole(x, z) {
+  if (!_holeGeo) {
+    _holeGeo = new THREE.CircleGeometry(1, 24).rotateX(-Math.PI / 2);
+    _holeMat = new THREE.MeshBasicMaterial({
+      color: 0x0a0712, transparent: true, depthWrite: false, toneMapped: false,
+    });
+  }
+  let m = holePool.pop();
+  if (!m) { m = new THREE.Mesh(_holeGeo, _holeMat.clone()); scene.add(m); }
+  m.visible = true;
+  m.position.set(x, HOLE_Y - 0.08, z);
+  m.scale.setScalar(0.2);
+  m.material.opacity = 0.9;
+  m.renderOrder = 2;
+  holes.push({ mesh: m, t: 0 });
+}
+function updateHoles(dt) {
+  for (let i = holes.length - 1; i >= 0; i--) {
+    const h = holes[i];
+    h.t += dt;
+    const grow = Math.min(1, h.t / 0.18);
+    h.mesh.scale.setScalar(0.2 + 1.0 * grow);
+    h.mesh.material.opacity = 0.9 * Math.max(0, 1 - Math.max(0, h.t - 0.9) / 0.6);
+    if (h.t > 1.5) {
+      h.mesh.visible = false;
+      holePool.push(h.mesh);
+      holes.splice(i, 1);
+    }
+  }
+}
+
+function startDive(a) {
+  a._dive = 0;
+  a._diveBase = a.base;
+  a.vx = 0; a.vz = 0;
+  a._corner = 0;
+  a._diveD = null;   // la mesure de gain repart de zéro à la résurgence
+  spawnHole(a.x, a.z);
+}
+
+function updateSpiritDives(dt) {
+  updateHoles(dt);
+
+  for (const a of agents) {
+    if (!a || a.dead) continue;
+    if (variantOf(a.id) < 3) continue;            // seuls les esprits plongent
+
+    /* ---- Plongeon en cours ---- */
+    if (a._dive != null) {
+      a._dive += dt;
+      const t = a._dive;
+      a.vx = 0; a.vz = 0;
+      if (t < DIVE_UP) {
+        /* Sursaut : il bondit sur place avant de piquer. */
+        a.y = Math.sin((t / DIVE_UP) * Math.PI) * 1.35;
+      } else if (t < DIVE_UP + DIVE_DOWN) {
+        const u = (t - DIVE_UP) / DIVE_DOWN;
+        a.y = -1.6 * u * u;                        // pique vers le sol
+        a.base = a._diveBase * Math.max(0, 1 - u); // avalé par le trou
+      } else if (t < DIVE_TOTAL) {
+        const u = (t - DIVE_UP - DIVE_DOWN) / DIVE_OUT;
+        if (!a._diveMoved) {
+          /* Résurgence : loin de tout Leader, sinon il ressort dans les bras
+             de celui qui vient de l'acculer. */
+          a._diveMoved = true;
+          let pt = null;
+          for (let tries = 0; tries < 12; tries++) {
+            const p = islandRandomPoint(island, 4, Infinity);
+            if (!p) break;
+            const pz = p.z ?? p.y;
+            let far = true;
+            for (const f of factions) {
+              if (!f || !f.alive || !f.leader) continue;
+              if (Math.hypot(p.x - f.leader.x, pz - f.leader.z) < 18) { far = false; break; }
+            }
+            pt = { x: p.x, z: pz };
+            if (far) break;
+          }
+          if (pt) { a.x = pt.x; a.z = pt.z; }
+          spawnHole(a.x, a.z);
+        }
+        a.y = -1.6 * (1 - u) ** 2;
+        a.base = a._diveBase * u;
+      } else {
+        a.y = 0;
+        a.base = a._diveBase;
+        a._dive = null;
+        a._diveMoved = false;
+        a._webFree = elapsed + 1.0;   // pas de toile dans la seconde qui suit
+      }
+      continue;
+    }
+
+    /* ---- Détection de l'esprit acculé ---- */
+    if (a._web || (a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0) { a._corner = 0; continue; }
+
+    let nearD = 1e9;
+    for (const f of factions) {
+      if (!f || !f.alive || !f.leader) continue;
+      const d = Math.hypot(a.x - f.leader.x, a.z - f.leader.z);
+      if (d < nearD) nearD = d;
+    }
+    /* « Acculé » = un Leader colle et l'esprit n'arrive pas à REPRENDRE du
+       terrain. Tester sa vitesse ne marchait pas : coincé contre un rebord de
+       tuile, il glisse le long du bord à pleine allure sans jamais s'éloigner.
+       On mesure donc le gain de distance, pas le déplacement. */
+    const gain = a._diveD != null ? (nearD - a._diveD) / Math.max(1e-4, dt) : 0;
+    a._diveD = nearD;
+    if (nearD < DIVE_NEAR_R && gain < DIVE_GAIN) {
+      a._corner = (a._corner || 0) + dt;
+      if (a._corner >= DIVE_STUCK_T) startDive(a);
+    } else {
+      a._corner = 0;
+    }
+  }
+}
+
+/** Vide les toiles entre deux parties. */
+/** Remet à zéro tout ce qui traîne entre deux parties : trous, plongeons en
+    cours et souffles d'aspiration. */
+function clearWebs() {
+  for (const h of holes) { h.mesh.visible = false; holePool.push(h.mesh); }
+  holes.length = 0;
+  for (const a of agents) if (a && a._dive != null) { a.base = a._diveBase; a._dive = null; a._diveMoved = false; }
+  clearAspiration();
+  clearWind();
+}
+
 
 /* Modèle 3D du Trou de Terrier (Burrow Hole GLB) */
 let burrowHoleModel = null;
@@ -1528,6 +2092,503 @@ function stealSpiritFromLeader(f) {
   }
   triggerBurrowRespawn(f.leader);
   return true;
+}
+
+/* ============================== Sanctuaires ==============================
+   Des autels neutres, un par site, disséminés sur la vallée. Chacun réclame un
+   nombre d'esprits d'un ÉLÉMENT précis. On les alimente en amenant son cortège
+   au pied de l'autel ; une fois comblé, un grand gardien de cet élément s'y
+   dresse et le sanctuaire peint sa région en continu à la couleur de son culte.
+
+   Un sanctuaire actif affiche alors le coût de sa rupture : le même nombre
+   d'esprits, mais de l'élément OPPOSÉ. Les livrer brise le gardien, le
+   remplace par un gardien de l'élément apporté, et fait changer le sanctuaire
+   de main. Le territoire ne s'obtient donc plus en marchant mais en tenant des
+   points fixes — et aucun n'est définitivement acquis.
+
+   Les six élémentaires sont les variantes 3 à 8 de la foule (voir
+   VILLAGER_MODELS) : le type d'un esprit capturé est simplement sa variante. */
+const ELEM_FIRST = 3;
+/* `img` : portrait détouré de l'élémentaire, servi au HUD comme aux autels.
+   Un dessin du personnage lui-même se reconnaît instantanément — bien mieux
+   qu'un pictogramme générique de flamme ou de rocher, qui obligeait à traduire
+   mentalement « symbole → type d'esprit à chasser ». */
+const ELEMENTS = [
+  { v: 3, key: 'fire',  nom: 'Feu',     css: '#ff6a2a', col: 0xff6a2a, sym: '🔥', img: 'assets/spirits/fire.webp' },
+  { v: 4, key: 'water', nom: 'Eau',     css: '#3fb6ff', col: 0x3fb6ff, sym: '💧', img: 'assets/spirits/water.webp' },
+  { v: 5, key: 'air',   nom: 'Air',     css: '#cfe9ff', col: 0xcfe9ff, sym: '🌪', img: 'assets/spirits/air.webp' },
+  { v: 6, key: 'light', nom: 'Lumière', css: '#ffd94a', col: 0xffd94a, sym: '☀', img: 'assets/spirits/light.webp' },
+  { v: 7, key: 'earth', nom: 'Terre',   css: '#7fc25a', col: 0x7fc25a, sym: '⛰', img: 'assets/spirits/earth.webp' },
+  { v: 8, key: 'ether', nom: 'Éther',   css: '#b06bff', col: 0xb06bff, sym: '✦', img: 'assets/spirits/ether.webp' },
+];
+
+/* Les vignettes servent aussi de texture aux étiquettes d'autel, dessinées sur
+   canvas : on les précharge une fois pour toutes. */
+const elemImages = {};
+for (const e of ELEMENTS) {
+  const im = new Image();
+  im.onload = () => { elemImages[e.v] = im; };
+  im.src = e.img;
+}
+/* Trois paires franches : ce sont elles qui rendent la rupture lisible. */
+const ELEM_OPPOSITE = { 3: 4, 4: 3, 5: 7, 7: 5, 6: 8, 8: 6 };
+const elemOf = (v) => ELEMENTS[v - ELEM_FIRST];
+
+const ALTAR_COUNT = 10;      // assez pour couvrir la vallée, assez peu pour se croiser
+/* ---- Coût d'un sanctuaire : croissant ----
+   Un coût fixe et élevé rendait chaque autel binaire — soit on rassemblait dix
+   esprits du bon type, soit on renonçait. Aucun rebondissement possible.
+
+   Ici le premier éveil ne coûte QU'UN esprit : la carte s'allume vite et la
+   partie démarre sur les chapeaux de roue. Mais chaque conquête renchérit la
+   suivante d'une unité. Un autel âprement disputé devient donc une forteresse,
+   pendant qu'un autel oublié reste à portée du premier venu — la carte garde la
+   mémoire de ce qui s'y est joué, et le prix d'une reprise se lit sur place. */
+const ALTAR_NEED_START = 1;
+const ALTAR_NEED_STEP = 1;
+const ALTAR_R = 3.4;         // rayon de livraison
+const ALTAR_H = 2.8;         // hauteur du sanctuaire une fois mis à l'échelle
+const ALTAR_MIN_GAP = 22;    // écart minimal entre deux autels
+const ALTAR_FEED_RATE = 3.5; // esprits livrés par seconde
+const ALTAR_PAINT_PERIOD = 0.22;
+const ALTAR_PAINT_R = 13;    // portée finale de la peinture d'un sanctuaire
+const ALTAR_GROW_T = 45;     // temps pour atteindre cette portée
+
+const altars = [];
+
+/* ---- Construction visuelle ----
+   Socle procédural plutôt que le .glb de sanctuaire : celui-ci pèse 74 k
+   triangles, soit 740 k pour dix autels. Un piédestal cel-shadé coûte mille
+   fois moins et se lit mieux à petite taille. */
+/* Le modèle de sanctuaire du jeu, décimé à ~8 k triangles : à dix exemplaires,
+   la version lo/ (74 k) en coûterait 741 k. Chargé une fois, cloné ensuite. */
+let altarModel = null;
+gltfLoader.load('assets/models/sanctuary_altar.glb', (gltf) => {
+  mobileDownscaleTextures(gltf);
+  const g = gltf.scene;
+  g.traverse((c) => {
+    if (!c.isMesh) return;
+    c.castShadow = true;
+    c.material = toonMaterial({ map: c.material && c.material.map });
+  });
+  const box = new THREE.Box3().setFromObject(g);
+  const h = Math.max(0.001, box.max.y - box.min.y);
+  g.scale.multiplyScalar(ALTAR_H / h);
+  g.updateMatrixWorld(true);
+  const box2 = new THREE.Box3().setFromObject(g);
+  g.position.y -= box2.min.y;
+  const wrap = new THREE.Group();
+  wrap.add(g);
+  attachCartoonOutline(g, 0.02);
+  altarModel = wrap;
+  /* Les autels déjà posés (partie en cours) échangent leur socle de repli. */
+  for (const a of altars) swapAltarBody(a);
+}, undefined, (err) => console.warn('[autel] chargement échoué', err));
+
+/** Remplace le socle provisoire d'un autel par le vrai modèle, une fois chargé. */
+function swapAltarBody(a) {
+  if (!altarModel || !a || a.grp.userData.hasModel) return;
+  const old = a.grp.userData.body;
+  if (old) a.grp.remove(old);
+  const body = altarModel.clone(true);
+  a.grp.add(body);
+  a.grp.userData.body = body;
+  a.grp.userData.hasModel = true;
+}
+
+function makeAltarMesh() {
+  const g = new THREE.Group();
+
+  /* Socle de repli : sert seulement tant que le .glb n'est pas arrivé. */
+  const body = altarModel ? altarModel.clone(true) : makeFallbackPedestal();
+  g.add(body);
+
+  /* Anneau flottant teinté de l'élément demandé : c'est lui qui porte
+     l'information de loin, avant même que le compteur soit lisible. */
+  const ring = new THREE.Mesh(
+    new THREE.TorusGeometry(0.9, 0.11, 8, 20).rotateX(Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }),
+  );
+  ring.position.y = ALTAR_H + 0.55;
+  g.add(ring);
+
+  /* Disque au sol : marque la zone de livraison. */
+  const pad = new THREE.Mesh(
+    new THREE.CircleGeometry(ALTAR_R, 28).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.14,
+      depthWrite: false, toneMapped: false,
+    }),
+  );
+  pad.position.y = 0.06;
+  pad.renderOrder = 2;
+  g.add(pad);
+
+  g.userData = { ring, pad, body, hasModel: !!altarModel };
+  return g;
+}
+
+function makeFallbackPedestal() {
+  const grp = new THREE.Group();
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.5, 1.85, 0.45, 12),
+    toonMaterial({ color: 0x8e93a8 }),
+  );
+  base.position.y = 0.22;
+  grp.add(base);
+  const col = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.55, 0.75, 1.15, 10),
+    toonMaterial({ color: 0xb9bfd4 }),
+  );
+  col.position.y = 1.02;
+  grp.add(col);
+  return grp;
+}
+
+/* Étiquette : « 10 ✦ » sur un panneau, redessinée seulement quand le compte
+   change — un canvas par frame et par autel coûterait bien trop cher. */
+function makeAltarLabel() {
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 128;
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthWrite: false, depthTest: false, toneMapped: false,
+  }));
+  spr.scale.set(3.4, 1.7, 1);
+  spr.renderOrder = 10;
+  spr.userData = { cv, tex, sig: '' };
+  return spr;
+}
+
+/* L'étiquette montre l'ESPRIT demandé puis sa quantité — pas un pictogramme
+   d'élément. Le joueur compare directement ce qu'il voit sur l'autel à ce qu'il
+   voit dans sa barre de cortège, sans traduction mentale. */
+function drawAltarLabel(spr, variant, reste, css, sub) {
+  const { cv, tex } = spr.userData;
+  const g = cv.getContext('2d');
+  g.clearRect(0, 0, cv.width, cv.height);
+
+  const w = cv.width - 14, h = 84, x = 7, y = 6, r = 24;
+  g.fillStyle = 'rgba(8, 12, 26, 0.84)';
+  g.strokeStyle = css;
+  g.lineWidth = 5;
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+  g.fill();
+  g.stroke();
+
+  /* Portrait à gauche, chiffre à droite. Si l'image n'est pas encore chargée on
+     retombe sur le symbole : l'autel reste lisible dès la première frame. */
+  const im = elemImages[variant];
+  const pad = 10, ph = h - pad * 2;
+  if (im) {
+    g.drawImage(im, x + pad, y + pad, ph, ph);
+  } else {
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.font = 'bold 52px system-ui, sans-serif';
+    g.fillText(elemOf(variant).sym, x + pad + ph / 2, y + h / 2);
+  }
+
+  g.textAlign = 'left';
+  g.textBaseline = 'middle';
+  g.fillStyle = css;
+  g.font = 'bold 54px Cinzel, Georgia, serif';
+  g.fillText('×' + reste, x + pad + ph + 8, y + h / 2 + 2);
+
+  if (sub) {
+    g.textAlign = 'center';
+    g.font = 'bold 21px Cinzel, Georgia, serif';
+    g.fillStyle = 'rgba(230, 240, 255, 0.92)';
+    g.fillText(sub, cv.width / 2, y + h + 18);
+  }
+  tex.needsUpdate = true;
+}
+
+/* Statue du maître des lieux : le Leader qui contrôle le sanctuaire, taillé
+   dans la pierre et bien plus grand que nature. Elle remplace l'ancien gardien
+   élémentaire — la question qu'un joueur se pose de loin est « à qui est ce
+   sanctuaire ? », pas « quel élément le garde ? » (l'anneau et l'étiquette le
+   disent déjà). */
+const STATUE_H = 5.2;                 // hauteur visée, socle non compris
+const STONE_COL = 0x9fa4ac;           // gris pierre
+const STONE_DARK = 0x7c818a;
+
+function makeOwnerStatue(f) {
+  const g = new THREE.Group();
+
+  /* Socle : la statue doit se lire comme un monument, pas comme un Leader
+     géant posé là. */
+  const plinth = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.35, 1.6, 0.7, 12),
+    toonMaterial({ color: STONE_DARK }),
+  );
+  plinth.position.y = 0.35;
+  plinth.castShadow = true;
+  g.add(plinth);
+
+  const asset = leaderAssets[(f && f.leaderKey) || 'monk'] || leaderAssets.monk;
+
+  if (asset && asset.model) {
+    const inner = SkeletonUtils.clone(asset.model);
+    inner.traverse((c) => {
+      if (!c.isMesh && !c.isSkinnedMesh) return;
+      /* Pierre pleine : ni texture ni émissif, sinon on retombe sur un
+         personnage colorié plutôt que sur une sculpture. */
+      c.material = toonMaterial({ color: STONE_COL });
+      c.castShadow = true;
+      c.frustumCulled = false;
+    });
+
+    /* Pose figée : on applique la première frame d'une démarche puis on jette
+       le mixer. Sans ça le modèle reste en pose de bind (bras en croix). */
+    let skinned = null;
+    inner.traverse((c) => { if (c.isSkinnedMesh) skinned = c; });
+    if (asset.clips && asset.clips.length) {
+      const clip = THREE.AnimationClip.findByName(asset.clips, MONK_GAITS[0].name)
+        || asset.clips[0];
+      if (clip) {
+        const mixer = new THREE.AnimationMixer(inner);
+        const action = mixer.clipAction(clip);
+        action.play();
+        mixer.update(0);
+      }
+    }
+
+    /* Mise à l'échelle sur la pose rendue (le squelette Meshy est en
+       centimètres : mesurer la géométrie brute donnerait un facteur ~100 faux). */
+    const worldBox = () => {
+      inner.updateMatrixWorld(true);
+      if (!skinned) return new THREE.Box3().setFromObject(inner);
+      if (skinned.skeleton) skinned.skeleton.update();
+      skinned.computeBoundingBox();
+      return skinned.boundingBox.clone().applyMatrix4(skinned.matrixWorld);
+    };
+    for (let it = 0; it < 2; it++) {
+      const bb = worldBox();
+      inner.scale.multiplyScalar(STATUE_H / Math.max(0.001, bb.max.y - bb.min.y));
+    }
+    inner.position.y -= worldBox().min.y;
+    inner.position.y += 0.7;                       // pieds sur le socle
+    g.add(inner);
+    attachCartoonOutline(inner, 0.024);
+  } else {
+    /* Repli tant que le .glb n'est pas chargé : un monolithe de pierre. */
+    const m = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.75, 1.0, STATUE_H, 8),
+      toonMaterial({ color: STONE_COL }),
+    );
+    m.position.y = 0.7 + STATUE_H / 2;
+    m.castShadow = true;
+    g.add(m);
+  }
+
+  return g;
+}
+
+/* ---- Cycle de vie ---- */
+function clearAltars() {
+  for (const a of altars) {
+    scene.remove(a.grp);
+    if (a.label) scene.remove(a.label);
+    if (a.statue) scene.remove(a.statue);
+  }
+  altars.length = 0;
+}
+
+/** Sème les autels sur l'île, espacés, avec des éléments variés. */
+function placeAltars() {
+  clearAltars();
+  /* On mélange les six éléments et on les distribue à tour de rôle : deux
+     autels voisins du même type rendraient une région entière monochrome. */
+  const bag = [];
+  for (let k = 0; k < Math.ceil(ALTAR_COUNT / 6) + 1; k++) {
+    const shuffled = ELEMENTS.map((e) => e.v);
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    bag.push(...shuffled);
+  }
+
+  let guard = 0;
+  while (altars.length < ALTAR_COUNT && guard++ < 400) {
+    const p = islandRandomPoint(island, 7, Infinity);
+    if (!p) break;
+    const pz = p.z ?? p.y;
+    let ok = true;
+    for (const a of altars) {
+      if (Math.hypot(a.x - p.x, a.z - pz) < ALTAR_MIN_GAP) { ok = false; break; }
+    }
+    /* Pas d'autel dans une cour de départ : imprenable dès la première seconde. */
+    if (ok) {
+      for (const t of teams) {
+        if (Math.hypot(t.baseX - p.x, t.baseZ - pz) < t.wallR + 8) { ok = false; break; }
+      }
+    }
+    if (!ok) continue;
+    spawnAltar(p.x, pz, bag[altars.length]);
+  }
+  /* Si l'espacement est intenable sur une petite île, on relâche la contrainte. */
+  if (altars.length < 4) {
+    for (let k = altars.length; k < 6; k++) {
+      const p = islandRandomPoint(island, 6, Infinity);
+      if (p) spawnAltar(p.x, p.z ?? p.y, bag[k]);
+    }
+  }
+}
+
+function spawnAltar(x, z, variant) {
+  const grp = makeAltarMesh();
+  grp.position.set(x, 0, z);
+  scene.add(grp);
+  const label = makeAltarLabel();
+  label.position.set(x, ALTAR_H + 2.0, z);
+  scene.add(label);
+
+  altars.push({
+    x, z,
+    variant,             // élément réclamé actuellement
+    need: ALTAR_NEED_START,
+    filled: 0,
+    owner: -1,           // -1 = dormant
+    grp, label,
+    statue: null,        // statue de pierre du Leader qui contrôle le lieu
+    feedAcc: 0,
+    paintAcc: 0,
+    age: 0,
+    activeT: 0,
+  });
+  refreshAltarVisual(altars[altars.length - 1]);
+}
+
+function refreshAltarVisual(a) {
+  const e = elemOf(a.variant);
+  a.grp.userData.ring.material.color.setHex(e.col);
+  const owner = a.owner >= 0 ? factions[a.owner] : null;
+  a.grp.userData.pad.material.color.set(owner ? owner.css : e.css);
+  a.grp.userData.pad.material.opacity = owner ? 0.22 : 0.14;
+
+  /* La signature inclut la présence de l'image : l'étiquette doit se redessiner
+     une fois la vignette chargée, sinon elle garde son symbole de repli. */
+  const sig = `${a.variant}:${a.filled}:${a.owner}:${elemImages[a.variant] ? 1 : 0}`;
+  if (a.label.userData.sig === sig) return;
+  a.label.userData.sig = sig;
+  drawAltarLabel(
+    a.label,
+    a.variant,
+    Math.max(0, a.need - a.filled),
+    e.css,
+    a.owner >= 0 ? `briser · ${e.nom}` : e.nom,
+  );
+}
+
+/** Consomme les esprits du bon élément dans le cortège d'un culte présent. */
+function feedAltar(a, dt) {
+  for (const f of factions) {
+    if (!f || !f.alive || !f.leader) continue;
+    if (f.i === a.owner) continue;           // on ne brise pas son propre autel
+    if (Math.hypot(f.leader.x - a.x, f.leader.z - a.z) > ALTAR_R) continue;
+
+    a.feedAcc += dt * ALTAR_FEED_RATE;
+    let n = a.feedAcc | 0;
+    if (n <= 0) continue;
+    a.feedAcc -= n;
+
+    while (n-- > 0 && a.filled < a.need) {
+      const spirit = agents.find((s) => s && !s.dead
+        && (s.followerOf ?? -1) === f.i && variantOf(s.id) === a.variant);
+      if (!spirit) break;
+      consumeFollower(spirit, f);
+      a.filled++;
+      spawnShock(a.x, a.z, elemOf(a.variant).col, 2.2, 0.3);
+      if (f.i === 0) soundEngine.playSFX('convert', { volume: 0.5 });
+    }
+    if (a.filled >= a.need) activateAltar(a, f);
+    refreshAltarVisual(a);
+    return;   // un seul culte alimente par frame
+  }
+}
+
+/** Retire un suivant du cortège : il est absorbé par l'autel. */
+function consumeFollower(s, f) {
+  releaseFollowerSlot(s);
+  s.dead = true;
+  s.followerOf = -1;
+  s.discipleOf = -1;
+  hideAgent(s.id);
+  freeAgentIds.push(s.id);
+  f.count = Math.max(0, (f.count || 0) - 1);
+}
+
+function activateAltar(a, f) {
+  const wasOwner = a.owner;
+  a.owner = f.i;
+  a.filled = 0;
+  /* Chaque prise renchérit la suivante — pour tout le monde, y compris celui
+     qui vient de prendre l'autel. L'escalade appartient au lieu, pas au culte. */
+  a.need += ALTAR_NEED_STEP;
+  a.activeT = 0;
+  /* Le gardien est de l'élément qui vient d'être livré ; l'autel réclame
+     désormais son opposé pour être brisé à son tour. */
+  if (a.statue) scene.remove(a.statue);
+  a.statue = makeOwnerStatue(f);
+  a.statue.position.set(a.x, ALTAR_H * 0.42, a.z);
+  /* Orientation stable, tirée de la position : deux sanctuaires voisins ne
+     regardent pas exactement dans la même direction. */
+  a.statue.rotation.y = Math.atan2(a.x, a.z) + Math.PI;
+  scene.add(a.statue);
+  setCharLayer(a.statue);
+  a.variant = ELEM_OPPOSITE[a.variant];
+
+  spawnShock(a.x, a.z, f.color, 9, 1.2);
+  if (f.i === 0) {
+    banner(wasOwner >= 0 ? '🏛 Sanctuaire repris !' : '🏛 Sanctuaire éveillé !');
+    sfxRankUp();
+  } else if (wasOwner === 0) {
+    banner('⚠ Un rival vous prend un sanctuaire !');
+  }
+  refreshAltarVisual(a);
+}
+
+function updateAltars(dt) {
+  for (const a of altars) {
+    a.age += dt;
+    a.grp.userData.ring.rotation.z += dt * 0.8;
+    a.grp.userData.ring.position.y = ALTAR_H + 0.55 + Math.sin(a.age * 1.6) * 0.09;
+    a.label.position.y = ALTAR_H + 2.0 + Math.sin(a.age * 1.3) * 0.12;
+
+    /* Bon marché : la signature coupe court dès que rien n a changé. Nécessaire
+       pour que l étiquette se redessine quand la vignette finit de charger. */
+    refreshAltarVisual(a);
+    feedAltar(a, dt);
+
+    if (a.owner < 0) continue;
+    const f = factions[a.owner];
+    if (!f || !f.alive) continue;
+
+    a.activeT += dt;
+    /* La statue ne bouge pas : c'est de la pierre. */
+
+    /* Peinture : le sanctuaire tache autour de lui, sur un disque qui s'élargit
+       avec le temps. On sème des éclaboussures au hasard plutôt que de peindre
+       un cercle net — la frontière reste organique, comme le reste du jeu. */
+    a.paintAcc += dt;
+    if (a.paintAcc >= ALTAR_PAINT_PERIOD) {
+      a.paintAcc = 0;
+      const grow = Math.min(1, a.activeT / ALTAR_GROW_T);
+      const r = ALTAR_PAINT_R * (0.28 + 0.72 * grow);
+      const ang = Math.random() * Math.PI * 2;
+      const d = Math.sqrt(Math.random()) * r;
+      stampPaintAt(f, a.x + Math.cos(ang) * d, a.z + Math.sin(ang) * d, 1.15);
+    }
+  }
 }
 
 function updateBurrowEvents(dt) {
@@ -1856,8 +2917,18 @@ function releaseFollowerSlot(a) {
 /* Conversions trop tôt / pool plein / Leader sans VAT : fallback moine + retry chaque frame. */
 const _pendingFollowers = []; // { a, f }
 
-function followerMeshFor(f) {
-  const want = (f && f.leaderKey) || 'monk';
+/* Les six meshes de suivants sont indexés par clé de Leader, mais chacun porte
+   en réalité l'élémentaire de ce Leader (voir LEADER_ELEMENT). On peut donc les
+   adresser par ÉLÉMENT, ce qui permet à un esprit capturé de garder sa propre
+   forme au lieu de prendre celle du culte qui l'a pris. */
+const ELEM_TO_LEADER = { 3: 'amazon', 4: 'chief', 5: 'alien', 6: 'monk', 7: 'nomad', 8: 'sorcerer' };
+
+/** Mesh correspondant à l'élément PROPRE de l'esprit. Un esprit capturé doit
+    rester reconnaissable : c'est son type, pas son ravisseur, qui décide de son
+    apparence — sans quoi on ne sait plus ce qu'on transporte vers un autel. */
+function followerMeshFor(f, a) {
+  const byElem = a ? ELEM_TO_LEADER[variantOf(a.id)] : null;
+  const want = byElem || (f && f.leaderKey) || 'monk';
   return followerMeshes[want] || followerMeshes.monk || null;
 }
 
@@ -1866,7 +2937,7 @@ function assignFollowerSlot(a, f) {
     hideAgent(a.id);
     return true;
   }
-  const fm = followerMeshFor(f);
+  const fm = followerMeshFor(f, a);
   if (!fm || !fm.freeSlots.length) {
     a._followerSlot = null;
     a._followerKey = null;
@@ -2041,86 +3112,11 @@ function inOwnBase(f) { return _inOwnBase(f, teams); }
 
 /* Dépôt : dans sa cour, les croyants portés s'écoulent vers l'autel en un
    filet continu d'âmes. Chaque croyant déposé est définitivement acquis. */
-function updateDeposits(dt) {
-  for (const f of factions) {
-    if (!f.alive || f.count <= 0 || !inOwnBase(f)) { f.depositAcc = 0; continue; }
-    const t = teams[f.team];
-    f.depositAcc = (f.depositAcc || 0) + dt * DEPOSIT_RATE;
-    let n = f.depositAcc | 0;
-    if (n <= 0) continue;
-    f.depositAcc -= n;
-    n = Math.min(n, f.count);
-    f.count -= n;
-    f.deposited += n;
-    // filet d'âmes vers l'autel + tic sonore qui monte
-    for (let k = 0; k < Math.min(3, n); k++) {
-      spawnSoulBurst(
-        t.baseX + (Math.random() - 0.5) * 1.6,
-        t.baseZ + (Math.random() - 0.5) * 1.6, f);
-    }
-    if (f.i === 0) {
-      tone(520 + (f.deposited % 40) * 6, 0.05, 'triangle', 0.03);
-      if (hudT > 0.1) hudT = 0.05;   // le compteur suit le filet sans attendre
-    }
-    // jalons : la course se lit sans fixer le HUD
-    const before = f.deposited - n;
-    for (const frac of [0.5, 0.75, 0.9]) {
-      const mark = Math.floor(GOAL * frac);
-      if (before < mark && f.deposited >= mark && f.deposited < GOAL) {
-        banner(f.i === 0
-          ? `🏛 ${f.deposited}/${GOAL} esprits déposés !`
-          : `⚠ Le Culte ${f.cult.name} atteint ${f.deposited}/${GOAL} !`);
-      }
-    }
-    if (f.deposited >= GOAL) {
-      banner(f.i === 0
-        ? `🏆 Objectif atteint — ${GOAL} esprits à l'abri !`
-        : `💀 Le Culte ${f.cult.name} a rempli son objectif…`);
-      endGame(f.i === 0);
-      return;
-    }
-  }
-}
-
-/* Siphon (GDD §2.1.B) : chevauchement des cercles d'influence → le plus gros
-   convertit les portés du plus petit, à un rythme proportionnel au ratio des
-   tailles. Le petit peut toujours se dégager : érosion, jamais exécution. */
-function updateSiphon(dt) {
-  for (let i = 0; i < factions.length; i++) {
-    const A = factions[i];
-    if (!A.alive) continue;
-    for (let j = i + 1; j < factions.length; j++) {
-      const B = factions[j];
-      if (!B.alive) continue;
-      const d = Math.hypot(A.leader.x - B.leader.x, A.leader.z - B.leader.z);
-      if (d > influenceRadius(A.count, A.i) + influenceRadius(B.count, B.i)) continue;
-      const big = A.count > B.count ? A : B;
-      const small = big === A ? B : A;
-      // à l'abri dans sa cour, on ne se fait rien voler
-      if (small.count <= 0 || inOwnBase(small)) continue;
-      const ratio = (big.count + 4) / (small.count + 4);
-      if (ratio < SIPHON_RATIO_MIN) continue;   // tailles trop proches : personne ne domine
-      const rate = SIPHON_BASE * Math.min(SIPHON_RATIO_CAP, ratio) * 0.5;
-      big.siphonAcc = (big.siphonAcc || 0) + dt * rate;
-      let n = big.siphonAcc | 0;
-      if (n <= 0) continue;
-      big.siphonAcc -= n;
-      n = Math.min(n, small.count);
-      small.count -= n;
-      big.count += n;
-      big.everGrew = true;
-      // âmes arrachées au front, à la couleur du plus fort
-      const mx = (A.leader.x + B.leader.x) / 2, mz = (A.leader.z + B.leader.z) / 2;
-      spawnSoulBurst(mx, mz, big);
-      if (small.i === 0) {
-        shake = Math.max(shake, 0.18);
-        if (Math.random() < 0.3) tone(200, 0.08, 'sawtooth', 0.04);
-      } else if (big.i === 0 && Math.random() < 0.3) {
-        tone(620, 0.06, 'triangle', 0.03);
-      }
-    }
-  }
-}
+/* Le dépôt en base a disparu avec la règle des 60 : le territoire vient
+   désormais des sanctuaires. La fonction est neutralisée plutôt que supprimée
+   d'un bloc — elle dévorait le cortège du joueur sans plus rien lui rapporter,
+   ce qui punissait le simple fait de rentrer chez soi. */
+function updateDeposits() {}
 
 
 /* ============================== Ondes de choc au sol ============================== */
@@ -2476,10 +3472,11 @@ function updateShrines(dt) {
    délai. C'est la source de soin la plus rapide, donc la plus disputée : ils
    créent des points de convergence, et courir en chercher un à 3 cristaux de
    vie est exactement le pari que la partie doit provoquer. */
-/* ============================== Autels de dépôt ==============================
+/* ========================= Gemme de dépôt des cours =========================
    La gemme au centre de chaque cour flotte en permanence et s'anime quand son
-   culte est en train de déposer : le point de rendu se lit de loin. */
-function updateAltars(dt) {
+   culte est en train de déposer. À ne pas confondre avec les Sanctuaires, qui
+   sont les autels neutres disséminés sur la vallée. */
+function updateBaseGems(dt) {
   for (const t of teams) {
     const r = t.relicMesh;
     if (!r) continue;
@@ -2961,14 +3958,11 @@ const _leaderTickCtx = {
   leaderSpeed: null, aiThink: null,
   steerOnIsland, resolveIsland, isSolid, nearestSolidPoint,
   resolveBaseWalls, unstickIfInWall,
-  stampPaint, stampIcon,
   skillMods: null,
 };
-const _leaderTickState = { factions: null, island: null, judgeR: 999 };
+const _leaderTickState = { factions: null, island: null, judgeR: 999, elapsed: 0 };
 const _leaderTickInput = { x: 0, z: 0, keys: null };
 
-/* Contexte réutilisé pour les aiTrigger de pouvoirs (évite une alloc/frame). */
-const _botPowerCtx = { agents: null, factions: null };
 
 /* Contexte partagé de la boucle crowd — set une fois, mis à jour par référence. */
 const _crowdTickState = { agents: null, factions: null, island: null, elapsed: 0, bombs: null };
@@ -3076,48 +4070,31 @@ function sfxRankUp() {}
 /* ============================== HUD ============================== */
 const $ = (id) => document.getElementById(id);
 const lbEl = null, rankEl = $('rank-val'), bannerEl = $('banner');
-const rallyEl = $('rally'), streakEl = $('streak');
+const streakEl = $('streak');
 const duelEl = $('duel');
-const paintOrbEl = $('hud-paint-orb');
-const paintOrbLiquidEl = $('paint-orb-liquid');
-const paintOrbPctEl = $('paint-orb-pct');
 const pctValEl = $('pct-val');
+const timeValEl = $('time-val');
+const netBtnEl = $('net-btn');
+const netCdEl = netBtnEl && netBtnEl.querySelector('.net-cd');
 const boostBtn = $('boost-btn'), boostOverlay = $('boost-cooldown-overlay');
-/* 2 slots de pouvoirs : refs indexées pour boucler proprement dans updatePowerUI. */
-const powerBtns = [$('power-btn'), $('power-btn-2')];
-const powerOverlays = [$('power-cooldown-overlay'), $('power-cooldown-overlay-2')];
-const powerIcons = powerBtns.map((b) => b?.querySelector('.ico'));
-const powerLbls = powerBtns.map((b) => b?.querySelector('.lbl'));
 /* Boule de verre : niveau de peinture. N'écrit dans le DOM que si le % change. */
 let fervorPct = -1;
-function updateFuelUI() {
-  const me = factions[0];
-  if (!me || !paintOrbLiquidEl) return;
-  const ratio = Math.min(1, Math.max(0, (me.fuel || 0) / FUEL_MAX));
-  const pct = Math.round(ratio * 100);
-  if (me.css) paintOrbLiquidEl.style.setProperty('--paint', me.css);
-  paintOrbEl?.classList.toggle('low', ratio < 0.25);
-  if (pct !== fervorPct) {
-    fervorPct = pct;
-    paintOrbLiquidEl.style.setProperty('--fill', pct + '%');
-    if (paintOrbPctEl) paintOrbPctEl.textContent = String(pct);
-  }
-}
 
-/* ---- Course aux esprits (bord gauche) ----
-   Une jauge 0 → GOAL le long de laquelle chaque culte est posé à sa hauteur de
-   dépôt. Le rang se lit à la position, le chiffre dans le cadre le confirme.
+/* ---- Course au territoire (bord gauche) ----
+   Une jauge 0 → WIN_PCT le long de laquelle chaque culte est posé à sa part de
+   vallée. Le rang se lit à la position, le chiffre dans le cadre le confirme.
    Le culte du joueur passe toujours devant les autres. */
 const raceEl = $('hud-race');
 const raceGoalEl = raceEl && raceEl.querySelector('.race-goal');
 const raceMarks = new Map();   // index de faction → élément, réutilisé entre frames
 let raceSig = '';
 
-/* Deux cultes au coude-à-coude se recouvrent : au-delà d'un écart de moins de
-   RACE_MIN_GAP, on les décale latéralement en alternance plutôt que de mentir
-   sur leur hauteur. */
-const RACE_MIN_GAP = 0.075;
-const RACE_DX = 17;
+/* Chaque cadre est posé à sa hauteur de progression réelle, sans correction :
+   à égalité ils se superposent, et c'est voulu. En début de partie les trois
+   cultes sont à zéro, donc empilés au pied de la jauge — seul celui du joueur
+   est apparent, les autres se dévoilent au fur et à mesure qu'ils décollent.
+   L'ordre de profondeur suit le rang : le meneur devant les suiveurs, le joueur
+   devant tout le monde. */
 
 function updateRaceUI() {
   if (!raceEl) return;
@@ -3129,22 +4106,21 @@ function updateRaceUI() {
       css: f.css || '#7cf',
       name: (f.cult && f.cult.name) || 'Culte',
       alive: !!f.alive,
-      done: f.deposited || 0,
-      p: Math.max(0, Math.min(1, (f.deposited || 0) / Math.max(1, GOAL))),
+      done: paintPct(f),
+      p: Math.max(0, Math.min(1, paintPct(f) / WIN_PCT)),
     }))
     .sort((a, b) => b.done - a.done || a.i - b.i);
 
-  const sig = rows.map((r) => `${r.i}:${r.done}:${r.alive ? 1 : 0}`).join('|') + '|' + GOAL;
+  const sig = rows.map((r) => `${r.i}:${r.done.toFixed(1)}:${r.alive ? 1 : 0}`).join('|');
   if (sig === raceSig) return;
   raceSig = sig;
 
-  if (raceGoalEl) raceGoalEl.textContent = `🏛 ${GOAL}`;
+  if (raceGoalEl) raceGoalEl.textContent = `🏁 ${WIN_PCT}%`;
 
   for (const [i, el] of raceMarks) {
     if (!factions.some((f) => f.i === i)) { el.remove(); raceMarks.delete(i); }
   }
 
-  let side = 1;
   for (let n = 0; n < rows.length; n++) {
     const r = rows[n];
     let el = raceMarks.get(r.i);
@@ -3161,26 +4137,25 @@ function updateRaceUI() {
       raceMarks.set(r.i, el);
     }
 
-    /* Décalage seulement quand le voisin du dessus est trop proche ; sinon le
-       cadre reprend sa place sur l'axe de la jauge. */
-    const prev = rows[n - 1];
-    let dx = 0;
-    if (prev && Math.abs(prev.p - r.p) < RACE_MIN_GAP) { side = -side; dx = side * RACE_DX; }
-    else side = 1;
-    el.style.setProperty('--dx', dx + 'px');
-
     const src = LEADER_AVATARS[r.key] || LEADER_AVATARS.monk;
     const img = el.querySelector('img');
     if (!img.getAttribute('src') || !img.getAttribute('src').endsWith(src)) img.src = src;
 
     el.style.setProperty('--p', String(r.p));
     el.style.setProperty('--race-ring', r.css);
+    /* Le meneur passe devant les suiveurs ; le joueur garde son z-index CSS. */
+    el.style.zIndex = r.i === 0 ? '' : String(2 + (rows.length - n));
     el.classList.toggle('me', r.i === 0);
     el.classList.toggle('lead', n === 0 && r.done > 0);
     el.classList.toggle('dead', !r.alive);
     el.querySelector('.race-rank').textContent = String(n + 1);
-    el.title = `${r.i === 0 ? 'Votre culte' : 'Culte ' + r.name} — ${n + 1}ᵉ, ${r.done}/${GOAL} esprits`;
+    el.title = `${r.i === 0 ? 'Votre culte' : 'Culte ' + r.name} — ${n + 1}ᵉ, ${r.done.toFixed(1)} % de la vallée`;
   }
+
+  /* Le cadre du joueur repasse en dernier enfant : il gagne alors la pile même
+     si un rival partage son z-index, quel que soit l'ordre de création. */
+  const mine = raceMarks.get(0);
+  if (mine && mine !== raceEl.lastElementChild) raceEl.appendChild(mine);
 }
 
 /* Cadres disciples (bord droit) : 1 cadre = 1 place de disciple du joueur.
@@ -3297,6 +4272,9 @@ const fogBase = new THREE.Color(0x9fdcff);
 function captureDayBase() { if (scene.fog) fogBase.copy(scene.fog.color); }
 const _dayCol = new THREE.Color();
 let nightK = 0;   // 0 = plein jour, 1 = obscurité maximale
+/* Heure figée de la vallée : plein jour légèrement décalé vers l'après-midi. */
+const DAY_FIXED = 0.42;
+
 function applyDayCycle(t) {
   t = Math.min(1, Math.max(0, t));
   let a = DAY_KEYS[0], b = DAY_KEYS[DAY_KEYS.length - 1];
@@ -3397,7 +4375,14 @@ function updateHUD() {
   const depositValEl = $('deposit-val');
   if (depositValEl) {
     const me = factions[0];
-    depositValEl.textContent = `${me ? (me.deposited || 0) : 0}/${GOAL}`;
+    depositValEl.textContent = `${paintPct(me).toFixed(0)}/${WIN_PCT}%`;
+  }
+  /* Chrono : la seconde sortie de partie doit se lire en permanence. */
+  if (timeValEl) {
+    const left = Math.max(0, MATCH_DUR - elapsed);
+    const m = Math.floor(left / 60), sec = Math.floor(left % 60);
+    timeValEl.textContent = `${m}:${String(sec).padStart(2, '0')}`;
+    timeValEl.classList.toggle('urgent', left < 30);
   }
 
   if (rank < lastRank) { sfxRankUp(); rankEl.classList.add('pulse'); setTimeout(() => rankEl.classList.remove('pulse'), 220); }
@@ -3556,16 +4541,18 @@ addEventListener('keydown', e => {
     e.preventDefault();
     if (!keys.Space && state === 'play') doBoost(factions[0]);
   }
-  /* Touche E → pouvoir slot 1, touche F → pouvoir slot 2 (mobile = boutons). */
-  if (e.code === 'KeyE' && !keys.KeyE && state === 'play') {
-    activatePower(factions[0], 0);
-  }
-  if (e.code === 'KeyF' && !keys.KeyF && state === 'play') {
-    activatePower(factions[0], 1);
+  /* Touches déjà prises : Espace (boost), E et F (pouvoirs), WASD et flèches
+     (déplacement, voir playerDir). Le filet prend KeyQ — code physique, donc la
+     touche voisine du déplacement aussi bien en QWERTY qu'en AZERTY. */
+  if (e.code === 'KeyQ' && !keys.KeyQ && state === 'play') {
+    startAspir(factions[0]);
   }
   keys[e.code] = true;
 });
-addEventListener('keyup', e => { keys[e.code] = false; });
+addEventListener('keyup', (e) => {
+  keys[e.code] = false;
+  if (e.code === 'KeyQ') stopAspir(factions[0]);
+});
 
 const joyEl = $('joy'), stickEl = $('stick');
 let joyId = null, joyOx = 0, joyOy = 0;
@@ -3608,14 +4595,32 @@ addEventListener('pointerup', onUp);
 addEventListener('pointercancel', onUp);
 
 boostBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); doBoost(factions[0]); });
-powerBtns.forEach((btn, slot) => {
-  if (!btn) return;
-  btn.addEventListener('pointerdown', (e) => {
+
+/* Coup de filet — pointerdown et non click : sur tactile, attendre le click
+   ajoute ~120 ms de latence sur l'action principale du jeu. */
+/* Aspiration : on MAINTIENT. pointerdown/up plutôt que click — sur tactile,
+   attendre le click coûterait ~120 ms sur l'action centrale du jeu, et un
+   maintien ne produit de toute façon jamais de click. */
+if (netBtnEl) {
+  const press = (e) => {
     e.stopPropagation();
-    activatePower(factions[0], slot);
-  });
-});
-if (rallyEl) rallyEl.style.display = 'none';   // bouton « Piège » retiré
+    e.preventDefault();
+    if (state !== 'play') return;
+    if (startAspir(factions[0])) netBtnEl.classList.add('swinging');
+  };
+  const release = () => {
+    stopAspir(factions[0]);
+    netBtnEl.classList.remove('swinging');
+  };
+  netBtnEl.addEventListener('pointerdown', press);
+  /* Relâcher hors du bouton, ou perdre le pointeur, doit couper le souffle —
+     sinon il resterait allumé indéfiniment. */
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
+    netBtnEl.addEventListener(ev, release);
+  }
+  addEventListener('pointerup', release);
+  addEventListener('blur', release);
+}
 
 /* ============================== IA ==============================
    IA utilitaire : chaque bot poursuit exactement le même score que le joueur
@@ -3631,8 +4636,121 @@ if (rallyEl) rallyEl.style.display = 'none';   // bouton « Piège » retiré
 
 /* Contexte partagé pour l'IA — recréé une seule fois, ses champs pointent
    sur les valeurs vivantes (agents, factions, etc. sont let/const stables). */
+/* ---- Objectif d'un bot : chasser puis livrer ----
+   L'IA d'origine arbitrait entre cristaux, expansion et raids — trois notions
+   qui n'existent plus. Sans ça les bots erraient sans jamais toucher un autel.
+
+   La décision tient en une question : « ai-je déjà de quoi prendre un
+   sanctuaire ? ». Si oui on y va, sinon on chasse l'élément qui en rapproche le
+   plus. On vise le manque le plus petit, pas l'autel le plus proche : c'est ce
+   qui fait converger le bot vers un objectif au lieu de papillonner. */
+const _botCarry = new Int32Array(9);
+
+function botAltarGoal(f) {
+  if (!f || !altars.length) return null;
+
+  _botCarry.fill(0);
+  for (const ag of agents) {
+    if (!ag || ag.dead || (ag.followerOf ?? -1) !== f.i) continue;
+    const v = variantOf(ag.id);
+    if (v >= ELEM_FIRST) _botCarry[v]++;
+  }
+
+  /* a) Un sanctuaire à portée de bourse : on livre. */
+  let goAltar = null, goD = Infinity;
+  for (const al of altars) {
+    if (al.owner === f.i) continue;
+    if (_botCarry[al.variant] < al.need - al.filled) continue;
+    const d = Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
+    if (d < goD) { goD = d; goAltar = al; }
+  }
+  if (goAltar) return { mode: 'altar', pt: { x: goAltar.x, z: goAltar.z } };
+
+  /* b) Sinon : quel élément me rapproche le plus d'une prise ? On pondère le
+        manque par la distance, sinon le bot traverse la carte pour un autel à
+        peine moins cher que celui qu'il a sous le nez. */
+  let wantVar = -1, bestCost = Infinity;
+  for (const al of altars) {
+    if (al.owner === f.i) continue;
+    const manque = (al.need - al.filled) - _botCarry[al.variant];
+    if (manque <= 0) continue;
+    const d = Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
+    const cost = manque * 12 + d;
+    if (cost < bestCost) { bestCost = cost; wantVar = al.variant; }
+  }
+
+  /* c) Cap sur l'esprit voulu. À défaut, n'importe quel esprit libre fera
+        l'affaire — il servira forcément à un autel tôt ou tard.
+
+     On ne prend PAS bêtement le plus proche : un esprit fuit, et celui qui est
+     déjà collé à un rival est perdu d'avance. Le coût mélange donc la distance,
+     la direction de fuite (courir derrière un fuyard coûte plus cher que le
+     couper), et la concurrence. Un esprit banni (poursuite qui n'aboutissait
+     pas, cf. anti-blocage) est ignoré le temps du bannissement. */
+  const banned = (f._banT || 0) > elapsed ? f._banSpirit : null;
+
+  let best = null, bestScore = Infinity;
+  for (const ag of agents) {
+    if (!ag || ag.dead || ag === banned) continue;
+    const v = variantOf(ag.id);
+    if (v < ELEM_FIRST) continue;
+    if ((ag.discipleOf ?? -1) >= 0) continue;
+    if ((ag.followerOf ?? -1) === f.i) continue;
+    if (ag._dive != null) continue;
+
+    const dx = ag.x - f.leader.x, dz = ag.z - f.leader.z;
+    const d = Math.hypot(dx, dz) || 1e-3;
+
+    /* Fuyard : si sa vitesse pointe à l'opposé de nous, la poursuite s'allonge. */
+    const flee = (ag.vx || 0) * (dx / d) + (ag.vz || 0) * (dz / d);
+    let cost = d + Math.max(0, flee) * 2.2;
+
+    /* Concurrence : un rival plus près l'aura avant nous. */
+    for (const o of factions) {
+      if (!o || !o.alive || o === f || !o.leader) continue;
+      const od = Math.hypot(ag.x - o.leader.x, ag.z - o.leader.z);
+      if (od < d) cost += (d - od) * 1.4;
+    }
+
+    const wanted = v === wantVar;
+    if (!wanted) cost += 26;                      // utile, mais pas prioritaire
+    if ((ag.followerOf ?? -1) >= 0) cost += 10;   // vol possible, mais plus dur
+
+    if (cost < bestScore) { bestScore = cost; best = ag; }
+  }
+
+  if (best) return { mode: 'hunt', pt: aimAhead(f, best), spirit: best };
+
+  /* d) Aucun esprit disponible : plutôt que de rendre la main à l'ancienne IA
+        (cristaux/expansion, notions mortes) qui laissait le bot errer, on se
+        poste près de l'autel le moins cher — c'est là que la partie se joue et
+        que les esprits repopulent. Un bot n'est donc JAMAIS sans objectif. */
+  let post = null, postCost = Infinity;
+  for (const al of altars) {
+    if (al.owner === f.i) continue;
+    const c = (al.need - al.filled) * 8 + Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
+    if (c < postCost) { postCost = c; post = al; }
+  }
+  if (!post) return null;
+  const ang = (f.i * 2.1) + elapsed * 0.15;
+  return {
+    mode: 'roam',
+    pt: { x: post.x + Math.cos(ang) * 9, z: post.z + Math.sin(ang) * 9 },
+  };
+}
+
+/* Point d'interception : viser là où l'esprit SERA, pas où il est. Sans ça un
+   bot court éternellement dans le dos d'un fuyard de vitesse comparable. */
+function aimAhead(f, ag) {
+  const d = Math.hypot(ag.x - f.leader.x, ag.z - f.leader.z);
+  const sp = Math.max(1e-3, leaderSpeed(f));
+  const lead = Math.min(1.1, d / sp);   // temps de vol estimé, borné
+  return { x: ag.x + (ag.vx || 0) * lead, z: ag.z + (ag.vz || 0) * lead };
+}
+
 const _aiCtx = {
   agents: null, factions: null, bombs: null, island: null,
+  altarGoal: botAltarGoal,
   paintGrid: null, PAINT_N, PAINT_SPAN,
   elapsed: 0, difficulty: 'normal',
   paintOwnerAt: null, factionScore: null, islandApproachScore: null,
@@ -3809,11 +4927,6 @@ function resetGame() {
   territoryIncomeT = 0;
   duelT = -1; judgeR = 999; judgeMesh.visible = false;
   duelEl.classList.add('hidden'); duelEl.classList.remove('urgent');
-  if (paintOrbLiquidEl) {
-    paintOrbLiquidEl.style.setProperty('--fill', '100%');
-    if (paintOrbPctEl) paintOrbPctEl.textContent = '100';
-  }
-  paintOrbEl?.classList.remove('low');
   fervorPct = -1;
   discHudSig = '';
   if (discHudEl) discHudEl.replaceChildren();
@@ -3823,6 +4936,7 @@ function resetGame() {
   raceSig = '';
   for (const el of raceMarks.values()) el.remove();
   raceMarks.clear();
+  clearWebs();
   clearFx();
   clearPaint();
   for (const b of bombs) scene.remove(b.grp);
@@ -3967,6 +5081,9 @@ function resetGame() {
     teams.push(team);
   }
 
+  /* Sanctuaires : semés une fois l'île et les cours en place. */
+  placeAltars();
+
   const rosterPool = Object.keys(LEADERS).filter((k) => k !== playerLeaderKey);
   for (let s = rosterPool.length - 1; s > 0; s--) {
     const j = (Math.random() * (s + 1)) | 0;
@@ -4020,7 +5137,6 @@ function resetGame() {
       /* Kit de départ du perso — 2 slots. Tout le monde teste Prêche +
          Sanctuaire pour l'instant ; les kits par perso arriveront quand le
          pool sera plus fourni. */
-      powers: leaderPowersFor(leaderKey),
     });
     if (isRemote) {
       f.netTarget = { x: spawnPos.x, z: spawnPos.z, dx: 0, dz: 0 };
@@ -4052,6 +5168,14 @@ function resetGame() {
 /* ============================== Fin de partie ============================== */
 /* Score d'une faction : la couverture pèse le plus lourd, la chasse aux gris
    ensuite, la distance parcourue en appoint. Ventilé pour l'écran de fin. */
+/** Part de la vallée peinte par un culte, en pourcentage. C'est le score du
+    jeu : tout le reste (sanctuaires, esprits, toiles) n'existe que pour le
+    faire monter. */
+function paintPct(f) {
+  if (!f) return 0;
+  return (paintCounts[f.team] / paintTotal) * 100;
+}
+
 function factionScore(f) {
   const pct = (paintCounts[f.team] / paintTotal) * 100;
   const sPct = Math.round(pct * SCORE_PER_PCT);
@@ -4076,9 +5200,9 @@ function endGame(forced) {
   const netRank = multiMode ? net.getLeaderList() : null;
   const useNet = !!(netRank && netRank.length);
 
-  const victory = (forced === false || forced === 'concede') ? false : (mine && (mine.f.deposited || 0) >= GOAL);
+  const victory = (forced === false || forced === 'concede') ? false : (mine && scores[0] === mine);
   lastVictory = victory;
-  const winner = factions.find(f => (f.deposited || 0) >= GOAL) || scores[0].f;
+  const winner = scores[0].f;
   const winnerName = useNet ? (netRank[0]?.name || '—') : winner.cult.name;
 
   const isCamp = (conquest !== null);
@@ -4157,7 +5281,7 @@ function endGame(forced) {
   </div>` : '';
 
   $('stats').innerHTML = rankBadgeHtml
-    + `<div class="cell full-width"><div class="v">${mine ? (mine.f.deposited || 0) : 0} / ${GOAL}</div><div class="k">Esprits Déposés au Sanctuaire</div></div>`
+    + `<div class="cell full-width"><div class="v">${mine ? mine.pct.toFixed(1) : 0} %</div><div class="k">Vallée conquise</div></div>`
     + `<div class="cell full-width" style="text-align:left;font-size:0.9rem;padding:10px;">`
     + `<div style="font-size:0.85rem;color:#94a3b8;margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;">Classement Territoire</div>`
     + `${podium}</div>`;
@@ -4214,19 +5338,11 @@ function spawnBombAt(x, z) {
 }
 
 function updateBombs(dt) {
+  /* Les cristaux de peinture ne réapparaissent plus : ils rechargeaient une
+     jauge de carburant qui n'existe plus. La boucle de ramassage ci-dessous
+     reste en place — l'IA et les disciples lisent encore `bombs`, et un
+     tableau vide traverse ces chemins sans rien casser. */
   bombT -= dt;
-  if (worldMods.bombDroughtT > 0) {
-    /* Sécheresse : pas de nouveaux cristaux, on anime juste ceux restants. */
-  } else {
-    const cap = bombCapNow();
-    const min = bombMinNow();
-    if (bombT <= 0 && bombs.length < cap && bombModel) {
-      bombT = bombs.length < min ? 0.7 + Math.random() * 1.1 : 5 + Math.random() * 5;
-      const pt = islandRandomPoint(island, 6, Infinity);
-      spawnBombAt(pt.x, pt.z);
-      tone(880, 0.2, 'sine', 0.04); tone(1320, 0.25, 'sine', 0.03, 0.08);
-    }
-  }
   for (let i = bombs.length - 1; i >= 0; i--) {
     const b = bombs[i];
     b.bob += dt * 2.2;
@@ -4687,17 +5803,6 @@ function snapCameraToPlayer() {
 /* Kit de départ par perso — 2 slots choisis dans le pool {preche, sanctuaire,
    anatheme}. Assignations qui collent à l'archétype de chaque Leader ;
    les persos sans kit propre héritent d'un pair "polyvalent". */
-const LEADER_KITS = {
-  monk:     ['preche',    'sanctuaire'],  // contemplatif : prop + def
-  amazon:   ['anatheme',  'sanctuaire'],  // guerrière : off + def
-  sorcerer: ['preche',    'anatheme'],    // caster occulte : prop + off
-  chief:    ['preche',    'anatheme'],    // chef de chasse : prop + off
-  nomad:    ['preche',    'sanctuaire'],  // pèlerin : prop + def
-  alien:    ['sanctuaire', 'anatheme'],   // mystérieux : def + off
-};
-function leaderPowersFor(leaderKey) {
-  return LEADER_KITS[leaderKey] || ['preche', 'sanctuaire'];
-}
 
 /* Texture procédurale : grille d'hexagones (traits blancs sur transparent),
    posée sur la sphère du dôme en additive blending. */
@@ -4920,42 +6025,6 @@ function totemConvertWave(t, maxAgents = 3) {
   }
 }
 
-/** Déclenche le pouvoir d'un slot (0 ou 1). Retourne true si consommé. */
-function activatePower(f, slot = 0) {
-  if (!f || !f.alive) return false;
-  const id = f.powers?.[slot];
-  if (!id) return false;
-  const def = getPowerDef(id);
-  if (!def) return false;
-  /* ctx : accès en lecture aux factions pour les pouvoirs à ciblage
-     (Anathème auto-lock sur le Leader adverse le plus proche). */
-  const desc = def.activate(f, slot, { factions });
-  if (!desc) return false;
-  if (desc.kind === 'totem') {
-    const grp = makeTotemGroup(desc.x, desc.z, desc.color, desc.radius);
-    scene.add(grp);
-    activeTotems.push({ ...desc, grp });
-    spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.4, 0.42);
-    soundEngine.playSFX?.('boost');
-    totemConvertWave(activeTotems[activeTotems.length - 1], 3);
-  } else if (desc.kind === 'shield') {
-    const grp = makeShieldGroup(desc.x, desc.z, desc.color, desc.radius);
-    scene.add(grp);
-    activeShields.push({ ...desc, grp });
-    spawnShock(desc.x, desc.z, new THREE.Color(desc.color), desc.radius * 0.5, 0.42);
-    soundEngine.playSFX?.('boost');
-  } else if (desc.kind === 'curse') {
-    const target = factions[desc.targetIdx];
-    if (!target || !target.leader) return true;   // cd déjà consommé, on ne rembourse pas
-    const grp = makeCurseGroup(desc.color);
-    grp.position.set(target.leader.x, 0, target.leader.z);
-    scene.add(grp);
-    activeCurses.push({ ...desc, grp });
-    spawnShock(target.leader.x, target.leader.z, new THREE.Color(desc.color), 2.0, 0.45);
-    soundEngine.playSFX?.('boost');
-  }
-  return true;
-}
 
 /** Tick tous les totems : décroit la vie, joue les vagues, anime le mesh. */
 function updateTotems(dt) {
@@ -4985,84 +6054,171 @@ function updateTotems(dt) {
   }
 }
 
-/* Cooldown UI pour les boutons pouvoirs. Les refs `powerBtns/powerOverlays`
-   sont déclarées dans le bloc HUD principal, avant les event listeners. */
-const _lastPowerPct = [-1, -1];
-const _lastPowerId = [null, null];
-function updatePowerUI() {
-  const me = factions[0];
-  for (let slot = 0; slot < powerBtns.length; slot++) {
-    const btn = powerBtns[slot];
-    const ovl = powerOverlays[slot];
-    if (!btn || !ovl) continue;
-    const id = me?.powers?.[slot] || null;
-    if (!me || !id) { btn.classList.add('hidden'); continue; }
-    btn.classList.remove('hidden');
-    const def = getPowerDef(id);
-    if (!def) continue;
-    if (id !== _lastPowerId[slot]) {
-      _lastPowerId[slot] = id;
-      const ic = powerIcons[slot], lb = powerLbls[slot];
-      if (ic) ic.textContent = def.icon;
-      if (lb) lb.textContent = def.name;
+
+/* Le Sanctuaire de Base ne collecte plus rien : le territoire vient des
+   sanctuaires de la vallée. Neutralisé plutôt que supprimé — en l'état il
+   dévorait tout le cortège dès qu'on approchait de sa propre cour. */
+function checkBaseDeposits() {}
+
+/* ---------------------- Repeuplement en esprits ----------------------
+   La vallée ne se vide plus : on maintient en permanence un nombre d'esprits
+   SAUVAGES proportionnel au nombre de cultes. Ce qui compte pour le rythme,
+   ce n'est pas le stock total mais ce qui reste à chasser — un esprit dans le
+   cortège d'un rival n'est disponible pour personne.
+
+   Le repeuplement est TYPÉ, et c'est le point important : un autel réclame dix
+   esprits d'un seul élément. Si un type tombait sous ce seuil, l'autel
+   deviendrait tout simplement infaisable. On fait donc toujours réapparaître
+   l'élément le plus rare.
+
+   Contrainte technique : l'élément d'un esprit est déterminé par son id
+   (`variantOf(id) = CROWD_VARIANT[id % 30]`). On ne peut donc pas choisir
+   librement le type d'un nouvel agent — il faut piocher dans les ids libérés
+   celui qui porte le bon élément. */
+const SPIRITS_PER_PLAYER = 40;   // 3 cultes → 120 esprits, ~20 par élément,
+                                 // soit le double de ce qu'un autel demande
+const SPIRIT_RESPAWN_RATE = 1.6; // apparitions par seconde au maximum
+const SPIRIT_SPAWN_MIN_D = 16;   // distance minimale à tout Leader
+
+let respawnAcc = 0;
+const _wildByElem = new Int32Array(9);
+
+function spiritTarget() {
+  return SPIRITS_PER_PLAYER * Math.max(1, factions.length);
+}
+
+/** Fait réapparaître un esprit de l'élément voulu en recyclant un id libre.
+    @returns true si un esprit est né */
+function respawnSpirit(variant) {
+  let idx = -1;
+  for (let i = freeAgentIds.length - 1; i >= 0; i--) {
+    if (variantOf(freeAgentIds[i]) === variant) { idx = i; break; }
+  }
+  if (idx < 0) return false;
+
+  /* Loin des Leaders : un esprit qui naît sous le nez d'un culte serait cueilli
+     avant d'avoir couru, et le repeuplement récompenserait le camping. */
+  let pt = null;
+  for (let tries = 0; tries < 14; tries++) {
+    const p = islandRandomPoint(island, 5, Infinity);
+    if (!p) break;
+    const pz = p.z ?? p.y;
+    let far = true;
+    for (const f of factions) {
+      if (!f || !f.alive || !f.leader) continue;
+      if (Math.hypot(p.x - f.leader.x, pz - f.leader.z) < SPIRIT_SPAWN_MIN_D) { far = false; break; }
     }
-    const cd = me.powerCds?.[slot] || 0;
-    const charge = 1 - Math.min(1, cd / def.cooldown);
-    const enoughFuel = (me.fuel || 0) >= def.cost;
-    const ready = charge >= 1 && enoughFuel;
-    const pct = Math.round(charge * 100);
-    if (pct === _lastPowerPct[slot] && ready === btn.classList.contains('ready')) continue;
-    _lastPowerPct[slot] = pct;
-    ovl.style.setProperty('--cooldown-deg', Math.round((1 - charge) * 360) + 'deg');
-    btn.classList.toggle('ready', ready);
-    btn.classList.toggle('low-fuel', !enoughFuel && charge >= 1);
+    pt = { x: p.x, z: pz };
+    if (far) break;
+  }
+  if (!pt) return false;
+
+  /* On retire l'id choisi puis on laisse spawnAgent le recycler : il dépile la
+     fin de la liste, donc on y remet notre id en dernier. */
+  const id = freeAgentIds.splice(idx, 1)[0];
+  freeAgentIds.push(id);
+  const a = spawnAgent(pt.x, pt.z);
+  if (!a) return false;
+  a._webFree = elapsed + 1.0;   // pas englué à la seconde même où il apparaît
+  return true;
+}
+
+function updateSpiritRespawn(dt) {
+  _wildByElem.fill(0);
+  let wild = 0;
+  for (const a of agents) {
+    if (!a || a.dead) continue;
+    const v = variantOf(a.id);
+    if (v < ELEM_FIRST) continue;
+    if ((a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0) continue;
+    _wildByElem[v]++;
+    wild++;
+  }
+
+  const target = spiritTarget();
+  if (wild >= target) { respawnAcc = 0; return; }
+
+  respawnAcc += dt * SPIRIT_RESPAWN_RATE;
+  let n = respawnAcc | 0;
+  if (n <= 0) return;
+  respawnAcc -= n;
+
+  while (n-- > 0 && wild < target) {
+    /* Toujours l'élément le plus rare : c'est ce qui garantit qu'aucun autel
+       ne devient impossible à alimenter. */
+    let scarcest = ELEM_FIRST, min = 1e9;
+    for (let v = ELEM_FIRST; v < ELEM_FIRST + 6; v++) {
+      if (_wildByElem[v] < min) { min = _wildByElem[v]; scarcest = v; }
+    }
+    if (!respawnSpirit(scarcest)) break;
+    _wildByElem[scarcest]++;
+    wild++;
   }
 }
 
-/* Dépôt des esprits élémentaires au Sanctuaire de Base */
-function checkBaseDeposits(dt) {
-  if (state !== 'play' || !teams || !teams.length) return;
-  for (const f of factions) {
-    if (!f || !f.alive) continue;
-    const team = teams[f.team];
-    if (!team) continue;
 
-    const dx = f.leader.x - team.baseX;
-    const dz = f.leader.z - team.baseZ;
-    const dBase = Math.hypot(dx, dz);
+/* ---- Inventaire du cortège ----
+   Les six éléments et ce qu'on en porte. C'est la lecture qu'on fait en
+   marchant vers un autel — « ai-je de quoi l'alimenter ? » — donc elle doit
+   tenir en un coup d'œil. On ne compte que les suivants VIVANTS du joueur :
+   c'est exactement ce qui pourra être déposé.
 
-    if (dBase < 6.8) {
-      let depositedThisTick = 0;
-      for (let i = 0; i < agents.length; i++) {
-        const a = agents[i];
-        if (!a || a.dead) continue;
-        if (a.followerOf === f.i) {
-          f.deposited = (f.deposited || 0) + 1;
-          f.count = Math.max(0, (f.count || 0) - 1);
-          depositedThisTick++;
+   Les vignettes sont cuites depuis les modèles élémentaires eux-mêmes, via le
+   même rendu hors-écran que les portraits de disciples. Aucune image à
+   maintenir en parallèle des .glb. */
+const spiritBarEl = $('hud-spirits');
+const spiritChips = new Map();   // variante → { el, img, n, val }
 
-          spawnSoulBurst(a.x, a.z, f);
-          releaseFollowerSlot(a);
-          a.dead = true;
-          a.followerOf = -1;
-          a.discipleOf = -1;
-          hideAgent(a.id);
-          freeAgentIds.push(a.id);
+function buildSpiritChips() {
+  if (!spiritBarEl || spiritChips.size) return;
+  for (const e of ELEMENTS) {
+    const el = document.createElement('div');
+    el.className = 'spirit-chip vide';
+    el.style.setProperty('--elem', e.css);
+    el.title = e.nom;
+    const img = document.createElement('img');
+    img.alt = '';
+    img.draggable = false;
+    img.src = e.img;
+    el.classList.add('has-img');
+    const sym = document.createElement('span');
+    sym.className = 'sym';
+    sym.textContent = e.sym;   // repli si l'image manque
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = '0';
+    el.append(img, sym, n);
+    spiritBarEl.appendChild(el);
+    spiritChips.set(e.v, { el, img, n, val: -1 });
+  }
+}
 
-          if (f.deposited >= GOAL && state === 'play') {
-            endGame();
-            return;
-          }
-        }
-      }
-      if (depositedThisTick > 0) {
-        spawnShock(team.baseX, team.baseZ, f.color, 3.2, 0.4);
-        if (f.i === 0) {
-          soundEngine.playSFX('crystal', { volume: 0.85, rate: 1.25 });
-        }
-        updateHUD();
-      }
-    }
+const _spiritCounts = new Int32Array(9);
+
+function updateSpiritsUI() {
+  if (!spiritBarEl) return;
+  buildSpiritChips();
+
+  _spiritCounts.fill(0);
+  for (const a of agents) {
+    if (!a || a.dead || (a.followerOf ?? -1) !== 0) continue;
+    const v = variantOf(a.id);
+    if (v >= ELEM_FIRST) _spiritCounts[v]++;
+  }
+  for (const e of ELEMENTS) {
+    const chip = spiritChips.get(e.v);
+    if (!chip) continue;
+    const n = _spiritCounts[e.v];
+    if (n === chip.val) continue;
+    chip.val = n;
+    chip.n.textContent = String(n);
+    chip.el.classList.toggle('vide', n === 0);
+    /* « Plein » = de quoi éveiller un autel d'un seul passage. */
+    /* « Plein » = de quoi prendre le sanctuaire le moins cher qui réclame cet
+       élément. Le seuil suit donc l'escalade au lieu d'être figé. */
+    let cheapest = Infinity;
+    for (const alt of altars) if (alt.variant === e.v) cheapest = Math.min(cheapest, alt.need - alt.filled);
+    chip.el.classList.toggle('plein', cheapest !== Infinity && n >= cheapest);
   }
 }
 
@@ -5076,34 +6232,10 @@ function update(dt) {
     playerBoostCharge = Math.min(1, playerBoostCharge + dt / BOOST_CD);
   }
   /* Cooldowns des pouvoirs (tous slots) + tick des VFX actifs. */
-  for (const f of factions) tickPowerCds(f, dt);
   updateShields(dt);
   updateTotems(dt);
   updateCurses(dt);
-  /* IA : chaque bot ré-évalue ses triggers de pouvoir toutes les ~0.4 s.
-     La décision (aiTrigger) est dans le registry ; ici on ne fait
-     qu'orchestrer les appels et respecter le cd + le coût. */
-  _botPowerCtx.agents = agents;
-  _botPowerCtx.factions = factions;
-  for (const f of factions) {
-    if (!f || !f.isBot || !f.alive) continue;
-    f.powerAiT = (f.powerAiT || 0) - dt;
-    if (f.powerAiT > 0) continue;
-    f.powerAiT = 0.35 + Math.random() * 0.15;
-    const slotCount = f.powers?.length || 0;
-    for (let slot = 0; slot < slotCount; slot++) {
-      const id = f.powers[slot];
-      if (!id) continue;
-      if ((f.powerCds?.[slot] || 0) > 0) continue;
-      const def = getPowerDef(id);
-      if (!def || !def.aiTrigger || (f.fuel || 0) < def.cost) continue;
-      if (def.aiTrigger(f, slot, _botPowerCtx)) {
-        activatePower(f, slot);
-      }
-    }
-  }
   updateAttackUI();
-  updatePowerUI();
 
   /* -- Jugement désactivé : plus d'anneau qui referme la vallée -- */
   judgeR = 999;
@@ -5122,6 +6254,7 @@ function update(dt) {
   _leaderTickState.factions = factions;
   _leaderTickState.island = island;
   _leaderTickState.judgeR = judgeR;
+  _leaderTickState.elapsed = elapsed;
   _leaderTickInput.x = input.x; _leaderTickInput.z = input.z;
   _leaderTickInput.keys = keys;
 
@@ -5219,7 +6352,7 @@ function update(dt) {
   _stepLeaderRepulsion(_leaderTickState, dt, _leaderTickCtx);
 
   /* Éclairage diurne agréable et fixe (le jour ne passe plus vers la nuit) */
-  applyDayCycle(0.42);
+  applyDayCycle(DAY_FIXED);
   soundEngine.setMusicIntensity(0.5);
   soundEngine.updateMusic(dt);
 
@@ -5342,9 +6475,14 @@ function update(dt) {
   rallyT = Math.max(0, rallyT - dt);
 
   /* -- Jauge de peinture (remplace la Ferveur dans la barre du HUD) -- */
-  updateFuelUI();
   updateDisciplesUI();
   updateRaceUI();
+  updateBotAspir();
+  updateAspiration(dt);
+  updateAltars(dt);
+  updateSpiritsUI();
+  updateSpiritRespawn(dt);
+  updateSpiritDives(dt);
 
   updateShocks(dt);
   updateParticles(dt);
@@ -5353,15 +6491,36 @@ function update(dt) {
 
   /* -- Plus aucune réapparition : les gris de départ sont tout le carburant de
         la partie. Quand le dernier est absorbé, le gong sonne immédiatement. -- */
-  if (grayCount <= 0) {
-    banner('☠ Plus un seul gris — la vallée est à sec !');
-    endGame();
-    return;
-  }
+  /* La vallée ne peut plus se vider : les esprits se repeuplent en continu
+     (updateSpiritRespawn). L'ancienne fin « plus un seul gris » aurait donné
+     une conclusion bâtarde bien avant le gong. */
 
-  /* -- Victoire : premier culte à GOAL esprits déposés (voir updateDeposits) -- */
+  /* -- Victoire -- Deux sorties possibles, vérifiées deux fois par seconde :
+        un culte franchit WIN_PCT de la vallée, ou le chrono de MATCH_DUR
+        s'achève et le plus grand territoire l'emporte. Le décompte du temps
+        vit dans elapsed, déjà avancé par la boucle. */
   winT -= dt;
-  if (winT <= 0) winT = 0.5;
+  if (winT <= 0) {
+    winT = 0.5;
+    let best = null, bestPct = -1;
+    for (const f of factions) {
+      if (!f || !f.alive) continue;
+      const p = paintPct(f);
+      if (p > bestPct) { bestPct = p; best = f; }
+    }
+    if (best && bestPct >= WIN_PCT) {
+      banner(best.i === 0
+        ? `🏆 La vallée est vôtre — ${bestPct.toFixed(0)} % !`
+        : `💀 Le Culte ${best.cult.name} domine la vallée…`);
+      endGame();
+      return;
+    }
+    if (elapsed >= MATCH_DUR) {
+      banner('⏳ Le temps est écoulé !');
+      endGame();
+      return;
+    }
+  }
 
   /* -- HUD -- */
   hudT -= dt;
@@ -5385,9 +6544,14 @@ function update(dt) {
   camLook.lerp(_camLookTarget, Math.min(1, dt * CAM_LOOK_RESP));
   camera.lookAt(camLook);
 
-  /* -- Soleil : arc est → ouest sur les 2 minutes (horloge visuelle) -- */
-  const az = Math.PI * (0.12 + 0.76 * dayT);
-  const arc = Math.min(1, Math.max(0, (dayT - 0.04) / 0.88));
+  /* -- Soleil --
+     Le cycle jour/nuit a été figé à DAY_FIXED (voir applyDayCycle plus haut),
+     mais ce bloc lisait encore `dayT`, une variable qui n'existe nulle part :
+     il levait donc une ReferenceError à chaque frame, ce qui interrompait
+     silencieusement la fin de update() — soleil, lanterne et tout ce qui suit
+     ne s'exécutaient jamais. */
+  const az = Math.PI * (0.12 + 0.76 * DAY_FIXED);
+  const arc = Math.min(1, Math.max(0, (DAY_FIXED - 0.04) / 0.88));
   const el = 5 + 42 * Math.sin(Math.PI * arc);
   sun.position.set(me.leader.x + Math.cos(az) * 34, el, me.leader.z + 18);
   sun.target.position.set(me.leader.x, 0, me.leader.z);
@@ -5397,7 +6561,7 @@ function update(dt) {
   charSun.target.updateMatrixWorld();
 
   /* Lanterne : s'allume en fin de journée pour la lisibilité. */
-  const lamp = Math.max(0, (dayT - 0.78) / 0.22);
+  const lamp = Math.max(0, (DAY_FIXED - 0.78) / 0.22);
   playerLamp.intensity = lamp * 1.35;
   lampGlow.visible = lamp > 0.05;
   if (lampGlow.visible) lampGlow.material.opacity = 0.12 + lamp * 0.22;
@@ -5524,7 +6688,14 @@ function updateMainMenu() {
   }
 }
 
+/* Enveloppe de diagnostic : une exception ici laissait le menu affiché sans
+   aucun indice — le symptôme exact d'un « le jeu ne se lance pas ». */
 function startGame() {
+  try { startGameInner(); }
+  catch (e) { showCrash('Lancement de partie', e); throw e; }
+}
+
+function startGameInner() {
   audioInit();
   // Relit la difficulté (modifiable depuis les paramètres de la carte de conquête).
   currentDifficulty = localStorage.getItem('cultio_difficulty') || currentDifficulty;
@@ -5535,7 +6706,9 @@ function startGame() {
   if (!conquest) {
     MAX_AGENTS = AGENT_CAP;
   }
-  START_GRAYS = 300;
+  /* 5 villageois pour 25 esprits dans le cycle de la foule : on remonte donc
+     la population totale depuis la cible en esprits. */
+  START_GRAYS = Math.round(SPIRITS_PER_PLAYER * NB_FACTIONS * (CROWD_CYCLE / 25));
   /* Multi : biome et graine viennent de l'hôte P2P — même vallée pour tout le monde. */
   const netSeed = multiMode ? net.getSeed() : 0;
   const biomeKey = conquest
@@ -6309,7 +7482,9 @@ setPlayHandler((ctx) => {
   const maxPop = (save.conqMaxPop && save.conqMaxPop[maxPopKey]) || 500;
   
   // Population fixe : 250 esprits dorés + 50 villageois (300 agents au total)
-  START_GRAYS = 300;
+  /* 5 villageois pour 25 esprits dans le cycle de la foule : on remonte donc
+     la population totale depuis la cible en esprits. */
+  START_GRAYS = Math.round(SPIRITS_PER_PLAYER * NB_FACTIONS * (CROWD_CYCLE / 25));
   
   // Couleur du joueur = sa religion (save.playerColor), fallback couleur du pays
   const colorStr = ctx.playerColor || ctx.world.color;

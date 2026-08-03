@@ -12,7 +12,14 @@ export const START_GRAYS = 300;
 
 /* ---- Factions & base ---- */
 export const NB_FACTIONS = 3;
-export const GOAL = 60;              // premier culte à 60 esprits déposés au sanctuaire : victoire
+
+/* ---- Victoire ----
+   Deux façons de gagner, l'une nette et l'autre garantie :
+     · couvrir WIN_PCT de la vallée met fin à la partie sur-le-champ ;
+     · sinon, au gong, c'est le plus grand territoire qui l'emporte.
+   Le seuil est juste au-dessus de la moitié : à trois cultes, l'atteindre
+   suppose d'avoir pris des sanctuaires aux deux autres. */
+export const WIN_PCT = 51;
 export const SIEGE_R = 3.5;
 export const SIEGE_R2 = SIEGE_R * SIEGE_R;
 export const SIEGE_RATE = 0.5;
@@ -27,7 +34,7 @@ export const BASE_SPAWN_R = 3.2;
 export const DEPOSIT_RATE = 26;
 
 /* ---- Mode partie ---- */
-export const MATCH_DUR = 120;
+export const MATCH_DUR = 300;   // 5 minutes
 export const FUEL_MAX = 100;
 export const FUEL_PER_UNIT = 0.70;
 export const FUEL_PER_GRAY = 10;
@@ -51,6 +58,11 @@ export const STREAK_WINDOW = 2.0;
 export const STREAK_PALIERS = [5, 10, 25, 50, 100];
 
 /* ---- Conversion / aura ---- */
+/* La capture se fait exclusivement à la toile lancée : approcher un esprit ne
+   le convertit plus, ni pour le Leader ni pour ses disciples. CONV_R sert
+   toujours de rayon de référence pour la fuite, le ciblage de l'IA et les
+   effets — d'où le drapeau plutôt qu'une suppression. */
+export const CONV_BY_PROXIMITY = false;
 export const CONV_R = 3.15;
 export const CONV_RITUAL_T = 0.62;
 export const FLEE_R = 11;

@@ -3,7 +3,7 @@
    traînée de peinture. Zéro effet visuel/audio direct — les côtés vue
    (upload de texture, sons de pas, banner) restent dans main.js. */
 
-import { LEADER_RESP, FUEL_PER_UNIT, BOOST_CD } from './constants.js';
+import { LEADER_RESP, BOOST_CD } from './constants.js';
 
 /** Direction voulue par le joueur local : joystick/souris + clavier, normalisée.
  *  Utilisée par le tick local ET par l'envoi réseau — les deux doivent lire
@@ -28,11 +28,11 @@ export function playerDir(input, keys) {
  *  @param {number} dt
  *  @param {object} ctx dépendances injectées : leaderSpeed, aiThink,
  *    steerOnIsland, resolveIsland, isSolid, nearestSolidPoint,
- *    resolveBaseWalls, unstickIfInWall, stampPaint, stampIcon, skillMods */
+ *    resolveBaseWalls, unstickIfInWall, skillMods */
 export function stepLeaders(state, input, dt, ctx) {
   const { factions, island, judgeR } = state;
   const { leaderSpeed, aiThink, steerOnIsland, resolveIsland, isSolid,
-    nearestSolidPoint, resolveBaseWalls, unstickIfInWall, stampPaint, stampIcon,
+    nearestSolidPoint, resolveBaseWalls, unstickIfInWall,
     skillMods } = ctx;
 
   for (const f of factions) {
@@ -124,7 +124,7 @@ export function stepLeaders(state, input, dt, ctx) {
 function finishLeaderStep(f, prevX, prevZ, dt, state, ctx) {
   const { island, judgeR } = state;
   const { resolveIsland, isSolid, resolveBaseWalls, unstickIfInWall,
-    stampPaint, stampIcon } = ctx;
+  } = ctx;
 
   resolveIsland(island, f.leader, f.leader.dx, f.leader.dz, dt, true);
   resolveBaseWalls(f.leader);
@@ -173,31 +173,84 @@ function finishLeaderStep(f, prevX, prevZ, dt, state, ctx) {
         }
         f.leader._stuckT = 0;
       } else if (f.leader._stuckT > 0.6 && !(f.leader._escapeT > 0)) {
-        /* Choix d'un point d'évasion solide à distance moyenne. */
-        for (let tries = 0; tries < 6; tries++) {
-          const ang = Math.random() * Math.PI * 2;
-          const dist = 6 + Math.random() * 4;
-          const tx = f.leader.x + Math.cos(ang) * dist;
-          const tz = f.leader.z + Math.sin(ang) * dist;
-          if (isSolid(island, tx, tz)) {
-            f.leader._escapeTarget = { x: tx, z: tz };
-            f.leader._escapeT = 1.5;
-            break;
-          }
-        }
+        pickEscape(f, island, isSolid);
       }
     } else {
       f.leader._stuckT = 0;
     }
-  }
-  if (f.fuel > 0) {
-    const painted = stampPaint(f);
-    if (painted) {
-      f.fuel = Math.max(0, f.fuel - moved * FUEL_PER_UNIT);
-      f.iconD = (f.iconD || 0) + moved;
-      if (f.iconD > 9) { f.iconD = 0; stampIcon(f); }
+
+    /* Blocage « mou » : le bot bouge (donc l'anti-blocage dur ne voit rien)
+       mais n'approche jamais de sa cible — tourne autour d'un promontoire,
+       colle un mur en diagonale, ou court derrière un esprit aussi rapide que
+       lui. On mesure le progrès sur une fenêtre de 1.5 s : sans gain net, on
+       abandonne cette cible (bannie ~4 s) et on force une nouvelle décision. */
+    const p = f.leader;
+    if (f.target) {
+      const dTarget = Math.hypot(f.target.x - p.x, f.target.z - p.z);
+      /* Changement franc de cible : la fenêtre repart, sinon on bannirait une
+         proie toute neuve à cause du retard accumulé sur la précédente. */
+      if (p._progTX == null || Math.hypot(f.target.x - p._progTX, f.target.z - p._progTZ) > 6) {
+        p._progT = 0; p._progRef = null;
+      }
+      p._progTX = f.target.x; p._progTZ = f.target.z;
+      p._progT = (p._progT || 0) + dt;
+      if (p._progRef == null || dTarget < p._progRef) p._progRef = dTarget;
+      if (p._progT > 1.5) {
+        /* Aucun gain de 0.8 u sur la fenêtre alors qu'on est encore loin. */
+        if (dTarget > 3 && p._progRef > dTarget - 0.8) {
+          if (f.huntTarget) {
+            f._banSpirit = f.huntTarget;
+            f._banT = (state.elapsed || 0) + 4;
+            f.huntTarget = null;
+          }
+          f.aiT = 0;                       // re-décision immédiate
+          if (!(p._escapeT > 0)) pickEscape(f, island, isSolid);
+        }
+        p._progT = 0;
+        p._progRef = null;
+      }
+    } else {
+      p._progT = 0; p._progRef = null; p._progTX = null;
     }
   }
+  /* Plus de traînée de peinture sous le Leader : le territoire ne se gagne plus
+     en marchant mais par les sanctuaires. Marcher ne doit rien rapporter, sinon
+     les autels perdent leur monopole sur le score. */
+}
+
+/* Choisit un point d'évasion réellement atteignable : l'ancienne version ne
+   testait que le point d'arrivée, si bien qu'un bot coincé derrière une faille
+   « s'échouait » vers un point de l'autre rive et restait bloqué. On échantillonne
+   tout le segment, et on préfère la direction qui rapproche encore de l'objectif. */
+function pickEscape(f, island, isSolid) {
+  const p = f.leader;
+  let gx = 0, gz = 0;
+  if (f.target) {
+    const dx = f.target.x - p.x, dz = f.target.z - p.z;
+    const n = Math.hypot(dx, dz) || 1;
+    gx = dx / n; gz = dz / n;
+  }
+
+  let best = null, bestScore = -Infinity;
+  for (let tries = 0; tries < 12; tries++) {
+    const ang = Math.random() * Math.PI * 2;
+    const dist = 6 + Math.random() * 4;
+    const cx = Math.cos(ang), cz = Math.sin(ang);
+    const tx = p.x + cx * dist, tz = p.z + cz * dist;
+    if (!isSolid(island, tx, tz)) continue;
+
+    /* Le chemin doit être solide de bout en bout. */
+    let clear = true;
+    for (let t = 0.2; t <= 1.0; t += 0.2) {
+      if (!isSolid(island, p.x + cx * dist * t, p.z + cz * dist * t)) { clear = false; break; }
+    }
+    if (!clear) continue;
+
+    const score = cx * gx + cz * gz + Math.random() * 0.35;
+    if (score > bestScore) { bestScore = score; best = { x: tx, z: tz }; }
+  }
+
+  if (best) { p._escapeTarget = best; p._escapeT = 1.5; }
 }
 
 /** Répulsion douce Leader ↔ Leader — deux Leaders ne se traversent pas. */

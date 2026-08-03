@@ -8,7 +8,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { makeGLTFLoader } from './gltf.js';
 
 /* Tactile : densités / outlines allégés (mode Belle plus fluide sur téléphone). */
-const _isCoarse = matchMedia('(pointer: coarse)').matches;
+import { IS_MOBILE as _isCoarse } from './device.js';
 const GRASS_DENSITY_MOBILE = 0.35;
 
 /* ---------------------------------------------------------------------------

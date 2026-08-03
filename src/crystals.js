@@ -17,6 +17,7 @@
 =========================================================================== */
 
 import * as THREE from 'three';
+import { IS_MOBILE } from './device.js';
 
 /* Les cristaux ne sont PAS la ressource : ce sont les croyants amassés qui font
    office de points de vie, sans plafond. Les cristaux en sont la jauge — un
@@ -94,7 +95,7 @@ export function initCrystals(scene, pixelRatio = 1) {
    gerbe d'étincelles de la couleur du culte, qui s'enroulent vers le Leader et
    s'y résorbent. Le croyant est crédité immédiatement — ces particules sont du
    pur retour sensoriel, jamais un délai de jeu. */
-const _isMobileSoul = matchMedia('(pointer: coarse)').matches;
+const _isMobileSoul = IS_MOBILE;
 const SOUL_POOL = _isMobileSoul ? 800 : 6000;
 const SOULS_PER_ABSORB = _isMobileSoul ? 6 : 22;
 /* Deux temps : l'âme se disperse et flotte sur place, puis file d'un coup vers

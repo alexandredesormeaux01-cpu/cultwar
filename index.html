@@ -16,6 +16,10 @@
 <body>
   <div id="app"></div>
 
+  <!-- Panneau d'erreur : sans console sur mobile, une exception silencieuse
+       laisse le jeu figé sans explication. Ici elle s'affiche. -->
+  <div id="crash" class="hidden"><pre id="crash-msg"></pre></div>
+
   <!-- HUD -->
   <div id="hud" class="hidden">
     <!-- Top Bar Bandoulière : minimap | Rang + % | boule peinture -->
@@ -33,8 +37,13 @@
         </div>
         <div class="hud-stat-sep"></div>
         <div class="hud-stat-box">
-          <span id="deposit-val" class="stat-value">0/60</span>
-          <span class="stat-label">Esprits</span>
+          <span id="deposit-val" class="stat-value">0/51%</span>
+          <span class="stat-label">Objectif</span>
+        </div>
+        <div class="hud-stat-sep"></div>
+        <div class="hud-stat-box">
+          <span id="time-val" class="stat-value">5:00</span>
+          <span class="stat-label">Temps</span>
         </div>
         <div class="hud-stat-sep"></div>
         <div class="hud-stat-box">
@@ -43,20 +52,6 @@
         </div>
       </div>
 
-      <!-- Boule de verre : peinture / fuel disponible -->
-      <div id="hud-paint-orb" class="paint-orb" aria-label="Peinture disponible" title="Peinture disponible">
-        <div class="paint-orb-glass">
-          <div class="paint-orb-liquid" id="paint-orb-liquid" style="--fill: 100%; --paint: #00c8ff;">
-            <div class="paint-orb-bubbles" aria-hidden="true">
-              <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
-            </div>
-            <div class="paint-orb-meniscus"></div>
-          </div>
-          <div class="paint-orb-shine"></div>
-          <div class="paint-orb-rim"></div>
-        </div>
-        <span class="paint-orb-pct" id="paint-orb-pct">100</span>
-      </div>
     </div>
 
     <!-- Actions buttons under the bandoulière -->
@@ -64,17 +59,6 @@
       <button id="boost-btn" title="Sprint (Espace ou double-clic sur l'écran)">
         <span class="ico">⚡</span><span class="lbl">Boost</span>
         <div id="boost-cooldown-overlay" style="--cooldown-deg: 360deg;"></div>
-      </button>
-      <button id="power-btn" class="hidden" title="Pouvoir 1 (touche E)">
-        <span class="ico">📿</span><span class="lbl">Pouvoir</span>
-        <div id="power-cooldown-overlay" style="--cooldown-deg: 360deg;"></div>
-      </button>
-      <button id="power-btn-2" class="hidden" title="Pouvoir 2 (touche F)">
-        <span class="ico">⬢</span><span class="lbl">Pouvoir</span>
-        <div id="power-cooldown-overlay-2" style="--cooldown-deg: 360deg;"></div>
-      </button>
-      <button id="rally" title="Resserrer la foule autour de vous">
-        <span class="ico">🛡️</span><span class="lbl">Poser un piège</span>
       </button>
     </div>
 
@@ -88,9 +72,20 @@
       <span class="race-goal"></span>
     </div>
 
+    <!-- Cortège : les six élémentaires et ce qu'on en porte, prêt à déposer. -->
+    <div id="hud-spirits" aria-label="Esprits en cortège"></div>
+
     <div id="banner"></div>
     <div id="streak"></div>
     <div id="duel" class="hidden">⚔ 1:00</div>
+
+    <!-- Action principale : aspiration. Gros bouton dédié sous le pouce droit,
+         à MAINTENIR — le souffle dure tant qu on appuie. -->
+    <button id="net-btn" title="Aspirer les esprits — maintenir (touche Q)">
+      <span class="net-ico"></span>
+      <span class="lbl">ASPIRER</span>
+    </button>
+
 
     <div id="joy"><div id="stick"></div></div>
   </div>
