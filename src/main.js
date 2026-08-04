@@ -1578,8 +1578,44 @@ function bindAtkCtx() {
   _atkCtx.finishConvert = finishConvert;
 }
 
+/* ---- Marqueur de cible ----
+   La visée étant assistée mais faillible, le joueur doit savoir SUR QUOI le
+   prochain tir va partir. Sans ce repère, un coup manqué ressemble à un bug
+   plutôt qu'à un raté : on croit avoir visé autre chose. L'anneau annonce
+   l'intention du tir, jamais son résultat — on peut le voir et rater quand
+   même, et c'est exactement ce qu'on veut donner à lire. */
+const targetRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.95, 1.22, 28).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.85,
+    depthWrite: false, depthTest: false, toneMapped: false, side: THREE.DoubleSide,
+  }),
+);
+targetRing.renderOrder = 6;
+targetRing.visible = false;
+scene.add(targetRing);
+
+function updateTargetRing() {
+  const me = factions[0];
+  if (!me || !me.alive || state !== 'play' || (me.downT || 0) > 0) {
+    targetRing.visible = false;
+    return;
+  }
+  const t = pickTarget(me, leaderFace(me), _atkCtx);
+  if (!t) { targetRing.visible = false; return; }
+
+  const o = t.kind === 'leader' ? t.ref.leader : t.ref;
+  targetRing.visible = true;
+  targetRing.position.set(o.x, (o.y || 0) + 0.09, o.z);
+  /* Battement : un anneau figé se confond avec les disques de sanctuaire. */
+  const puls = 1 + Math.sin(elapsed * 7) * 0.06;
+  targetRing.scale.setScalar((t.kind === 'leader' ? 1.35 : 1) * puls);
+  targetRing.material.color.set(t.kind === 'leader' ? 0xff5a4a : elementColorOf(me));
+}
+
 function updateAttacks(dt) {
   bindAtkCtx();
+  updateTargetRing();
   tickDownStates(factions, agents, dt);
   botAttacks(dt);
   stepProjectiles(dt, _atkCtx);
@@ -1608,6 +1644,10 @@ function playerAttack() {
    dès qu'une cible entre dans leur cône, avec un délai de réaction qui dépend
    de la difficulté — jamais une meilleure portée ni une meilleure cadence. */
 const BOT_AIM_DELAY = { easy: 0.75, normal: 0.35, hard: 0.12 };
+/* Multiplicateur de dispersion : c'est là que se joue l'écart de niveau, pas
+   sur la portée ni la cadence. Un bot facile vise mal, il ne tire pas moins
+   loin — les règles restent les mêmes pour tout le monde. */
+const BOT_SPREAD = { easy: 2.4, normal: 1.35, hard: 0.85 };
 
 function botAttacks(dt) {
   for (const f of factions) {
@@ -1624,7 +1664,9 @@ function botAttacks(dt) {
     f._aimT = (f._aimT || 0) + dt;
     if (f._aimT < delay) continue;
     f._aimT = 0;
+    _atkCtx.spreadMult = BOT_SPREAD[f.aiDifficulty || currentDifficulty] ?? 1.35;
     fireAttack(f, leaderFace(f), _atkCtx);
+    _atkCtx.spreadMult = 1;
   }
 }
 

@@ -23,6 +23,9 @@ function mkCtx(agents, factions, extra = {}) {
     variantOf: (id) => (id === 0 ? 0 : ELEM_FIRST),   // id 0 = villageois, le reste = esprits
     ELEM_FIRST,
     finishConvert: (a, f) => { a.followerOf = f.i; f.count++; },
+    /* Aléa neutralisé : la dispersion est testée à part, les cas de base
+       doivent rester déterministes. */
+    rng: () => 0.5,
     releaseFollower: (a) => { a.followerOf = -1; },
     dropOneFollower: (o) => agents.find((a) => a.followerOf === o.i) || null,
     ...extra,
@@ -107,6 +110,35 @@ console.log('\n== on ne tire pas à terre ==');
   const spirit = mkSpirit(1, 0, 10);
   const ctx = mkCtx([spirit], [f]);
   ok('un Leader à terre ne peut pas tirer', fireAttack(f, 0, ctx) === null);
+}
+
+/* La dispersion est le cœur du réglage : un tir qui ne rate jamais rend le
+   geste gratuit, un tir qui rate souvent rend le jeu pénible. On mesure donc
+   le taux de touche réel sur cible IMMOBILE, à deux distances. */
+console.log('\n== dispersion : on peut rater ==');
+{
+  const rate = (dist, shots = 600) => {
+    let hits = 0;
+    for (let n = 0; n < shots; n++) {
+      clearProjectiles();
+      const spirit = mkSpirit(1, 0, dist);
+      const f = mkFaction(0, 0, 0);
+      const ctx = mkCtx([spirit], [f], { rng: Math.random });
+      fireAttack(f, 0, ctx);
+      let frames = 0;
+      while (projectiles.length && frames++ < 300) stepProjectiles(1 / 60, ctx);
+      if (spirit.downT > 0) hits++;
+    }
+    return hits / shots;
+  };
+
+  const near = rate(6), far = rate(17);
+  console.log(`  touche à 6 u  : ${(near * 100).toFixed(0)} %`);
+  console.log(`  touche à 17 u : ${(far * 100).toFixed(0)} %`);
+  ok('à bout portant on touche presque toujours', near > 0.9);
+  ok('à longue portée on rate parfois', far < 0.9);
+  ok('à longue portée on touche quand même souvent', far > 0.45);
+  ok('la portée dégrade la précision', far < near);
 }
 
 console.log(`\n${pass} réussis, ${fail} échoués`);

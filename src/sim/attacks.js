@@ -25,8 +25,19 @@
 export const ATTACK_CD = 0.85;        // recharge entre deux tirs (s)
 export const ATTACK_SPEED = 30;       // vitesse du projectile (u/s)
 export const ATTACK_RANGE = 20;       // portée avant dissipation (u)
-export const ATTACK_HIT_R = 1.6;      // rayon de collision
+export const ATTACK_HIT_R = 1.15;     // rayon de collision
 export const AIM_ARC = 0.75;          // demi-angle du cône de visée (~43°)
+
+/* ---- Pourquoi l'assistance est PARTIELLE ----
+   Un tir corrigé à 100 % sur la position de la cible ne rate jamais : le
+   projectile devient une tête chercheuse et le geste ne vaut plus rien. On
+   applique donc l'essentiel de la correction, jamais la totalité, et on ajoute
+   une dispersion qui grandit avec la distance. La cible, elle, continue de se
+   déplacer pendant le vol — un esprit qui fuit peut sortir de la trajectoire.
+   Résultat : viser reste facile, toucher n'est jamais acquis. */
+export const AIM_ASSIST = 0.82;       // part de la correction réellement appliquée
+export const AIM_SPREAD = 0.055;      // dispersion à bout portant (rad, ~3°)
+export const AIM_SPREAD_FAR = 0.075;  // dispersion ajoutée à portée maximale
 export const SPIRIT_DOWN_T = 3.2;     // temps au sol d'un esprit touché (s)
 export const LEADER_DOWN_T = 1.5;     // temps au sol d'un Leader touché (s)
 export const COLLECT_R = 2.2;         // distance de ramassage d'un esprit à terre
@@ -80,17 +91,35 @@ export function fireAttack(f, facing, ctx) {
   if ((f.downT || 0) > 0) return null;               // à terre : on ne tire pas
   f.atkCd = ATTACK_CD;
 
-  /* Visée assistée : on part vers la cible si elle existe, sinon droit devant.
+  /* Visée assistée : on se rapproche de la cible sans jamais l'épouser.
      Tirer dans le vide reste permis — sans ça le bouton semblerait cassé
      quand rien n'est en vue. */
+  const rng = ctx.rng || Math.random;
   const target = pickTarget(f, facing, ctx);
-  let dx = Math.sin(facing), dz = Math.cos(facing);
+  let angle = facing;
+  let spread = AIM_SPREAD;
+
   if (target) {
     const t = target.kind === 'leader' ? target.ref.leader : target.ref;
     const ax = t.x - f.leader.x, az = t.z - f.leader.z;
-    const n = Math.hypot(ax, az) || 1;
-    dx = ax / n; dz = az / n;
+    const d = Math.hypot(ax, az) || 1;
+    const want = Math.atan2(ax, az);
+    /* Écart ramené dans [-π, π] : sans ça un tir vers l'arrière corrigerait
+       dans le mauvais sens en passant par le grand tour. */
+    let diff = want - facing;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    angle = facing + diff * AIM_ASSIST;
+    spread += AIM_SPREAD_FAR * Math.min(1, d / ATTACK_RANGE);
   }
+
+  /* Dispersion : deux tirages moyennés, donc des écarts groupés autour du
+     centre plutôt qu'uniformes — on rate de peu bien plus souvent que de
+     beaucoup, ce qui se lit comme une main qui tremble et non comme un
+     hasard arbitraire. */
+  const jitter = ((rng() + rng()) - 1) * spread * (ctx.spreadMult ?? 1);
+  angle += jitter;
+  const dx = Math.sin(angle), dz = Math.cos(angle);
 
   const p = {
     x: f.leader.x, z: f.leader.z, y: (f.leader.y || 0) + 1.15,
