@@ -31,7 +31,7 @@ import {
 import {
   generateIsland, buildIslandMeshes, buildVoid, updateVoid, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
-  HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep,
+  HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, tileAt,
   buildPaintSurface, flatTiles,
   reserveSanctuary,
 } from './hexmap.js';
@@ -1681,7 +1681,6 @@ function botAttacks(dt) {
    « Acculé » se mesure au FAIT, pas à l'intention : un Leader tout près ET un
    esprit qui n'arrive plus à s'éloigner. Un test de distance seul se
    déclencherait pendant une poursuite normale. */
-const HOLE_Y = 0.42;          // au-dessus des ondulations du sol (±0.35)
 const DIVE_NEAR_R = 3.2;      // distance de Leader qui met la pression
 const DIVE_STUCK_T = 0.5;     // durée sans échappatoire avant de plonger
 const DIVE_GAIN = 0.35;       // terrain repris par seconde en dessous duquel
@@ -1691,36 +1690,99 @@ const DIVE_DOWN = 0.26;       // temps de plongée
 const DIVE_OUT = 0.34;        // temps de résurgence
 const DIVE_TOTAL = DIVE_UP + DIVE_DOWN + DIVE_OUT;
 
-/* Trous : un disque sombre à bord adouci, mis en commun. Le .glb de terrier est
-   trop lourd (57 k triangles) pour être cloné à chaque plongeon. */
-let _holeGeo = null, _holeMat = null;
+/* ---- Terriers : un vrai monticule qui sort du sol ----
+   C'était un disque noir posé à plat : lisible, mais on voyait une maquette et
+   non un trou. Le .glb de terrier ne peut pas servir — même sa variante
+   allégée pèse 57 000 triangles, inclonable à chaque plongeon.
+
+   On en fabrique donc un au tour : un profil tourné autour de l'axe vertical
+   donne le bourrelet de terre et le puits sombre en ~130 triangles. Le
+   monticule ÉMERGE du sol au lieu d'apparaître, ce qui est tout ce qui
+   manquait pour que le geste se lise.
+
+   Le profil va du fond du puits vers l'extérieur :
+     centre bas → paroi du puits → lèvre relevée → crête → retour au sol. */
+let _holeGeo = null;
+const HOLE_R = 1.35;          // rayon extérieur du monticule
+const HOLE_RISE = 0.55;       // hauteur dont il sort de terre en émergeant
+
+function makeBurrowGeo() {
+  const P = (r, y) => new THREE.Vector2(r, y);
+  const profile = [
+    P(0.00, -0.62),           // fond du puits, dans le noir
+    P(0.30, -0.55),
+    P(0.44, -0.20),           // paroi
+    P(0.50,  0.06),           // lèvre du trou, légèrement relevée
+    P(0.74,  0.30),           // crête du bourrelet
+    P(1.00,  0.05),           // retombée
+    P(1.00, -0.10),           // jupe qui s'enfonce, évite tout jour au sol
+  ];
+  const geo = new THREE.LatheGeometry(profile, 16);
+  geo.scale(HOLE_R, 1, HOLE_R);
+
+  /* Couleur par sommet : noir au fond, terre sur la crête. Multipliée ensuite
+     par la teinte de la tuile, le monticule appartient donc à son sol. */
+  const pos = geo.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    const k = Math.max(0, Math.min(1, (y + 0.62) / 0.92));   // 0 = fond, 1 = crête
+    const shade = 0.06 + Math.pow(k, 1.6) * 1.04;
+    col[i * 3] = shade; col[i * 3 + 1] = shade * 0.96; col[i * 3 + 2] = shade * 0.9;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
 const holes = [], holePool = [];
 function spawnHole(x, z) {
-  if (!_holeGeo) {
-    _holeGeo = new THREE.CircleGeometry(1, 24).rotateX(-Math.PI / 2);
-    _holeMat = new THREE.MeshBasicMaterial({
-      color: 0x0a0712, transparent: true, depthWrite: false, toneMapped: false,
-    });
-  }
+  if (!_holeGeo) _holeGeo = makeBurrowGeo();
   let m = holePool.pop();
-  if (!m) { m = new THREE.Mesh(_holeGeo, _holeMat.clone()); scene.add(m); }
+  if (!m) {
+    /* DoubleSide : vu de dessus, on regarde DANS le puits, donc ses parois
+       présentent leur dos à la caméra. Sans ça le trou serait éliminé par le
+       culling et on verrait le décor au travers. */
+    m = new THREE.Mesh(_holeGeo, toonMaterial({
+      color: 0xffffff, vertexColors: true, side: THREE.DoubleSide,
+    }));
+    m.castShadow = false;
+    m.receiveShadow = true;
+    scene.add(m);
+  }
+  /* Teinte du sol sous le trou : la terre remuée est celle de cette tuile. */
+  const tile = island ? tileAt(island, x, z) : null;
+  if (tile && tile.tint) m.material.color.copy(tile.tint).multiplyScalar(1.15);
+  else m.material.color.setHex(0xb08a5e);
+
   m.visible = true;
-  m.position.set(x, HOLE_Y - 0.08, z);
-  m.scale.setScalar(0.2);
-  m.material.opacity = 0.9;
-  m.renderOrder = 2;
+  m.userData.baseY = groundY(x, z);
+  m.position.set(x, m.userData.baseY - HOLE_RISE, z);   // encore sous terre
+  m.scale.set(1, 1, 1);
+  m.rotation.y = Math.random() * Math.PI * 2;
   holes.push({ mesh: m, t: 0 });
 }
+
 function updateHoles(dt) {
   for (let i = holes.length - 1; i >= 0; i--) {
     const h = holes[i];
     h.t += dt;
-    const grow = Math.min(1, h.t / 0.18);
-    h.mesh.scale.setScalar(0.2 + 1.0 * grow);
-    h.mesh.material.opacity = 0.9 * Math.max(0, 1 - Math.max(0, h.t - 0.9) / 0.6);
+    const m = h.mesh;
+    const baseY = m.userData.baseY || 0;
+
+    /* Émergence en 0,20 s — plus court que DIVE_UP (0,30 s), donc le trou est
+       ouvert quand l'esprit retombe dedans. Puis il se retire lentement. */
+    const up = Math.min(1, h.t / 0.20);
+    const ease = up * up * (3 - 2 * up);
+    const sink = Math.max(0, (h.t - 1.0) / 0.5);
+    const back = Math.min(1, sink) ** 2;
+    m.position.y = baseY - HOLE_RISE * (1 - ease) - HOLE_RISE * back;
+    const s = 0.55 + 0.45 * ease;
+    m.scale.set(s, s, s);
+
     if (h.t > 1.5) {
-      h.mesh.visible = false;
-      holePool.push(h.mesh);
+      m.visible = false;
+      holePool.push(m);
       holes.splice(i, 1);
     }
   }
