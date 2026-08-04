@@ -31,8 +31,8 @@ import {
 import {
   generateIsland, buildIslandMeshes, buildVoid, updateVoid, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
-  HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, flatPoint,
-  buildPaintSurface,
+  HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep,
+  buildPaintSurface, flatTiles,
   reserveSanctuary,
 } from './hexmap.js';
 import { initNative } from './cap.js';
@@ -1982,7 +1982,11 @@ const ALTAR_H = 5.6;           // hauteur du sanctuaire une fois mis à l'échel
 /* L'écart minimal doit rester supérieur à deux emprises, sinon deux places se
    chevauchent et on livre aux deux à la fois. Au-delà de ~22 l'île ne peut
    plus en accueillir dix (mesuré sur 200 cartes). */
-const ALTAR_MIN_GAP = ALTAR_R * 2 + 7.6;
+/* Depuis que l'assise doit être pleine, les places éligibles sont deux fois
+   moins nombreuses : à 22 l'île n'en accueillait plus que 8,5 sur 10. À 18 il
+   reste 3,6 u entre deux emprises — elles ne se chevauchent pas, donc on ne
+   livre jamais à deux sanctuaires à la fois. */
+const ALTAR_MIN_GAP = ALTAR_R * 2 + 3.6;
 const ALTAR_FEED_RATE = 3.5; // esprits livrés par seconde
 const ALTAR_PAINT_PERIOD = 0.22;
 const ALTAR_PAINT_R = 13;    // portée finale de la peinture d'un sanctuaire
@@ -2252,22 +2256,32 @@ function clearAltars() {
 function reserveAltarSites() {
   if (!island) return;
   island.altarSites = [];
-  const SAMPLES = 40;
+  /* Liste calculée UNE fois : chaque tirage refiltrait l'île entière, ce qui
+     interdisait d'échantillonner largement. Les places étant devenues rares
+     (assise plate ET pleine), il faut chercher plus, pas moins. */
+  const pool = flatTiles(island, 7, Infinity);
+  const SAMPLES = 90;
+  const taken = new Set();
+
   for (let n = 0; n < ALTAR_COUNT; n++) {
     let best = null, bestD = -1;
     for (let k = 0; k < SAMPLES; k++) {
-      const p = flatPoint(island, 7, Infinity);
-      if (!p || !p.tile) continue;
+      const t = pool[(Math.random() * pool.length) | 0];
+      if (!t || taken.has(t)) continue;
       let d = Infinity;
-      for (const a of island.altarSites) d = Math.min(d, Math.hypot(a.x - p.x, a.z - p.z));
-      if (d > bestD) { bestD = d; best = p; }
+      for (const a of island.altarSites) d = Math.min(d, Math.hypot(a.x - t.x, a.z - t.z));
+      if (d > bestD) { bestD = d; best = t; }
     }
     if (!best) break;
-    if (island.altarSites.length && bestD < ALTAR_MIN_GAP) break;   // île saturée
-    /* flatPoint ignore déjà les tuiles SANCTUARY : marquer au fur et à mesure
-       empêche donc naturellement deux sanctuaires de se superposer. */
-    reserveSanctuary(island, best.tile);
-    island.altarSites.push({ x: best.x, z: best.z, tile: best.tile });
+    /* Saturation : quand elle arrive, elle est franche — relâcher l'écart par
+       paliers a été essayé et ne plaçait pas un seul sanctuaire de plus sur
+       300 cartes. Les places restantes sont alors toutes collées aux autres. */
+    if (island.altarSites.length && bestD < ALTAR_MIN_GAP) break;
+    /* Centré sur la tuile, et non tiré au hasard dedans : l'emprise tombe
+       ainsi au milieu de la zone plate au lieu d'en mordre le bord. */
+    taken.add(best);
+    reserveSanctuary(island, best);
+    island.altarSites.push({ x: best.x, z: best.z, tile: best });
   }
 }
 

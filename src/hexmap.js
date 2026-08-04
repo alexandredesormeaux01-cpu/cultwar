@@ -1352,36 +1352,34 @@ export function makeTilePlacer(island, rng = Math.random) {
 export function isFlatTile(island, t, rings = 1) {
   if (!island || !t) return false;
   /* Balayage du disque axial de rayon `rings` autour de la tuile. Une place de
-     sanctuaire fait maintenant plus d'une tuile de rayon : se contenter des
-     six voisins laisserait son dallage mordre sur le flanc du plateau suivant. */
+     sanctuaire fait plus d'une tuile de rayon : se contenter des six voisins
+     laisserait son dallage mordre sur le flanc du plateau suivant.
+
+     L'assise doit être PLEINE autant que plate. La version précédente ne
+     testait le niveau que des voisins existants, si bien qu'une tuile de bord
+     entourée de vide passait pour parfaitement plate — d'où des sanctuaires
+     bâtis à moitié au-dessus du gouffre. Un voisin manquant est maintenant
+     rédhibitoire. */
   for (let dq = -rings; dq <= rings; dq++) {
     const lo = Math.max(-rings, -dq - rings);
     const hi = Math.min(rings, -dq + rings);
     for (let dr = lo; dr <= hi; dr++) {
       const nb = island.byKey.get(key(t.q + dq, t.r + dr));
-      if (nb && nb.level !== t.level) return false;
+      if (!nb) return false;
+      if (nb.level !== t.level) return false;
     }
   }
   return true;
 }
 
-/** Point aléatoire sur une tuile plate — repli sur randomPoint si l'île n'en
- *  a aucune de libre. */
-export function flatPoint(island, minD = 0, maxD = Infinity, rng = Math.random, rings = 1) {
-  let pool = island.tiles.filter((t) => t.d >= minD && t.d <= maxD
+/** Toutes les tuiles dont l'assise est plate et pleine, dans une couronne de
+ *  distance au centre. Rendre la liste plutôt qu'un point permet d'échantillonner
+ *  beaucoup sans refiltrer l'île à chaque tirage. */
+export function flatTiles(island, minD = 0, maxD = Infinity, rings = 1) {
+  return island.tiles.filter((t) => t.d >= minD && t.d <= maxD
     && t.role !== ROLE.SANCTUARY && isFlatTile(island, t, rings));
-  /* Repli progressif : sur une île très accidentée, une place parfaitement
-     plate de deux tuiles de rayon peut ne pas exister. On relâche l'exigence
-     plutôt que de renoncer au sanctuaire. */
-  if (!pool.length && rings > 1) {
-    pool = island.tiles.filter((t) => t.d >= minD && t.d <= maxD
-      && t.role !== ROLE.SANCTUARY && isFlatTile(island, t, 1));
-  }
-  if (!pool.length) return randomPoint(island, minD, maxD, rng);
-  const t = pool[(rng() * pool.length) | 0];
-  const a = rng() * Math.PI * 2, rr = Math.sqrt(rng()) * (APOTHEM - 1.2);
-  return { x: t.x + Math.cos(a) * rr, z: t.z + Math.sin(a) * rr, tile: t };
 }
+
 
 /* ============================== Nappe de peinture ==============================
    La peinture était plaquée sur un quad unique, puis sur une grille déformée.
