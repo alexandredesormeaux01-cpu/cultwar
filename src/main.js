@@ -447,6 +447,7 @@ function buildMap(biomeKey = 'temperate') {
   island = generateIsland({ biomeKey, maxR: MAP_R });
   reserveAltarSites();
   rebuildPaintMask();
+  rebuildPaintSurface();   // la nappe doit épouser le relief de CETTE île
 
   // Ambiance : lumière du biome (ciel et brouillard sont posés par buildVoid)
   hemi.color.set(B.hemiSky);
@@ -3582,13 +3583,43 @@ vec3 paintVoronoi(vec2 uv, float time) {
 };
 paintMat.customProgramCacheKey = () => 'paint-water-gel-v19';
 paintMat.needsUpdate = true;
+/* ---- Nappe de peinture ----
+   C'était un simple quad posé à y = 0.04. Depuis que les tuiles ont des
+   niveaux, toute peinture sur un plateau se retrouvait ENTERRÉE dans la
+   croûte : un sanctuaire en hauteur peignait, mais on ne voyait rien.
+
+   La nappe est donc subdivisée et chaque sommet est remonté à la hauteur du
+   sol sous lui. Deux effets pour un : la peinture apparaît sur les plateaux,
+   et entre deux niveaux les sommets voisins interpolent le long de la
+   falaise — la couleur descend sur la tuile basse en épousant le bord, au
+   lieu de s'arrêter net à l'arête.
+
+   La subdivision est plus fine qu'une tuile (HEX_R = 4.1) pour que chaque
+   dalle porte plusieurs sommets, sinon un plateau étroit serait raboté par
+   l'interpolation. */
+const PAINT_SEGS = IS_MOBILE ? 88 : 132;   // ~1,4 u / ~0,94 u par maille
 const paintMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(PAINT_SPAN, PAINT_SPAN).rotateX(-Math.PI / 2),
+  new THREE.PlaneGeometry(PAINT_SPAN, PAINT_SPAN, PAINT_SEGS, PAINT_SEGS).rotateX(-Math.PI / 2),
   paintMat
 );
 paintMesh.position.y = 0.04;
 paintMesh.renderOrder = 1;
 scene.add(paintMesh);
+
+/** Replaque la nappe sur le relief. À rappeler à chaque nouvelle île. */
+function rebuildPaintSurface() {
+  if (!island) return;
+  const pos = paintMesh.geometry.attributes.position;
+  const arr = pos.array;
+  for (let i = 0; i < pos.count; i++) {
+    const x = arr[i * 3], z = arr[i * 3 + 2];
+    /* Hors de l'île, on garde le niveau de la mer : ces sommets sont de toute
+       façon masqués par le découpage en hexagones. */
+    arr[i * 3 + 1] = groundY(x, z);
+  }
+  pos.needsUpdate = true;
+  paintMesh.geometry.computeBoundingSphere();
+}
 
 let paintDirty = false, paintUploadT = 0, paintNeedsClip = false;
 
