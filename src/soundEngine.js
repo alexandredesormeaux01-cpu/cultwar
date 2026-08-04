@@ -38,14 +38,20 @@ const SFX_GROUPS = {
   earth: ['earth_1', 'earth_2', 'earth_3'],
 };
 
+/* Deux MORCEAUX distincts, et non deux stems d'un même thème comme avant :
+   « Pixel Adventure » porte l'exploration, « 8-bit Rush » prend le relais quand
+   la partie s'emballe. Voir _resumeLayers pour la conséquence — on ne peut plus
+   caler l'un sur la position de l'autre. */
 const MUSIC = {
-  match: asset('music_pocket_quest.mp3'),
-  pulse: asset('music_pocket_quest_pulse.mp3'),
+  match: asset('music_pixel_adventure.mp3'),
+  pulse: asset('music_8bit_rush.mp3'),
 };
 
 const MUSIC_VOL = 0.38;
 const SFX_VOL = 0.75;
-const MUSIC_XFADE = 1.4; // secondes pour passer base ↔ pulse
+/* Fondu allongé : deux morceaux différents se recouvrent pendant la
+   transition, et 1,4 s suffisait quand il s'agissait du même thème. */
+const MUSIC_XFADE = 2.2;
 
 class SoundEngine {
   constructor() {
@@ -388,10 +394,11 @@ class SoundEngine {
       this._base.play().catch(() => {});
     }
     if (this._pulse && k > 0.001 && this._pulse.paused) {
-      /* Aligne grossièrement le pulse sur la base pour éviter un cut sec. */
-      if (this._base && !this._base.paused) {
-        try { this._pulse.currentTime = this._base.currentTime; } catch (_) {}
-      }
+      /* Départ au début du morceau. L'ancienne version calait le pulse sur la
+         position de la base : cohérent tant que c'était le même thème mixé
+         deux fois, absurde maintenant que ce sont deux musiques différentes —
+         on tombait au hasard au milieu de la seconde. */
+      try { this._pulse.currentTime = 0; } catch (_) {}
       this._pulse.play().catch(() => {});
     }
     if (this._base && k >= 0.999 && !this._base.paused) this._base.pause();

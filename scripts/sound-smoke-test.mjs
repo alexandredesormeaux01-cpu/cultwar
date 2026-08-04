@@ -55,6 +55,20 @@ for (const [group, names] of Object.entries(GROUPS)) {
   ok(`${group} : jamais deux fois de suite la même`, repeats === 0);
 }
 
+/* La musique n'a pas de filet : un fichier absent ne lève rien, l'Audio échoue
+   en silence et la partie se joue sans bande-son. On vérifie donc que les deux
+   morceaux référencés existent bel et bien sur le disque. */
+console.log('\n== musique ==');
+{
+  const se = fs.readFileSync('src/soundEngine.js', 'utf8');
+  const block = /const MUSIC = \{([\s\S]*?)\};/.exec(se);
+  ok('le registre MUSIC est lisible', !!block);
+  const refs = block ? [...block[1].matchAll(/asset\('([^']+)'\)/g)].map((m) => m[1]) : [];
+  ok('deux morceaux déclarés', refs.length === 2);
+  for (const r of refs) ok(`${r} présent`, fs.existsSync('public/assets/' + r));
+  ok('plus aucune référence à l\'ancien thème', !se.includes('pocket_quest'));
+}
+
 console.log('\n== famille inconnue ==');
 ok('rend null sans exploser', soundEngine.playSFXGroup('inexistant') === null);
 
