@@ -36,7 +36,6 @@ export function createEffects() {
     banner: noop,           // (text)
     streakBump: noop,       // (streak, palier)
     hudDirty: noop,         // () — marquer HUD à recomposer
-    disciplesUiDirty: noop, // () — recomposer le panneau disciples
     shake: noop,            // (amount)
     slowmo: noop,           // (dur)
     endGame: noop,          // (forced)

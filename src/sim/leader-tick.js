@@ -39,7 +39,6 @@ export function stepLeaders(state, input, dt, ctx) {
     if (!f.alive) continue;
     f.boostT = Math.max(0, (f.boostT || 0) - dt);
     f.boostCd = Math.max(0, (f.boostCd || 0) - dt);
-    f.discipleCd = Math.max(0, (f.discipleCd || 0) - dt);
     f.slowT = Math.max(0, f.slowT - dt);
 
     const prevX = f.leader.x, prevZ = f.leader.z;

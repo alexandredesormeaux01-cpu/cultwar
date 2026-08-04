@@ -9,8 +9,8 @@
    est PAS — main.js l'attache lui-même. */
 
 /* -------------------------------- Agent --------------------------------
-   Un agent = un villageois (gris, disciple, ou en cours de conversion).
-   Le champ `discipleOf` porte l'appartenance : -1 = gris, sinon index de faction.
+   Un agent = un villageois (libre, dans un cortège, ou en cours de conversion).
+   Le champ `followerOf` porte l'appartenance : -1 = libre, sinon index de faction.
    Le champ `converting` porte l'index de faction en cours de rituel sur lui. */
 export function createAgent(id, x, z, ang = 0, baseScale = 1) {
   return {
@@ -31,7 +31,6 @@ export function createAgent(id, x, z, ang = 0, baseScale = 1) {
     converting: -1,
     convertingDisc: null,
     stumbleT: 0,
-    discipleOf: -1,
     followerOf: -1,
     discLvl: 1,
     discXp: 0,
@@ -60,7 +59,6 @@ export function resetAgent(a, x, z, ang = 0) {
   a.converting = -1;
   a.convertingDisc = null;
   a.stumbleT = 0;
-  a.discipleOf = -1;
   a.followerOf = -1;
   a._followerSlot = null;
   a._followerKey = null;
@@ -114,7 +112,6 @@ export function createFaction(i, teamIdx, cult, leaderKey, spawnX, spawnZ, opts 
     crystals: 0,
     fuel: opts.fuel ?? 100,
     grisAbs: 0,
-    discipleCd: 0,
     dist: 0,
     /* Pouvoirs actifs équipés — 2 slots (bouton principal + secondaire).
        `powers[i]` = id d'un pouvoir défini dans src/sim/powers.js, ou null.

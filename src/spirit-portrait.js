@@ -1,7 +1,7 @@
 /* ============================================================================
    Portraits d'esprits pour le HUD — rendu hors-écran du GLB déjà chargé
    ----------------------------------------------------------------------------
-   Les cadres de disciples affichent l'esprit élémentaire du leader. Plutôt que
+   Le HUD affiche l'esprit élémentaire du leader. Plutôt que
    de maintenir six PNG en parallèle des modèles, on cuit le portrait depuis le
    .glb lui-même : l'image reste automatiquement fidèle au modèle.
 

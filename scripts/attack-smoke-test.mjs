@@ -12,7 +12,7 @@ let pass = 0, fail = 0;
 const ok = (label, cond) => { if (cond) { pass++; console.log('  ok  ' + label); } else { fail++; console.log('  ÉCHEC  ' + label); } };
 
 function mkSpirit(id, x, z) {
-  return { id, x, z, vx: 0, vz: 0, dead: false, downT: 0, followerOf: -1, discipleOf: -1 };
+  return { id, x, z, vx: 0, vz: 0, dead: false, downT: 0, followerOf: -1 };
 }
 function mkFaction(i, x, z) {
   return { i, alive: true, count: 0, downT: 0, atkCd: 0, leader: { x, z, y: 0, dx: 0, dz: 0 } };

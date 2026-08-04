@@ -9,17 +9,14 @@
    - Les 9 modules sim se chargent en Node
    - Les factories créent des objets pleins
    - Le RNG seedé est déterministe
-   - Les helpers purs (leader speed, disciple XP) donnent les bonnes valeurs */
+   - Les helpers purs (vitesse du Leader) donnent les bonnes valeurs */
 
 import { createRng } from '../src/sim/rng.js';
 import * as constants from '../src/sim/constants.js';
 import {
   createSimState, createAgent, resetAgent, createFaction, createTeam, createShrine,
 } from '../src/sim/state.js';
-import {
-  discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac,
-} from '../src/sim/disciples.js';
-import { leaderSpeed, discipleCap, inOwnBase } from '../src/sim/leader.js';
+import { leaderSpeed, inOwnBase } from '../src/sim/leader.js';
 import { aiThink, paintMixAround, AI_TUNING } from '../src/sim/ai.js';
 import { createEffects } from '../src/sim/effects.js';
 import { stepLeaders, stepLeaderRepulsion } from '../src/sim/leader-tick.js';
@@ -65,7 +62,7 @@ section('factories d\'état');
   const a = createAgent(5, 1.5, -3.2, 0, 1.1);
   assert(a.id === 5, 'agent id');
   assert(a.x === 1.5 && a.z === -3.2, 'agent pos');
-  assert(a.discipleOf === -1, 'agent gris par défaut');
+  assert(a.followerOf === -1, 'agent libre par défaut');
   assert(a.dead === false, 'agent vivant');
 
   resetAgent(a, 10, 20, Math.PI);
@@ -87,22 +84,10 @@ section('factories d\'état');
   assert(t.wallR === 7.2, 'team wallR');
 }
 
-section('disciple helpers');
-assert(discXpNeed(1) === 30, 'discXpNeed(1) = 30');
-assert(discXpNeed(2) === 45, 'discXpNeed(2) = 45');
-assert(discXpNeed(3) === 0, 'discXpNeed(3) = 0');
-{
-  const a1 = { discLvl: 1 }, a2 = { discLvl: 2 }, a3 = { discLvl: 3 };
-  assert(discSpeedMul(a1) === 1, 'disc lvl 1 = 1x');
-  assert(Math.abs(discSpeedMul(a2) - 1.1) < 1e-9, 'disc lvl 2 = 1.1x');
-  assert(Math.abs(discSpeedMul(a3) - 1.32) < 1e-9, 'disc lvl 3 = 1.32x');
-  assert(discSpd(a1) === constants.DISC_SPD, 'discSpd lvl 1');
-}
-
 section('leader helpers avec ctx');
 {
   const ctx = {
-    skillMods: { speedMaxMult: 1, speedMinMult: 1, discipleMaxBonus: 0 },
+    skillMods: { speedMaxMult: 1, speedMinMult: 1 },
     paintOwnerAt: () => -1,
   };
   const f = createFaction(0, 0, { c: 0, name: '', sym: '' }, 'monk', 0, 0);
@@ -111,8 +96,6 @@ section('leader helpers avec ctx');
   f.count = constants.N_REF;
   const v2 = leaderSpeed(f, ctx);
   assert(Math.abs(v2 - constants.V_MIN) < 1e-9, `leader plein → V_MIN (${v2})`);
-
-  assert(discipleCap(f, ctx) === constants.DISCIPLE_MAX_BASE, 'discipleCap base');
 
   const teams = [{ baseX: 0, baseZ: 0, wallR: 7.2 }];
   assert(inOwnBase(f, teams) === true, 'leader à sa base');

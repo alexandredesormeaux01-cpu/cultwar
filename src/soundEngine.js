@@ -13,8 +13,6 @@ const SFX = {
   convert: asset('sfx_convert.mp3'),
   ui_click: asset('sfx_click.mp3'),
   defeat: asset('sfx_defeat.mp3'),
-  disciple: asset('sfx_disciple.mp3'),
-  disciple_alien: asset('sfx_disciple_alien.mp3'),
   bell: asset('sfx_bell.mp3'),
   crystal: asset('sfx_crystal_explode.mp3'),
   paint_orb: asset('sfx_paint_orb.mp3'),

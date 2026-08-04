@@ -59,7 +59,7 @@ export const STREAK_PALIERS = [5, 10, 25, 50, 100];
 
 /* ---- Conversion / aura ---- */
 /* La capture se fait exclusivement à la toile lancée : approcher un esprit ne
-   le convertit plus, ni pour le Leader ni pour ses disciples. CONV_R sert
+   le convertit plus. CONV_R sert
    toujours de rayon de référence pour la fuite, le ciblage de l'IA et les
    effets — d'où le drapeau plutôt qu'une suppression. */
 export const CONV_BY_PROXIMITY = false;
@@ -67,24 +67,10 @@ export const CONV_R = 3.15;
 export const CONV_RITUAL_T = 0.62;
 export const FLEE_R = 11;
 
-/* ---- Disciples ---- */
-export const DISCIPLE_CHANCE = 0.10;
-export const DISCIPLE_COOLDOWN = 10.0;
-export const DISCIPLE_MAX_BASE = 3;
-export const DISC_HUNT_R = 22;
-export const DISC_SPD = 7.5;
-export const DISC_FLEE_R = 6.5;
-export const DISC_HALO_Y = 2.45;
-export const DISC_DETOUR_T = 1.1;
-export const DISC_PAINT_R = 0.62;
-export const DISC_SEP_R = 9;
-/* Priorité #1 : peindre le maître. Bombes chassées loin ; au-dessous de
-   DISC_FUEL_CRITICAL le disciple abandonne presque toute chasse de gris. */
-export const DISC_BOMB_R = 48;
-export const DISC_FUEL_CRITICAL = 0.40;
-export const DISC_FUEL_COMFORT = 0.72;
-export const DISC_LVL_MAX = 3;
-export const DISC_XP_TO_NEXT = [0, 30, 45];
+/* Les disciples ont été retirés : un esprit promu quittait le stock livrable
+   aux sanctuaires tout en comptant dans f.count, ce qui pénalisait la boucle
+   de jeu au lieu de la servir. */
+
 
 /* ---- Followers (convertis fidèles) ---- */
 export const FOLLOWER_SCALE = 0.55;

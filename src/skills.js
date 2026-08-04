@@ -90,7 +90,6 @@ export const SKILL_DEFS = [
   /* ---- Essaim ---- */
   sk('flock',      'essaim', 'Premier cercle',   '👥', 10, 'Fidèles de départ +1 / niv.',                 null,           { flock: 1 }),
   sk('noyau',      'essaim', 'Noyau dévot',      '⬤', 10, 'Fidèles de départ +1 / niv.',                 { flock: 2 },    { flock: 1 }),
-  sk('apotres',    'essaim', 'Apôtres',          '✝', 5,  'Disciples max +1 / niv. (base 3).',           { noyau: 2 },    { disciples: 1 }),
   sk('cohesion',   'essaim', 'Cohésion',         '🔗', 10, 'Formation plus serrée +3 % / niv.',           { noyau: 2 },    { formation: 0.03 }),
   sk('maree',      'essaim', 'Marée humaine',    '🌊', 10, 'Rayon de foule +2 % / niv.',                 { cohesion: 2 }, { crowd: 0.02 }),
   sk('legion',     'essaim', 'Légion fervente',  '🏟', 8,  'Fidèles de départ +2 / niv.',                { maree: 3 },    { flock: 2 }),
@@ -251,7 +250,6 @@ export function getSkillModsForSkills(skills) {
   const grayConvAdd = g('grayConv');
   const overwhelmAdd = g('overwhelm');
   const pushAdd = g('push');
-  const disciplesAdd = g('disciples');
   /* Combat par cristaux : cadence de tir et dégâts encaissés.
      `resist` sert désormais de probabilité d'ignorer un tir (voir damageFaction),
      et non plus de diviseur de vitesse de conversion. */
@@ -267,7 +265,6 @@ export function getSkillModsForSkills(skills) {
     knightRangeMult: 1 + knightRangeAdd,
     knightMaxBonus: Math.floor(knightMaxAdd),
     extraFlock: Math.round(flockAdd),
-    discipleMaxBonus: Math.round(disciplesAdd),
     formationMult: 1 + formationAdd,
     crowdMult: 1 + crowdAdd,
     speedMaxMult: 1 + speedMaxAdd,

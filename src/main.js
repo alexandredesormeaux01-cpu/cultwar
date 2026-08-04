@@ -56,10 +56,7 @@ import {
   BOOST_MULT, BOOST_DUR, BOOST_CD,
   STREAK_WINDOW, STREAK_PALIERS,
   CONV_R, CONV_RITUAL_T, FLEE_R,
-  DISCIPLE_CHANCE, DISCIPLE_COOLDOWN, DISCIPLE_MAX_BASE,
-  DISC_HUNT_R, DISC_SPD, DISC_FLEE_R, DISC_HALO_Y, DISC_DETOUR_T,
-  DISC_PAINT_R, DISC_SEP_R, DISC_LVL_MAX, DISC_XP_TO_NEXT,
-  FOLLOWER_SCALE, FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD, DISCIPLE_FORM_SCALE,
+  FOLLOWER_SCALE, FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
   RALLY_CD, RALLY_DUR, GRAY_MIN,
   FERVOR_GAIN, FERVOR_DECAY, ECSTASY_DUR, ECSTASY_RANGE, ECSTASY_CONV,
   SHRINE_R, SHRINE_CAPTURE_T, SHRINE_INCOME_T, SHRINE_INCOME_N,
@@ -67,15 +64,14 @@ import {
   V_MAX, V_MIN, N_REF, LEADER_RESP, CAM_RESP, CAM_LOOK_RESP,
 } from './sim/constants.js';
 import { createAgent, resetAgent, createFaction, createTeam } from './sim/state.js';
-import { discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac } from './sim/disciples.js';
-import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap } from './sim/leader.js';
+import { leaderSpeed as _leaderSpeed } from './sim/leader.js';
 import { effects } from './sim/effects.js';
 import { aiThink as _aiThink, paintMixAround as _paintMixAround } from './sim/ai.js';
 import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion, playerDir } from './sim/leader-tick.js';
 import { stepCrowd as _stepCrowd } from './sim/crowd-tick.js';
 import {
   EVENT_TIMES, EVENT_SPIN_DUR, EVENT_REVEAL_DUR,
-  EVENT_DECK, pickEvent, applyEvent, clampDiscipleLevel,
+  EVENT_DECK, pickEvent, applyEvent,
 } from './sim/events.js';
 import { createNetClient } from './net/client.js';
 import { createRng } from './sim/rng.js';
@@ -675,55 +671,6 @@ for (const m of crowds) {
 for (let id = 0; id < MAX_AGENTS; id++) crowdOf(id).userData.anim.setX(slotOf(id), id * 1.7);
 trimCrowdCounts(0);   // rien à dessiner tant qu'aucun agent n'existe
 
-/* ---- Auréoles de disciples ----
-   Anneau horizontal additif au-dessus de la tête, teinté à la couleur du culte.
-   InstancedMesh : un slot par agent (même id), scale 0 tant que ce n'est pas
-   un disciple — pas de gestion de pool séparée. */
-const DISC_HALO_GEO = new THREE.TorusGeometry(0.26, 0.038, 6, 20).rotateX(Math.PI / 2);
-const discHaloMat = new THREE.MeshBasicMaterial({
-  color: 0xffffff,
-  transparent: true,
-  opacity: 0.9,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  toneMapped: false,
-});
-const discHalos = new THREE.InstancedMesh(DISC_HALO_GEO, discHaloMat, AGENT_CAP);
-discHalos.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-discHalos.count = 0;
-discHalos.frustumCulled = false;
-discHalos.renderOrder = 3;
-if (!discHalos.instanceColor) {
-  discHalos.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(AGENT_CAP * 3), 3);
-}
-for (let i = 0; i < AGENT_CAP; i++) {
-  discHalos.setMatrixAt(i, ZERO_MATRIX);
-  discHalos.setColorAt(i, GRAY);
-}
-scene.add(discHalos);
-setCharLayer(discHalos);
-/* Auréole désactivée : depuis que le cortège colle au Leader, elle flotte
-   visuellement au-dessus de lui et devient parasite. La logique reste en place
-   (position/couleur mises à jour chaque frame) : suffit de repasser à true
-   pour la réafficher. */
-discHalos.visible = false;
-
-function hideDiscHalo(id) {
-  discHalos.setMatrixAt(id, ZERO_MATRIX);
-  discHalos.instanceMatrix.needsUpdate = true;
-}
-
-function setDiscHalo(id, x, y, z, color, pulse = 1, bodyScale = 1) {
-  const s = 0.9 + pulse * 0.18;
-  tmpS.set(s, s * 0.5, s);
-  tmpP.set(x, (y || 0) + DISC_HALO_Y * bodyScale + pulse * 0.1, z);
-  tmpQ.identity();
-  tmpM.compose(tmpP, tmpQ, tmpS);
-  discHalos.setMatrixAt(id, tmpM);
-  discHalos.setColorAt(id, color);
-  discHalos.instanceMatrix.needsUpdate = true;
-  discHalos.instanceColor.needsUpdate = true;
-}
 
 
 function makeLeaderGroup(cult, leaderKey = 'monk') {
@@ -1004,7 +951,7 @@ const LEADERS = {
   alien:    { url: 'assets/models/alien_rigged.glb',    tint: 'none'   },  // extraterrestre : peau grise + haillons — palette d'origine
   chief:    { url: 'assets/models/chief_rigged.glb',    tint: 'none'   },  // chef des Premières Nations : coiffe et perles très signées
 };
-/* Chaque Leader a un esprit élémentaire assigné : ses disciples prennent la
+/* Chaque Leader a un esprit élémentaire assigné : son cortège prend la
    forme de cet esprit au lieu d'être des copies humanoïdes du Leader. Les
    élémentaires « sauvages » (villageois neutres) portent un halo doré tant
    qu'ils n'ont pas été absorbés — visuel de « proie premium à convertir ». */
@@ -1842,7 +1789,7 @@ function updateSpiritDives(dt) {
     }
 
     /* ---- Détection de l'esprit acculé ---- */
-    if (a._web || (a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0) { a._corner = 0; continue; }
+    if (a._web || (a.followerOf ?? -1) >= 0) { a._corner = 0; continue; }
 
     let nearD = 1e9;
     for (const f of factions) {
@@ -1963,7 +1910,6 @@ function stealSpiritFromLeader(f) {
     releaseFollowerSlot(fol);
     fol.dead = true;
     fol.followerOf = -1;
-    fol.discipleOf = -1;
     hideAgent(fol.id);
     freeAgentIds.push(fol.id);
   }
@@ -2447,7 +2393,6 @@ function consumeFollower(s, f) {
   releaseFollowerSlot(s);
   s.dead = true;
   s.followerOf = -1;
-  s.discipleOf = -1;
   hideAgent(s.id);
   freeAgentIds.push(s.id);
   f.count = Math.max(0, (f.count || 0) - 1);
@@ -2596,7 +2541,6 @@ for (const [key, def] of Object.entries(LEADERS)) {
        frame de course, bras en pleine foulée — mauvaise pose de portrait. */
     renderSpiritPortrait(renderer, elGltf.scene, key);
     buildFollowerMesh(key, elGltf, elTex);
-    updateDisciplesUI(true);
   }, undefined, (err) => console.warn('[follower] failed to load', LEADER_ELEMENT[key], err));
 }
 
@@ -2755,7 +2699,6 @@ function spawnAgent(x, z) {
     resetAgent(a, x, z, ang);
     grayCount++;
     setAgentColor(a.id, GRAY);
-    hideDiscHalo(a.id);
     return a;
   }
 
@@ -2767,36 +2710,12 @@ function spawnAgent(x, z) {
   agents.push(a);
   grayCount++;
   setAgentColor(a.id, GRAY);
-  hideDiscHalo(a.id);
   return a;
 }
 
 /* ---- Absorption / conversion d'un gris ----
-   Fin du rituel : soit dissolution + fuel, soit promotion en disciple (reste
-   sur la carte, auréole de culte, chasse les autres gris). */
+   Fin du rituel : l'esprit rejoint le cortège du Leader. */
 const _convCol = new THREE.Color();
-function grantDiscipleXp(disc) {
-  if (!disc || disc.dead || (disc.discipleOf ?? -1) < 0) return;
-  if ((disc.discLvl || 1) >= DISC_LVL_MAX) return;
-  disc.discXp = (disc.discXp || 0) + 1;
-  let leveled = false;
-  while ((disc.discLvl || 1) < DISC_LVL_MAX) {
-    const need = discXpNeed(disc.discLvl || 1);
-    if ((disc.discXp || 0) < need) break;
-    disc.discXp -= need;
-    disc.discLvl = (disc.discLvl || 1) + 1;
-    leveled = true;
-  }
-  if ((disc.discLvl || 1) >= DISC_LVL_MAX) disc.discXp = 0;
-  if ((disc.discipleOf ?? -1) === 0) {
-    if (leveled) {
-      soundEngine.playSFX('convert', { volume: 0.55, rate: 1.35 });
-      spawnShock(disc.x, disc.z, factions[0]?.color || new THREE.Color(0xffe000), 2.4, 0.28);
-    }
-    updateDisciplesUI();
-  }
-}
-
 function creditConvert(a, f, opts = {}) {
   f.grisAbs = (f.grisAbs || 0) + 1;
 
@@ -2813,16 +2732,12 @@ function creditConvert(a, f, opts = {}) {
     a.x + (Math.random() - 0.5) * 0.6,
     a.z + (Math.random() - 0.5) * 0.6, f);
 
-  if (opts.byDisciple) grantDiscipleXp(opts.byDisciple);
 
   if (f.i === 0) {
     const waveR = 2.1 + Math.min(5.5, streak * 0.24);
     spawnShock(a.x, a.z, f.color, waveR, 0.3 + Math.min(0.28, streak * 0.014));
     spawnShock(f.leader.x, f.leader.z, f.color, 1.5 + Math.min(2.2, streak * 0.09), 0.22);
-    if (opts.sfx === 'disciple') {
-      const discSfx = f.leaderKey === 'alien' ? 'disciple_alien' : 'disciple';
-      soundEngine.playSFX(discSfx, { volume: 0.85 });
-    } else {
+    {
       soundEngine.playSFX('convert', {
         volume: 0.78,
         rate: 1 + Math.min(0.35, Math.max(0, streak - 1) * 0.035),
@@ -2834,7 +2749,6 @@ function creditConvert(a, f, opts = {}) {
   }
 }
 
-function discipleCap(f) { _simCtx.skillMods = skillMods; return _discipleCap(f, _simCtx); }
 
 function releaseFollowerSlot(a) {
   if (a._followerSlot == null || !a._followerKey) return;
@@ -2891,7 +2805,7 @@ function assignFollowerSlot(a, f) {
   anim.setXY(slot, Math.random() * 14, 0);
   anim.needsUpdate = true;
   /* Pose immédiate — sinon invisible jusqu'au prochain crowd-tick. */
-  const sc = (a.discipleOf ?? -1) >= 0 ? DISCIPLE_FORM_SCALE : 1;
+  const sc = 1;
   tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
   tmpP.set(a.x, a.y || 0, a.z);
   tmpS.set(sc, sc, sc);
@@ -2915,7 +2829,7 @@ function flushPendingFollowers(readyKey) {
   for (let i = _pendingFollowers.length - 1; i >= 0; i--) {
     const { a, f } = _pendingFollowers[i];
     if (!a || a.dead) { _pendingFollowers.splice(i, 1); continue; }
-    const isConv = (a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0;
+    const isConv = (a.followerOf ?? -1) >= 0;
     if (!isConv) { _pendingFollowers.splice(i, 1); continue; }
     const key = (f && f.leaderKey) || 'monk';
     if (readyKey && key !== readyKey && readyKey !== 'monk') continue;
@@ -2929,7 +2843,7 @@ function ensureAllFollowerMorphs() {
   for (let i = 0; i < agents.length; i++) {
     const a = agents[i];
     if (!a || a.dead) continue;
-    let fi = a.discipleOf ?? -1;
+    let fi = -1;
     if (fi < 0) fi = a.followerOf ?? -1;
     if (fi < 0) continue;
     const f = factions[fi];
@@ -2945,43 +2859,19 @@ function convertToFollower(a, f, byDisc = null) {
   a.extractProgress = 0;
   a.converting = -1;
   a.convertingDisc = null;
-  a.discipleOf = -1;
   a.followerOf = f.i;
   if (!a._origBase) a._origBase = a.base;
   a.base = a._origBase * FOLLOWER_SCALE;
   a.vx = 0; a.vz = 0;
   grayCount--;
   f.count = (f.count || 0) + 1;
-  hideDiscHalo(a.id);
   queueFollowerMorph(a, f);
-  creditConvert(a, f, { byDisciple: byDisc });
-}
-
-function promoteToDisciple(a, f, byDisc = null) {
-  a.dead = false;
-  a.extractProgress = 0;
-  a.converting = -1;
-  a.convertingDisc = null;
-  a.discipleOf = f.i;
-  a.discLvl = 1;
-  a.discXp = 0;
-  a.vx = 0; a.vz = 0;
-  a._paintAcc = 0;
-  grayCount--;
-  f.count = (f.count || 0) + 1;
-  /* Même morph Leader pour paysan / paysanne / chevalier (auréole + taille Leader). */
-  if (!a._origBase) a._origBase = a.base;
-  a.base = a._origBase;
-  queueFollowerMorph(a, f);
-  setDiscHalo(a.id, a.x, a.y || 0, a.z, f.color, 1, a.base || 1);
-  creditConvert(a, f, { sfx: 'disciple', byDisciple: byDisc });
-  if (f.i === 0) updateDisciplesUI();
+  creditConvert(a, f);
 }
 
 function finishConvert(a, f, byDisc = null) {
   if (a.dead || !f || !f.alive) return;
   if (variantOf(a.id) < 3) return; // Paysans, paysannes et chevaliers PNJ ne sont pas assimilables
-  if ((a.discipleOf ?? -1) >= 0) return;
   const wasFollower = (a.followerOf ?? -1) >= 0;
   if (wasFollower && a.followerOf === f.i) return;
   /* Sanctuaire : si ce fidèle est protégé par le dôme de son culte actuel,
@@ -2997,22 +2887,10 @@ function finishConvert(a, f, byDisc = null) {
     a.followerOf = -1;
     grayCount++;
   }
-  /* Plafond = nb de disciples vivants, PAS f.count (croyants totaux) —
-     sinon après 3 converts le culte ne peut plus jamais former de disciple. */
-  let discN = 0;
-  for (let i = 0; i < agents.length; i++) {
-    const d = agents[i];
-    if (d && !d.dead && (d.discipleOf ?? -1) === f.i) discN++;
-  }
-  const underCap = discN < discipleCap(f);
-  const cooled = (f.discipleCd || 0) <= 0;
-  const rolled = Math.random() < DISCIPLE_CHANCE;
-  if (!wasFollower && underCap && cooled && rolled) {
-    promoteToDisciple(a, f, byDisc);
-    f.discipleCd = DISCIPLE_COOLDOWN;
-  } else {
-    convertToFollower(a, f, byDisc);
-  }
+  /* Tout esprit converti rejoint le cortège. La promotion en disciple a été
+     retirée : elle sortait l'esprit du stock livrable aux sanctuaires tout en
+     le comptant dans f.count — elle punissait donc la conversion. */
+  convertToFollower(a, f);
 }
 
 function absorb(a, fi) {
@@ -3889,10 +3767,10 @@ const _crowdTickCtx = {
   islandApproachScore, islandPathBlocked, islandRandomPoint,
   finishConvert: null,   // défini plus tard (déclaration circulaire)
   stampPaintAt: null,
-  setAgentColor: null, setDiscHalo: null, hideDiscHalo: null,
+  setAgentColor: null,
+  onFreed: () => { grayCount++; },
   crowdOf: null, slotOf: null, trimCrowdCounts: null,
   spawnSoulBurst: null, tone: null,
-  onDiscipleLostFaction: () => { grayCount++; },
   onFollowerLostFaction: (a) => {
     releaseFollowerSlot(a);
     setAgentColor(a.id, GRAY);
@@ -4077,102 +3955,6 @@ function updateRaceUI() {
      si un rival partage son z-index, quel que soit l'ordre de création. */
   const mine = raceMarks.get(0);
   if (mine && mine !== raceEl.lastElementChild) raceEl.appendChild(mine);
-}
-
-/* Cadres disciples (bord droit) : 1 cadre = 1 place de disciple du joueur.
-   Portrait = l'esprit élémentaire du leader ; anneau jaune = XP ; pastille =
-   niveau.
-   Les cadres sont PERMANENTS : il y en a toujours autant que le plafond de
-   disciples (bonus « Apôtres » compris). Un slot vide reste une silhouette
-   éteinte — le joueur voit d'emblée combien de places il lui reste à remplir,
-   et le HUD ne saute plus à chaque conversion. */
-const discHudEl = $('hud-disciples');
-let discHudSig = '';
-const discSlots = [];   // cadres réutilisés d'une frame à l'autre, jamais recréés
-
-function makeDiscSlot() {
-  const frame = document.createElement('div');
-  frame.className = 'disc-frame empty';
-  const xpRing = document.createElement('div');
-  xpRing.className = 'disc-frame-xp';
-  const clip = document.createElement('div');
-  clip.className = 'disc-frame-clip';
-  const img = document.createElement('img');
-  img.alt = '';
-  img.draggable = false;
-  clip.appendChild(img);
-  const badge = document.createElement('span');
-  badge.className = 'disc-lvl';
-  frame.append(xpRing, clip, badge);
-  discHudEl.appendChild(frame);
-  discSlots.push(frame);
-  return frame;
-}
-
-/** @param {boolean} force  recalcule même si la signature n'a pas bougé
-    (le portrait de l'esprit arrive après coup, au chargement du GLB). */
-function updateDisciplesUI(force = false) {
-  if (!discHudEl) return;
-  const f = factions[0];
-  const list = [];
-  for (const a of agents) {
-    if (a && !a.dead && (a.discipleOf ?? -1) === 0) list.push(a);
-  }
-  list.sort((a, b) => a.id - b.id);
-
-  const ring = (f && f.css) || '#7cf';
-  const portrait = getSpiritPortrait((f && f.leaderKey) || 'monk');
-  /* Le plafond peut grandir en cours de partie (compétence Apôtres) : les
-     cadres vides suivent, sans jamais descendre sous le nombre de disciples. */
-  const slotCount = Math.max(list.length, f ? discipleCap(f) : list.length);
-
-  const sig = list.map((a) =>
-    a.id + ':' + (a.discLvl || 1) + ':' + (a.discXp || 0)
-  ).join('|') + '|' + ring + '|' + slotCount + '|' + (portrait ? 1 : 0);
-  if (sig === discHudSig && !force) return;
-  discHudSig = sig;
-
-  while (discSlots.length < slotCount) makeDiscSlot();
-  while (discSlots.length > slotCount) discSlots.pop().remove();
-  /* Dès qu'un portrait existe, la silhouette CSS de repli s'efface. */
-  discHudEl.classList.toggle('portrait-ready', !!portrait);
-
-  for (let i = 0; i < discSlots.length; i++) {
-    const frame = discSlots[i];
-    const a = list[i];
-    frame.style.setProperty('--disc-ring', ring);
-
-    /* Le portrait alimente aussi les slots vides : le CSS l'y écrase en
-       silhouette noire, ce qui donne une place « en attente d'esprit »
-       plutôt qu'un disque vide. */
-    const img = frame.querySelector('img');
-    if (portrait && img.getAttribute('src') !== portrait) img.src = portrait;
-
-    if (!a) {
-      frame.classList.add('empty');
-      frame.classList.remove('max');
-      frame.style.setProperty('--xp', '0');
-      frame.querySelector('.disc-lvl').textContent = '';
-      frame.title = 'Place de disciple libre';
-      continue;
-    }
-
-    const lvl = a.discLvl || 1;
-    const wasEmpty = frame.classList.contains('empty');
-    frame.classList.remove('empty');
-    /* Rejoue l'animation d'apparition seulement quand le slot se remplit. */
-    if (wasEmpty) {
-      frame.classList.remove('filling');
-      void frame.offsetWidth;   // force le redémarrage de l'animation CSS
-      frame.classList.add('filling');
-    }
-    frame.style.setProperty('--xp', String(discXpFrac(a)));
-    frame.classList.toggle('max', lvl >= DISC_LVL_MAX);
-    frame.querySelector('.disc-lvl').textContent = String(lvl);
-    frame.title = lvl >= DISC_LVL_MAX
-      ? `Esprit niv. ${lvl} (max)`
-      : `Esprit niv. ${lvl} — ${a.discXp || 0}/${discXpNeed(lvl)} XP`;
-  }
 }
 
 /* ---- Cycle jour/nuit : l'horloge silencieuse de la partie ----
@@ -4382,11 +4164,11 @@ function drawMinimap() {
     mctx.fill(); mctx.stroke();
   }
 
-  // --- Sceptiques (gris) + disciples (couleur de culte) ---
+  // --- Esprits libres et cortèges ---
   const dot = 2.2 * k;
   for (const a of agents) {
     if (a.dead) continue;
-    const fi = a.discipleOf ?? -1;
+    const fi = -1;
     if (fi >= 0 && factions[fi]) {
       mctx.fillStyle = factions[fi].css;
       mctx.globalAlpha = 1;
@@ -4576,7 +4358,6 @@ function botAltarGoal(f) {
     if (!ag || ag.dead || ag === banned) continue;
     const v = variantOf(ag.id);
     if (v < ELEM_FIRST) continue;
-    if ((ag.discipleOf ?? -1) >= 0) continue;
     if ((ag.followerOf ?? -1) === f.i) continue;
     if (ag._dive != null && !(ag.downT > 0)) continue;
 
@@ -4804,7 +4585,6 @@ function resetGame() {
   worldMods.bombDroughtT = 0;
   worldMods.grayPanicT = 0;
   worldMods.zealT = 0;
-  worldMods.discFreezeT = 0;
   netStatsT = 0;
   stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
   streak = 0; streakT = 0; rallyCd = 0; rallyT = 0;
@@ -4814,9 +4594,6 @@ function resetGame() {
   duelT = -1; judgeR = 999; judgeMesh.visible = false;
   duelEl.classList.add('hidden'); duelEl.classList.remove('urgent');
   fervorPct = -1;
-  discHudSig = '';
-  if (discHudEl) discHudEl.replaceChildren();
-  discSlots.length = 0;   // les cadres viennent d'être détachés du DOM
   /* Les cultes changent de leader d'une partie à l'autre : on repart de zéro
      plutôt que de garder des cadres au mauvais avatar. */
   raceSig = '';
@@ -5185,7 +4962,6 @@ const worldMods = {
   bombDroughtT: 0,
   grayPanicT: 0,
   zealT: 0,
-  discFreezeT: 0,
 };
 
 function bombCapNow() {
@@ -5217,7 +4993,7 @@ function spawnBombAt(x, z) {
 function updateBombs(dt) {
   /* Les cristaux de peinture ne réapparaissent plus : ils rechargeaient une
      jauge de carburant qui n'existe plus. La boucle de ramassage ci-dessous
-     reste en place — l'IA et les disciples lisent encore `bombs`, et un
+     reste en place — l'IA lit encore `bombs`, et un
      tableau vide traverse ces chemins sans rien casser. */
   bombT -= dt;
   for (let i = bombs.length - 1; i >= 0; i--) {
@@ -5229,14 +5005,6 @@ function updateBombs(dt) {
     for (const f of factions) {
       if (!f.alive) continue;
       if (Math.hypot(f.leader.x - b.x, f.leader.z - b.z) < 2.3) { taker = f; break; }
-    }
-    if (!taker) {
-      for (const a of agents) {
-        if (a.dead || (a.discipleOf ?? -1) < 0) continue;
-        const f = factions[a.discipleOf];
-        if (!f || !f.alive) continue;
-        if (Math.hypot(a.x - b.x, a.z - b.z) < 2.3) { taker = f; break; }
-      }
     }
     if (!taker) continue;
     scene.remove(b.grp);
@@ -5359,13 +5127,6 @@ const eventCtx = {
       f.cult = { ...f.cult, c: src.c };
     }
   },
-  levelUpDisciples(n = 1) {
-    for (const a of agents) {
-      if (!a || a.dead || (a.discipleOf ?? -1) < 0) continue;
-      clampDiscipleLevel(a, n);
-    }
-    updateDisciplesUI();
-  },
   drainAllFuel(dur = 10) {
     worldMods.fuelLockT = Math.max(worldMods.fuelLockT, dur);
     for (const f of factions) {
@@ -5447,9 +5208,6 @@ const eventCtx = {
   zealAura(dur = 12) {
     worldMods.zealT = Math.max(worldMods.zealT, dur);
   },
-  freezeDisciples(dur = 8) {
-    worldMods.discFreezeT = Math.max(worldMods.discFreezeT, dur);
-  },
   swapTwoLeaders() {
     const alive = factions.filter((f) => f && f.alive);
     if (alive.length < 2) return;
@@ -5481,7 +5239,7 @@ const eventCtx = {
     }
     for (const a of agents) {
       if (!a || a.dead) continue;
-      if ((a.discipleOf ?? -1) >= 0 || (a.followerOf ?? -1) >= 0) continue;
+      if ((a.followerOf ?? -1) >= 0) continue;
       a.stumbleT = Math.max(a.stumbleT || 0, 0.6 + Math.random() * 0.5);
       a.vx *= 0.2; a.vz *= 0.2;
     }
@@ -5574,9 +5332,6 @@ function tickWorldMods(dt) {
   }
   if (worldMods.zealT > 0) {
     worldMods.zealT = Math.max(0, worldMods.zealT - dt);
-  }
-  if (worldMods.discFreezeT > 0) {
-    worldMods.discFreezeT = Math.max(0, worldMods.discFreezeT - dt);
   }
 }
 
@@ -5774,14 +5529,14 @@ function updateShields(dt) {
         s.grp.position.set(s.x, f.leader.y || 0, s.z);
       }
     }
-    /* Marque les fidèles/disciples propres dans le rayon comme immunisés
+    /* Marque les fidèles propres dans le rayon comme immunisés
        jusqu'à un peu après ce tick (le check se fait par timestamp). */
     const r2 = s.radius * s.radius;
     const until = elapsed + 0.12;
     for (let j = 0; j < agents.length; j++) {
       const a = agents[j];
       if (!a || a.dead) continue;
-      const owner = (a.followerOf ?? -1) >= 0 ? a.followerOf : (a.discipleOf ?? -1);
+      const owner = (a.followerOf ?? -1);
       if (owner !== s.factionIdx) continue;
       const dx = a.x - s.x, dz = a.z - s.z;
       if (dx * dx + dz * dz > r2) continue;
@@ -5891,7 +5646,6 @@ function totemConvertWave(t, maxAgents = 3) {
   for (let i = 0; i < agents.length && taken < maxAgents; i++) {
     const a = agents[i];
     if (!a || a.dead) continue;
-    if ((a.discipleOf ?? -1) >= 0) continue;      // déjà quelqu'un
     if ((a.followerOf ?? -1) === f.i) continue;   // déjà à nous
     const dx = a.x - t.x, dz = a.z - t.z;
     if (dx * dx + dz * dz > r2) continue;
@@ -6007,7 +5761,7 @@ function updateSpiritRespawn(dt) {
     if (!a || a.dead) continue;
     const v = variantOf(a.id);
     if (v < ELEM_FIRST) continue;
-    if ((a.followerOf ?? -1) >= 0 || (a.discipleOf ?? -1) >= 0) continue;
+    if ((a.followerOf ?? -1) >= 0) continue;
     _wildByElem[v]++;
     wild++;
   }
@@ -6041,7 +5795,7 @@ function updateSpiritRespawn(dt) {
    c'est exactement ce qui pourra être déposé.
 
    Les vignettes sont cuites depuis les modèles élémentaires eux-mêmes, via le
-   même rendu hors-écran que les portraits de disciples. Aucune image à
+   même rendu hors-écran que les portraits. Aucune image à
    maintenir en parallèle des .glb. */
 const spiritBarEl = $('hud-spirits');
 const spiritChips = new Map();   // variante → { el, img, n, val }
@@ -6235,7 +5989,7 @@ function update(dt) {
 
   discHalos.count = agents.length;
 
-  /* -- Intégration + rendu instancié (gris + disciples) : extrait dans
+  /* -- Intégration + rendu instancié de la foule : extrait dans
         src/sim/crowd-tick.js. La boucle est identique, mais toutes les
         dépendances passent par ctx — le sim tournera headless côté serveur. */
   _crowdTickState.agents = agents;
@@ -6245,15 +5999,12 @@ function update(dt) {
   _crowdTickState.bombs = bombs;
   _crowdTickState.grayPanic = worldMods.grayPanicT > 0;
   _crowdTickState.zeal = worldMods.zealT > 0;
-  _crowdTickState.discFreeze = worldMods.discFreezeT > 0;
   if (!_crowdTickCtx.finishConvert) {
     // câblage tardif : ces fonctions sont définies plus haut mais on installe
     // les références au premier appel, une fois pour toutes.
     _crowdTickCtx.finishConvert = finishConvert;
     _crowdTickCtx.stampPaintAt = stampPaintAt;
     _crowdTickCtx.setAgentColor = setAgentColor;
-    _crowdTickCtx.setDiscHalo = setDiscHalo;
-    _crowdTickCtx.hideDiscHalo = hideDiscHalo;
     _crowdTickCtx.crowdOf = crowdOf;
     _crowdTickCtx.slotOf = slotOf;
     _crowdTickCtx.trimCrowdCounts = trimCrowdCounts;
@@ -6358,7 +6109,6 @@ function update(dt) {
   rallyT = Math.max(0, rallyT - dt);
 
   /* -- Jauge de peinture (remplace la Ferveur dans la barre du HUD) -- */
-  updateDisciplesUI();
   updateRaceUI();
   updateAttacks(dt);
   updateAltars(dt);
@@ -7455,11 +7205,6 @@ effects.install({
     setAgentColor(id, tmpColor);
   },
   hideAgent: (id) => hideAgent(id),
-  discHalo: (id, x, y, z, colorHex, alpha, scale) => {
-    tmpColor.setHex(colorHex);
-    setDiscHalo(id, x, y, z, tmpColor, alpha, scale);
-  },
-  hideDiscHalo: (id) => hideDiscHalo(id),
   shock: (x, z, colorHex, maxR, dur) => {
     tmpColor.setHex(colorHex);
     spawnShock(x, z, tmpColor, maxR, dur);
@@ -7472,7 +7217,6 @@ effects.install({
   sound: (name, opts) => soundEngine.playSFX(name, opts),
   banner: (text) => banner(text),
   hudDirty: () => updateHUD(),
-  disciplesUiDirty: () => updateDisciplesUI(),
   shake: (amount) => { shake = Math.max(shake, amount); },
   slowmo: (dur) => { slowmoT = Math.max(slowmoT, dur); },
   endGame: (forced) => endGame(forced),

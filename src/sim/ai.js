@@ -165,7 +165,7 @@ export function aiThink(f, dt, ctx) {
   let snack = null, snackD = 1e9;
   for (let k = 0; k < T.samples + 10; k++) {
     const a = agents[(Math.random() * agents.length) | 0];
-    if (!a || a.dead || (a.discipleOf ?? -1) >= 0) continue;
+    if (!a || a.dead) continue;
     if ((a.followerOf ?? -1) === f.i) continue;
     const d = Math.hypot(a.x - L.x, a.z - L.z);
     if (d < snackD) { snackD = d; snack = a; }

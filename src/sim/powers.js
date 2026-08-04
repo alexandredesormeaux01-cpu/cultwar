@@ -57,7 +57,6 @@ export const POWER_DEFS = {
       for (let i = 0; i < agents.length; i++) {
         const a = agents[i];
         if (!a || a.dead) continue;
-        if ((a.discipleOf ?? -1) >= 0) continue;
         if ((a.followerOf ?? -1) === f.i) continue;
         const dx = a.x - L.x, dz = a.z - L.z;
         if (dx * dx + dz * dz > R2) continue;

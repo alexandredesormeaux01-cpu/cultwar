@@ -471,7 +471,7 @@ button.big:active { transform: scale(.95); }
 }
 
 /* ---- Course aux esprits — jauge verticale, bord gauche ----
-   Symétrique des cadres de disciples à droite : même grammaire de cadre rond,
+   Même grammaire de cadre rond,
    mais la position le long de la jauge porte l'information. Le dégradé va du
    rouge (départ, en bas) au vert (objectif, en haut) : monter = gagner. */
 #hud-race {
@@ -577,7 +577,7 @@ button.big:active { transform: scale(.95); }
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
   z-index: 3;
 }
-/* Le meneur porte l'or, comme la pastille de niveau max des disciples. */
+/* Le meneur porte l'or. */
 .race-mark.lead .race-rank {
   background: #ffe000;
   border-color: #fff3a0;
@@ -590,164 +590,13 @@ button.big:active { transform: scale(.95); }
 }
 
 /* Disciples — cadres ronds, bord droit, espacés régulièrement */
-#hud-disciples {
-  position: absolute;
-  right: calc(10px + env(safe-area-inset-right));
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  gap: 16px;
-  pointer-events: none;
-  z-index: 4;
-}
-.disc-frame {
-  width: 58px;
-  height: 58px;
-  border-radius: 50%;
-  overflow: visible;
-  position: relative;
-  background: transparent;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
-  /* Les cadres sont permanents : ils naissent visibles. Seul le passage
-     vide → rempli est animé, via .filling. */
-  transition: box-shadow 0.3s ease;
-}
-.disc-frame.filling {
-  animation: disc-frame-in 0.42s cubic-bezier(0.22, 1.2, 0.36, 1);
-}
-.disc-frame-xp {
-  position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  background: conic-gradient(
-    from -90deg,
-    #ffe000 0 calc(var(--xp, 0) * 100%),
-    rgba(255, 255, 255, 0.14) 0
-  );
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
-  box-shadow: 0 0 10px color-mix(in srgb, #ffe000 calc(var(--xp, 0) * 70%), transparent);
-  z-index: 3;
-  pointer-events: none;
-  transition: background 0.25s ease;
-}
-.disc-frame.max .disc-frame-xp {
-  background: conic-gradient(from -90deg, #ffe000 0 100%);
-  box-shadow: 0 0 12px rgba(255, 224, 0, 0.75);
-}
-.disc-frame-clip {
-  position: absolute;
-  inset: 3px;
-  border-radius: 50%;
-  overflow: hidden;
-  z-index: 1;
-  border: 2px solid transparent;
-  background:
-    linear-gradient(#0a1528, #0a1528) padding-box,
-    linear-gradient(145deg, rgba(255, 255, 255, 0.75), rgba(120, 150, 190, 0.35) 40%, rgba(40, 55, 80, 0.9)) border-box;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.18) inset,
-    0 0 12px color-mix(in srgb, var(--disc-ring, #7cf) 40%, transparent);
-}
-.disc-frame-clip::after {
-  content: '';
-  position: absolute;
-  inset: 2px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  box-shadow: inset 0 -6px 10px rgba(0, 0, 0, 0.28);
-  pointer-events: none;
-  z-index: 2;
-}
-.disc-frame-clip img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center 18%;
-  display: block;
-  filter: brightness(1.08) contrast(1.05);
-}
-.disc-lvl {
-  position: absolute;
-  right: -5px;
-  bottom: -5px;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(12, 10, 22, 0.92);
-  border: 1.5px solid #ffe000;
-  color: #ffe000;
-  font-family: Cinzel, Georgia, serif;
-  font-size: 11px;
-  font-weight: 800;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 4;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 8px rgba(255, 224, 0, 0.35);
-  pointer-events: none;
-}
-.disc-frame.max .disc-lvl {
-  background: #ffe000;
-  color: #1a1200;
-  border-color: #fff3a0;
-}
 /* ---- Slot vide : la place existe, l'esprit n'est pas encore là ----
    Cadre éteint, anneau XP neutre, silhouette d'esprit en creux. Le contraste
    avec un cadre rempli (portrait lumineux + anneau doré) doit être immédiat. */
-.disc-frame.empty {
-  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
-}
-.disc-frame.empty .disc-frame-xp {
-  background: rgba(255, 255, 255, 0.1);
-  box-shadow: none;
-}
-.disc-frame.empty .disc-frame-clip {
-  background:
-    radial-gradient(circle at 50% 35%, #101c33, #060b16 70%) padding-box,
-    linear-gradient(145deg, rgba(255, 255, 255, 0.22), rgba(120, 150, 190, 0.12) 40%, rgba(20, 28, 42, 0.9)) border-box;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.07) inset,
-    0 4px 10px rgba(0, 0, 0, 0.4) inset;
-}
-.disc-frame.empty .disc-frame-clip img {
-  /* Le portrait, s'il est déjà chargé, sert de silhouette : écrasé en noir et
-     à peine visible — on garde la forme de l'esprit sans le révéler. */
-  filter: brightness(0) contrast(1);
-  opacity: 0.34;
-}
 /* Repli tant qu'aucun portrait n'est cuit : une silhouette générique dessinée
    en CSS (tête + corps), pour que le cadre ne soit jamais un trou noir —
    y compris un cadre rempli si le rendu du portrait a échoué. */
-.disc-frame .disc-frame-clip::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 26%;
-  width: 62%;
-  height: 62%;
-  transform: translateX(-50%);
-  background:
-    radial-gradient(circle at 50% 18%, rgba(150, 180, 220, 0.3) 0 20%, transparent 21%),
-    radial-gradient(ellipse 60% 50% at 50% 92%, rgba(150, 180, 220, 0.26) 0 70%, transparent 71%);
-  z-index: 1;
-  pointer-events: none;
-}
-#hud-disciples.portrait-ready .disc-frame .disc-frame-clip::before {
-  display: none;
-}
-.disc-frame.empty .disc-lvl {
-  opacity: 0;
-}
 
-@keyframes disc-frame-in {
-  from { opacity: 0.2; transform: scale(0.55); }
-  to { opacity: 1; transform: scale(1); }
-}
 
 @media (max-width: 720px) {
   #hud-race {
@@ -761,21 +610,6 @@ button.big:active { transform: scale(.95); }
   .race-rank { min-width: 16px; height: 16px; font-size: 9px; }
   .race-goal { font-size: 10px; }
 
-  #hud-disciples {
-    right: calc(6px + env(safe-area-inset-right));
-    gap: 12px;
-  }
-  .disc-frame {
-    width: 46px;
-    height: 46px;
-  }
-  .disc-lvl {
-    width: 18px;
-    height: 18px;
-    font-size: 9px;
-    right: -4px;
-    bottom: -4px;
-  }
 }
 
 #hud-actions-bar button {

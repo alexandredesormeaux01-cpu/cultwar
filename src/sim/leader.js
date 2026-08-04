@@ -2,7 +2,7 @@
    `ctx` porte les données transversales (skillMods, accès grille peinture)
    pour éviter les globales cachées. */
 
-import { V_MAX, V_MIN, N_REF, BOOST_MULT, DISCIPLE_MAX_BASE } from './constants.js';
+import { V_MAX, V_MIN, N_REF, BOOST_MULT } from './constants.js';
 
 /** Vitesse courante du Leader d'une faction, tenant compte de la foule portée,
  *  du perso, du boost, du ralenti, et du bonus/malus de territoire.
@@ -19,13 +19,6 @@ export function leaderSpeed(f, ctx) {
   if (f.leaderKey === 'nomad') v *= 1.20;
   if (f.boostT > 0) v *= BOOST_MULT;
   return v;
-}
-
-/** Plafond de disciples actifs pour une faction (bonus « Apôtres » du joueur). */
-export function discipleCap(f, ctx) {
-  if (!f) return DISCIPLE_MAX_BASE;
-  if (f.i === 0) return DISCIPLE_MAX_BASE + (ctx.skillMods.discipleMaxBonus || 0);
-  return DISCIPLE_MAX_BASE;
 }
 
 /** Le Leader est-il dans sa propre cour ? */

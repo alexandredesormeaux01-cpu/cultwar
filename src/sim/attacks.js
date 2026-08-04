@@ -76,7 +76,6 @@ export function pickTarget(f, facing, ctx) {
   for (const a of agents) {
     if (!a || a.dead) continue;
     if (variantOf(a.id) < ELEM_FIRST) continue;       // seuls les esprits
-    if ((a.discipleOf ?? -1) >= 0) continue;
     if ((a.followerOf ?? -1) === f.i) continue;       // déjà à nous
     if ((a.downT || 0) > 0) continue;                 // déjà à terre
     consider(a.x, a.z, { kind: 'spirit', ref: a });
@@ -167,7 +166,6 @@ export function stepProjectiles(dt, ctx) {
       for (const a of agents) {
         if (!a || a.dead) continue;
         if (variantOf(a.id) < ELEM_FIRST) continue;
-        if ((a.discipleOf ?? -1) >= 0) continue;
         if ((a.followerOf ?? -1) === p.from) continue;
         if ((a.downT || 0) > 0) continue;
         const dx = a.x - p.x, dz = a.z - p.z;
@@ -226,7 +224,6 @@ export function collectDowned(factions, agents, ctx) {
   for (const a of agents) {
     if (!a || a.dead || !(a.downT > 0)) continue;
     if (variantOf(a.id) < ELEM_FIRST) continue;
-    if ((a.discipleOf ?? -1) >= 0) continue;
 
     let best = null, bestD = R2;
     for (const f of factions) {

@@ -2,8 +2,6 @@
    Les effets purs sont décrits ici ; l'application concrète (fuel, bombes,
    couleurs…) passe par le ctx fourni par main.js. */
 
-import { DISC_LVL_MAX } from './constants.js';
-
 /** Événements désactivés — aucune carte ne tombe. */
 export const EVENT_TIMES = [];
 
@@ -21,14 +19,6 @@ export const EVENT_DECK = [
     art: art('color_swap'),
     title: 'Échange de couleurs',
     blurb: 'Les cultes échangent leurs teintes. Confusion garantie.',
-  },
-  {
-    id: 'disciple_level',
-    tone: 'good',
-    icon: '✝',
-    art: art('disciple_level'),
-    title: 'Bénédiction apostolique',
-    blurb: 'Tous les disciples actifs gagnent 1 niveau.',
   },
   {
     id: 'fuel_drought',
@@ -127,14 +117,6 @@ export const EVENT_DECK = [
     blurb: 'Les conversions sont bien plus rapides pendant 12 s.',
   },
   {
-    id: 'silence_disciples',
-    tone: 'bad',
-    icon: '🤐',
-    art: art('silence_disciples'),
-    title: 'Vœu de silence',
-    blurb: 'Les disciples sont figés sur place pendant 8 secondes.',
-  },
-  {
     id: 'position_swap',
     tone: 'chaos',
     icon: '🔀',
@@ -172,9 +154,6 @@ export function applyEvent(ev, ctx) {
     case 'color_swap':
       ctx.swapFactionColors?.();
       break;
-    case 'disciple_level':
-      ctx.levelUpDisciples?.(1);
-      break;
     case 'fuel_drought':
       ctx.drainAllFuel?.(10);
       break;
@@ -211,9 +190,6 @@ export function applyEvent(ev, ctx) {
     case 'zeal_aura':
       ctx.zealAura?.(12);
       break;
-    case 'silence_disciples':
-      ctx.freezeDisciples?.(8);
-      break;
     case 'position_swap':
       ctx.swapTwoLeaders?.();
       break;
@@ -228,8 +204,3 @@ export function applyEvent(ev, ctx) {
   }
 }
 
-export function clampDiscipleLevel(a, delta = 1) {
-  if (!a) return;
-  a.discLvl = Math.min(DISC_LVL_MAX, (a.discLvl || 1) + delta);
-  if ((a.discLvl || 1) >= DISC_LVL_MAX) a.discXp = 0;
-}
