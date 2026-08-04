@@ -1324,8 +1324,15 @@ export function makeTilePlacer(island, rng = Math.random) {
   for (const kind of Object.keys(ROLE_FOR)) {
     pools[kind] = island.tiles.filter((t) => ROLE_FOR[kind].includes(t.role));
   }
+  /* Repli quand un rôle n'existe pas sur cette île (pas un seul hameau, par
+     exemple). Il exclut les places de sanctuaire : sans ça, un pool vide
+     ramenait des arbres au milieu du dallage, exactement ce que la
+     réservation cherche à empêcher. */
+  const anywhere = island.tiles.filter((t) => t.role !== ROLE.SANCTUARY);
+
   return function place(kind) {
-    const pool = pools[kind] && pools[kind].length ? pools[kind] : island.tiles;
+    const pool = pools[kind] && pools[kind].length ? pools[kind]
+      : (anywhere.length ? anywhere : island.tiles);
     const t = pool[(rng() * pool.length) | 0];
     /* Marge d'arête : un arbre à cheval sur le vide casserait l'illusion de
        tuiles solides. Les maisons se serrent encore plus vers le centre. */
@@ -1374,6 +1381,26 @@ export function flatPoint(island, minD = 0, maxD = Infinity, rng = Math.random, 
   const t = pool[(rng() * pool.length) | 0];
   const a = rng() * Math.PI * 2, rr = Math.sqrt(rng()) * (APOTHEM - 1.2);
   return { x: t.x + Math.cos(a) * rr, z: t.z + Math.sin(a) * rr, tile: t };
+}
+
+/** Réserve une place de sanctuaire : la tuile et ses six voisins passent en
+ *  ROLE.SANCTUARY. Aucun `kind` de ROLE_FOR n'accepte ce rôle, donc plus rien
+ *  ne se plante sur l'emprise — à condition d'appeler ceci AVANT de semer le
+ *  décor du biome. */
+export function reserveSanctuary(island, tile) {
+  if (!island || !tile) return;
+  /* La teinte des tuiles est calculée pendant la génération, avant cette
+     réservation : on l'éclaircit ici comme le fait generateIsland pour les
+     Lieux Saints, sinon la place ne se distinguerait en rien de la prairie. */
+  const pale = (t) => {
+    t.role = ROLE.SANCTUARY;
+    if (t.tint) t.tint.lerp(new THREE.Color(0xffffff), 0.30);
+  };
+  pale(tile);
+  for (const [dq, dr] of DIRS) {
+    const nb = island.byKey.get(key(tile.q + dq, tile.r + dr));
+    if (nb) pale(nb);
+  }
 }
 
 /* Centres des tuiles sanctuaire — les Lieux Saints du GDD (§4.3). */

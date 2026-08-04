@@ -17,7 +17,7 @@ import { IS_MOBILE } from './device.js';
 /* Modèles dont une variante allégée existe dans assets/models/lo/.
    Doit rester aligné sur MODELS dans scripts/optimize-models.mjs. */
 const LO_AVAILABLE = new Set([
-  'sanctuary_base.glb', 'sanctuary_altar.glb', 'burrow_hole.glb', 'trees.glb', 'grass.glb', 'paint_crystal.glb',
+  'sanctuary_base.glb', 'burrow_hole.glb', 'trees.glb', 'grass.glb', 'paint_crystal.glb',
   'peasant_woman.glb', 'peasant_blocky.glb', 'knight_blocky.glb',
   'monk_rigged.glb', 'sorcerer_rigged.glb', 'nomad_rigged.glb',
   'amazon_rigged.glb', 'alien_rigged.glb', 'chief_rigged.glb',

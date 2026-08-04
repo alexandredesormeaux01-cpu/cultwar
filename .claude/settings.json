@@ -57,7 +57,9 @@
       "Bash(node -)",
       "Bash(node scripts/map-smoke-test.mjs 500)",
       "Bash(awk 'NR>=4380 && NR<=4460 && /^function |^const .*= *\\\\\\(|drawMinimap/' src/main.js)",
-      "Bash(node --check src/hexmap.js)"
+      "Bash(node --check src/hexmap.js)",
+      "Bash(awk 'NR<=4975 && /^function [a-zA-Z]/ {n=NR\": \"$0} END{}{}' src/main.js)",
+      "Bash(awk 'NR<=4975 && /^function /{line=NR\": \"$0} END{print line}' src/main.js)"
     ],
     "additionalDirectories": [
       "\\tmp"

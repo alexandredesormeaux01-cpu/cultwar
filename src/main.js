@@ -32,6 +32,7 @@ import {
   generateIsland, buildIslandMeshes, buildVoid, updateVoid, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
   HEX_R, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, flatPoint,
+  reserveSanctuary,
 } from './hexmap.js';
 import { initNative } from './cap.js';
 import { getSkillMods } from './skills.js';
@@ -440,6 +441,7 @@ function buildMap(biomeKey = 'temperate') {
   /* L'île est tirée au sort à chaque partie : silhouette, trous, hameaux et
      sanctuaires changent, le biome reste le même. */
   island = generateIsland({ biomeKey, maxR: MAP_R });
+  reserveAltarSites();
   rebuildPaintMask();
 
   // Ambiance : lumière du biome (ciel et brouillard sont posés par buildVoid)
@@ -2156,7 +2158,10 @@ const altars = [];
 /* Le modèle de sanctuaire du jeu, décimé à ~8 k triangles : à dix exemplaires,
    la version lo/ (74 k) en coûterait 741 k. Chargé une fois, cloné ensuite. */
 let altarModel = null;
-gltfLoader.load('assets/models/sanctuary_altar.glb', (gltf) => {
+/* Corps des sanctuaires : le modèle des anciennes cours de départ. Il est
+   taillé pour l'emprise que les sanctuaires ont désormais — l'ancien petit
+   autel, étiré à ALTAR_H, paraissait fondu et hors d'échelle. */
+gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
   mobileDownscaleTextures(gltf);
   const g = gltf.scene;
   g.traverse((c) => {
@@ -2395,7 +2400,39 @@ function clearAltars() {
   altars.length = 0;
 }
 
-/** Sème les autels sur l'île, espacés, avec des éléments variés. */
+/* ---- Réservation des places de sanctuaire ----
+   Appelée par buildMap, donc AVANT que le décor du biome ne soit semé. C'est
+   tout l'intérêt : aucun `kind` de ROLE_FOR n'accepte ROLE.SANCTUARY, si bien
+   que marquer ces tuiles suffit à interdire herbes, arbres, rochers et maisons
+   sur l'emprise d'un sanctuaire. Les placer après le décor, comme avant, les
+   faisait pousser au milieu de la place.
+
+   On marque aussi les six voisins : l'emprise (ALTAR_R) déborde largement de
+   la tuile centrale, et une touffe plantée à sa lisière ressort au milieu du
+   dallage. */
+function reserveAltarSites() {
+  if (!island) return;
+  island.altarSites = [];
+  const SAMPLES = 40;
+  for (let n = 0; n < ALTAR_COUNT; n++) {
+    let best = null, bestD = -1;
+    for (let k = 0; k < SAMPLES; k++) {
+      const p = flatPoint(island, 7, Infinity);
+      if (!p || !p.tile) continue;
+      let d = Infinity;
+      for (const a of island.altarSites) d = Math.min(d, Math.hypot(a.x - p.x, a.z - p.z));
+      if (d > bestD) { bestD = d; best = p; }
+    }
+    if (!best) break;
+    if (island.altarSites.length && bestD < ALTAR_MIN_GAP) break;   // île saturée
+    /* flatPoint ignore déjà les tuiles SANCTUARY : marquer au fur et à mesure
+       empêche donc naturellement deux sanctuaires de se superposer. */
+    reserveSanctuary(island, best.tile);
+    island.altarSites.push({ x: best.x, z: best.z, tile: best.tile });
+  }
+}
+
+/** Sème les autels sur les places réservées par buildMap. */
 function placeAltars() {
   clearAltars();
   /* On mélange les six éléments et on les distribue à tour de rôle : deux
@@ -2410,32 +2447,11 @@ function placeAltars() {
     bag.push(...shuffled);
   }
 
-  /* Placement « meilleur de N » plutôt que tirage-rejet : à chaque tour on
-     échantillonne des emplacements plats et on garde celui qui s'éloigne le
-     plus des sanctuaires déjà posés. Le rejet simple n'arrivait à en placer
-     que 7 sur 10 depuis qu'ils ont l'emprise d'une cour — cette version en
-     place 9,9 en moyenne sur les mêmes cartes. */
-  const SAMPLES = 40;
-  for (let n = 0; n < ALTAR_COUNT; n++) {
-    let best = null, bestD = -1;
-    for (let k = 0; k < SAMPLES; k++) {
-      const p = flatPoint(island, 7, Infinity);
-      if (!p) continue;
-      const pz = p.z ?? p.y;
-      /* Un sanctuaire collé à un point d'apparition serait pris dans la
-         première seconde par celui qui naît dessus. */
-      let near = Infinity;
-      for (const t of teams) near = Math.min(near, Math.hypot(t.baseX - p.x, t.baseZ - pz));
-      if (near < ALTAR_R + 10) continue;
-
-      let d = Infinity;
-      for (const a of altars) d = Math.min(d, Math.hypot(a.x - p.x, a.z - pz));
-      if (d > bestD) { bestD = d; best = { x: p.x, z: pz }; }
-    }
-    if (!best) break;
-    if (altars.length && bestD < ALTAR_MIN_GAP) break;   // l'île est saturée
-    spawnAltar(best.x, best.z, bag[n]);
-  }
+  /* Les places ont été choisies et vidées de leur décor par buildMap. On se
+     contente de les habiller ici — c'est aussi ce qui garantit que le décor
+     et les sanctuaires s'accordent, puisqu'ils lisent la même liste. */
+  const sites = (island && island.altarSites) || [];
+  for (let n = 0; n < sites.length; n++) spawnAltar(sites[n].x, sites[n].z, bag[n]);
 
   /* Filet : une île minuscule peut ne rien offrir de conforme. Mieux vaut des
      sanctuaires serrés que pas de partie du tout. */
@@ -2541,7 +2557,11 @@ function activateAltar(a, f) {
      désormais son opposé pour être brisé à son tour. */
   if (a.statue) scene.remove(a.statue);
   a.statue = makeOwnerStatue(f);
-  a.statue.position.set(a.x, (a.y || 0) + ALTAR_H * 0.42, a.z);
+  /* Pieds au sol. L'ancien décalage (ALTAR_H * 0.42) posait la statue sur le
+     petit autel d'alors ; avec l'emprise actuelle il la laissait planer à
+     plus de deux unités au-dessus du dallage. La statue a son propre socle,
+     elle n'a besoin d'aucun rehaussement. */
+  a.statue.position.set(a.x, a.y || 0, a.z);
   /* Orientation stable, tirée de la position : deux sanctuaires voisins ne
      regardent pas exactement dans la même direction. */
   a.statue.rotation.y = Math.atan2(a.x, a.z) + Math.PI;
@@ -3524,6 +3544,14 @@ function findBaseSite(ang) {
       const x = Math.cos(ang) * MAP_R * k;
       const z = Math.sin(ang) * MAP_R * k;
       if (!isSolid(island, x, z)) continue;
+      /* Les places de sanctuaire sont réservées avant tout le reste : c'est
+         donc au point d'apparition de s'en écarter. Naître sur une place
+         reviendrait à la prendre à la première seconde. */
+      let onAltar = false;
+      for (const s of (island.altarSites || [])) {
+        if (Math.hypot(s.x - x, s.z - z) < ALTAR_R + 10) { onAltar = true; break; }
+      }
+      if (onAltar) continue;
       let ok = 0, flat = 0;
       const y0 = groundY(x, z);
       for (let a = 0; a < 8; a++) {
