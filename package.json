@@ -21,7 +21,8 @@
     "optimize:images": "node scripts/optimize-images.mjs",
     "optimize:geojson": "node scripts/optimize-geojson.mjs",
     "map:test": "node scripts/map-smoke-test.mjs",
-    "attack:test": "node scripts/attack-smoke-test.mjs"
+    "attack:test": "node scripts/attack-smoke-test.mjs",
+    "orb:test": "node scripts/orb-smoke-test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.2",

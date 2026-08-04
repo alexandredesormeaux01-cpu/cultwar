@@ -79,6 +79,7 @@ import {
 } from './sim/events.js';
 import { createNetClient } from './net/client.js';
 import { createRng } from './sim/rng.js';
+import { drawOrb, drawGlow } from './orb-texture.js';
 import {
   projectiles, clearProjectiles, pickTarget, fireAttack, stepProjectiles,
   tickDownStates, collectDowned, LEADER_DOWN_T,
@@ -1493,41 +1494,79 @@ function leaderFace(f) {
    sont brefs et nombreux, allouer une géométrie à chaque fois ferait tousser
    le ramasse-miettes en pleine action. La teinte est celle de l'élément du
    Leader — six attaques distinctes sans un seul asset à produire. */
-const _boltGeo = new THREE.SphereGeometry(0.42, 10, 8);
-const _boltMats = new Map();     // couleur → matériau partagé
-const _boltPool = [];
-const _boltLive = new Map();     // projectile → mesh
+/* Le projectile est une ORBE, pas une bille : un sprite de corps peint au
+   canvas (voir orb-texture.js) doublé d'un halo additif derrière lui. Deux
+   quads par tir, et le sprite fait face à la caméra tout seul — inutile de
+   modéliser une sphère qu'on ne verra jamais que de face.
 
-function boltMaterial(col) {
-  let m = _boltMats.get(col);
-  if (!m) {
-    m = new THREE.MeshBasicMaterial({ color: col, toneMapped: false });
-    _boltMats.set(col, m);
+   Le corps tourne lentement sur lui-même : sans cette rotation, les rubans
+   peints figent l'orbe et on voit un autocollant. */
+const ORB_KEYS = ['fire', 'water', 'air', 'light', 'earth', 'ether'];
+const _orbTex = new Map();       // élément → texture du corps
+let _glowTex = null;
+
+function orbTexture(key) {
+  let t = _orbTex.get(key);
+  if (!t) {
+    t = new THREE.CanvasTexture(drawOrb(key));
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.generateMipmaps = false;
+    t.minFilter = THREE.LinearFilter;
+    _orbTex.set(key, t);
   }
-  return m;
+  return t;
+}
+function glowTexture() {
+  if (!_glowTex) {
+    _glowTex = new THREE.CanvasTexture(drawGlow());
+    _glowTex.generateMipmaps = false;
+    _glowTex.minFilter = THREE.LinearFilter;
+  }
+  return _glowTex;
 }
 
+const _boltPool = [];
+const _boltLive = new Map();     // projectile → { grp, body, glow, spin }
+
+function elementKeyOf(f) { return LEADER_ELEM_KEY[f?.leaderKey] || 'ether'; }
 function elementColorOf(f) {
-  const key = LEADER_ELEM_KEY[f?.leaderKey] || 'ether';
-  const e = ELEMENTS.find((x) => x.key === key) || ELEMENTS[5];
+  const e = ELEMENTS.find((x) => x.key === elementKeyOf(f)) || ELEMENTS[5];
   return e.col;
 }
 
 function acquireBolt(p) {
-  const mesh = _boltPool.pop() || new THREE.Mesh(_boltGeo, boltMaterial(0xffffff));
-  mesh.material = boltMaterial(elementColorOf(factions[p.from]));
-  mesh.visible = true;
-  mesh.position.set(p.x, p.y, p.z);
-  scene.add(mesh);
-  _boltLive.set(p, mesh);
+  let b = _boltPool.pop();
+  if (!b) {
+    const grp = new THREE.Group();
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTexture(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false,
+    }));
+    glow.scale.setScalar(3.1);
+    const body = new THREE.Sprite(new THREE.SpriteMaterial({
+      transparent: true, depthWrite: false, toneMapped: false,
+    }));
+    body.scale.setScalar(1.5);
+    grp.add(glow, body);
+    b = { grp, body, glow, spin: 0 };
+  }
+  const key = elementKeyOf(factions[p.from]);
+  b.body.material.map = orbTexture(key);
+  b.body.material.needsUpdate = true;
+  b.glow.material.color.set(elementColorOf(factions[p.from]));
+  b.spin = Math.random() * Math.PI * 2;
+  b.grp.position.set(p.x, p.y, p.z);
+  b.grp.visible = true;
+  scene.add(b.grp);
+  _boltLive.set(p, b);
 }
 
 function releaseBolt(p) {
-  const mesh = _boltLive.get(p);
-  if (!mesh) return;
-  scene.remove(mesh);
-  mesh.visible = false;
-  _boltPool.push(mesh);
+  const b = _boltLive.get(p);
+  if (!b) return;
+  scene.remove(b.grp);
+  b.grp.visible = false;
+  _boltPool.push(b);
   _boltLive.delete(p);
 }
 
@@ -1621,12 +1660,17 @@ function updateAttacks(dt) {
   stepProjectiles(dt, _atkCtx);
   collectDowned(factions, agents, _atkCtx);
 
-  /* Les meshes suivent leur projectile ; ceux qui viennent de naître prennent
-     une bille au passage. */
+  /* Les sprites suivent leur projectile ; ceux qui viennent de naître prennent
+     une orbe au passage. */
   for (const p of projectiles) {
-    let mesh = _boltLive.get(p);
-    if (!mesh) { acquireBolt(p); mesh = _boltLive.get(p); }
-    mesh.position.set(p.x, p.y, p.z);
+    let bolt = _boltLive.get(p);
+    if (!bolt) { acquireBolt(p); bolt = _boltLive.get(p); }
+    bolt.grp.position.set(p.x, p.y, p.z);
+    /* Rotation du corps et respiration du halo : deux mouvements de vitesses
+       différentes, sinon l'ensemble se lit comme une seule image qui tourne. */
+    bolt.spin += dt * 2.4;
+    bolt.body.material.rotation = bolt.spin;
+    bolt.glow.scale.setScalar(3.1 + Math.sin(bolt.spin * 3.1) * 0.22);
   }
 }
 

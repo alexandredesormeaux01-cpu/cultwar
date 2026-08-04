@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- Planche de contrôle des orbes d'énergie.
+     Page de développement uniquement : elle n'est pas référencée par index.html,
+     donc Vite ne l'embarque pas dans le build.
+     Usage : npm run dev  puis  http://localhost:5173/orb-preview.html -->
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Orbes — planche de contrôle</title>
+  <style>
+    body {
+      margin: 0; padding: 28px;
+      background: #0b1020; color: #dbe4f5;
+      font: 14px/1.5 system-ui, sans-serif;
+    }
+    h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+    p  { margin: 0 0 22px; color: #8fa0bd; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 18px; }
+    figure { margin: 0; text-align: center; }
+    /* Fond sombre comme le jeu, et rendu à la taille où l'orbe est vue en
+       partie : juger une texture à 4× sa taille d'affichage ne sert à rien. */
+    canvas { image-rendering: auto; display: block; margin: 0 auto 6px; }
+    figcaption { color: #8fa0bd; font-size: 12px; }
+    .row { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+    label { color: #8fa0bd; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Orbes d'énergie</h1>
+  <p>Six variantes procédurales, une par élément. Aucun asset : tout est peint au canvas.</p>
+
+  <div class="row">
+    <label>Taille d'affichage</label>
+    <input id="size" type="range" min="48" max="320" value="160" />
+    <span id="sizeVal">160 px</span>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <script type="module">
+    import { drawOrb } from './src/orb-texture.js';
+
+    const KEYS = ['fire', 'water', 'air', 'light', 'earth', 'ether'];
+    const NAMES = { fire: 'Feu', water: 'Eau', air: 'Air', light: 'Lumière', earth: 'Terre', ether: 'Éther' };
+    const grid = document.getElementById('grid');
+    const slider = document.getElementById('size');
+    const sizeVal = document.getElementById('sizeVal');
+
+    function render() {
+      const px = +slider.value;
+      sizeVal.textContent = px + ' px';
+      grid.innerHTML = '';
+      for (const key of KEYS) {
+        const src = drawOrb(key);
+        const fig = document.createElement('figure');
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = px;
+        cv.getContext('2d').drawImage(src, 0, 0, px, px);
+        fig.append(cv);
+        const cap = document.createElement('figcaption');
+        cap.textContent = NAMES[key];
+        fig.append(cap);
+        grid.append(fig);
+      }
+    }
+
+    slider.addEventListener('input', render);
+    render();
+  </script>
+</body>
+</html>
