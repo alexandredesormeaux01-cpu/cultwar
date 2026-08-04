@@ -31,7 +31,8 @@ import {
 import {
   generateIsland, buildIslandMeshes, buildVoid, updateVoid, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
-  HEX_R, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, flatPoint,
+  HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, flatPoint,
+  buildPaintSurface,
   reserveSanctuary,
 } from './hexmap.js';
 import { initNative } from './cap.js';
@@ -3021,6 +3022,7 @@ function drawOrganicSplat(ctx, cx, cz, r) {
 function stampSplash(x, z, radius, factionIdx, colorStr) {
   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;
   const r = radius * k;
+  const srcY = groundY(x, z);
   const cx = x * k + half, cz = z * k + half;
   const gx0 = Math.max(0, Math.floor(cx - r)), gx1 = Math.min(PAINT_N - 1, Math.ceil(cx + r));
   const gz0 = Math.max(0, Math.floor(cz - r)), gz1 = Math.min(PAINT_N - 1, Math.ceil(cz + r));
@@ -3034,6 +3036,7 @@ function stampSplash(x, z, radius, factionIdx, colorStr) {
       if (dx * dx + dz * dz > r2) continue;
       const wx = (gx + 0.5 - half) * kw, wz = (gz + 0.5 - half) * kw;
       if (!isSolid(island, wx, wz)) continue;
+      if (groundY(wx, wz) > srcY + 0.01) continue;   // la peinture ne monte pas
       const idx = gz * PAINT_N + gx;
       if (paintGrid[idx] === factionIdx) continue;
       const old = paintGrid[idx];
@@ -3046,7 +3049,8 @@ function stampSplash(x, z, radius, factionIdx, colorStr) {
 
   if (gridChanged) {
     paintCtx.save();
-    if (paintClip) paintCtx.clip(paintClip);
+    /* Même coupe que la grille : on n'éclabousse que son niveau et en dessous. */
+    if (paintClipAtY(srcY)) paintCtx.clip(paintClipAtY(srcY));
     paintCtx.fillStyle = colorStr;
     drawOrganicSplat(paintCtx, cx, cz, r);
     paintCtx.restore();
@@ -3415,20 +3419,44 @@ const paintCounts = new Int32Array(8);
 let paintTotal = 1;                        // cellules peignables (dessus des tuiles)
 /* Masque de découpe : Path2D des hex (état avant les essais de coupe horizontale). */
 let paintClip = null;
+let paintClipByLevel = null;   // masque cumulatif par altitude (voir rebuildPaintMask)
+
+/** Masque de découpe correspondant à une altitude de source. */
+function paintClipAtY(y) {
+  if (!paintClipByLevel || !paintClipByLevel.length) return paintClip;
+  const lv = Math.round(y / STEP_H);
+  return paintClipByLevel[Math.max(0, Math.min(paintClipByLevel.length - 1, lv))];
+}
 
 function rebuildPaintMask() {
   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;
   const path = new Path2D();
   const hr = HEX_R * k * 1.02;
-  for (const t of island.tiles) {
+  /* Un masque par altitude, CUMULATIF : niveau n = toutes les tuiles au
+     niveau n et en dessous. Le canvas doit être coupé exactement comme la
+     grille logique, sinon la couleur paraîtrait escalader un plateau que le
+     score, lui, ne compte pas. */
+  const byLevel = [];
+  const hexInto = (p, t) => {
     const cx = t.x * k + half, cz = t.z * k + half;
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * Math.PI * 2;
       const px = cx + Math.cos(a) * hr, pz = cz + Math.sin(a) * hr;
-      if (i === 0) path.moveTo(px, pz); else path.lineTo(px, pz);
+      if (i === 0) p.moveTo(px, pz); else p.lineTo(px, pz);
     }
-    path.closePath();
+    p.closePath();
+  };
+
+  let maxLevel = 0;
+  for (const t of island.tiles) maxLevel = Math.max(maxLevel, t.level || 0);
+  for (let lv = 0; lv <= maxLevel; lv++) {
+    const p = new Path2D();
+    for (const t of island.tiles) if ((t.level || 0) <= lv) hexInto(p, t);
+    byLevel.push(p);
   }
+  paintClipByLevel = byLevel;
+
+  for (const t of island.tiles) hexInto(path, t);
   paintClip = path;
 
   let n = 0;
@@ -3597,28 +3625,16 @@ paintMat.needsUpdate = true;
    La subdivision est plus fine qu'une tuile (HEX_R = 4.1) pour que chaque
    dalle porte plusieurs sommets, sinon un plateau étroit serait raboté par
    l'interpolation. */
-const PAINT_SEGS = IS_MOBILE ? 88 : 132;   // ~1,4 u / ~0,94 u par maille
-const paintMesh = new THREE.Mesh(
-  new THREE.PlaneGeometry(PAINT_SPAN, PAINT_SPAN, PAINT_SEGS, PAINT_SEGS).rotateX(-Math.PI / 2),
-  paintMat
-);
-paintMesh.position.y = 0.04;
+const paintMesh = new THREE.Mesh(new THREE.BufferGeometry(), paintMat);
+paintMesh.position.y = 0;
 paintMesh.renderOrder = 1;
 scene.add(paintMesh);
 
-/** Replaque la nappe sur le relief. À rappeler à chaque nouvelle île. */
+/** Reconstruit la nappe pour l'île courante (capes + coulées). */
 function rebuildPaintSurface() {
   if (!island) return;
-  const pos = paintMesh.geometry.attributes.position;
-  const arr = pos.array;
-  for (let i = 0; i < pos.count; i++) {
-    const x = arr[i * 3], z = arr[i * 3 + 2];
-    /* Hors de l'île, on garde le niveau de la mer : ces sommets sont de toute
-       façon masqués par le découpage en hexagones. */
-    arr[i * 3 + 1] = groundY(x, z);
-  }
-  pos.needsUpdate = true;
-  paintMesh.geometry.computeBoundingSphere();
+  if (paintMesh.geometry) paintMesh.geometry.dispose();
+  paintMesh.geometry = buildPaintSurface(island, { span: PAINT_SPAN, lift: 0.04 });
 }
 
 let paintDirty = false, paintUploadT = 0, paintNeedsClip = false;
@@ -3687,6 +3703,11 @@ function stampPaintAt(f, x, z, radiusScale = 1) {
   const gz0 = Math.max(0, Math.floor(cz - r * 1.25)), gz1 = Math.min(PAINT_N - 1, Math.ceil(cz + r * 1.25));
   const r2 = r * r;
   const kw = PAINT_SPAN / PAINT_N;
+  /* La peinture COULE : elle gagne son niveau et tout ce qui est en dessous,
+     jamais au-dessus. Une falaise arrête donc la couleur par le bas, et un
+     sanctuaire perché arrose tout son versant. Sans cette règle, la teinture
+     escaladait les plateaux et le relief ne pesait sur rien. */
+  const srcY = groundY(x, z);
 
   let gridChanged = false;
   for (let gz = gz0; gz <= gz1; gz++) {
@@ -3695,6 +3716,7 @@ function stampPaintAt(f, x, z, radiusScale = 1) {
       if (dx * dx + dz * dz > r2 * 1.15) continue;
       const wx = (gx + 0.5 - half) * kw, wz = (gz + 0.5 - half) * kw;
       if (!isSolid(island, wx, wz)) continue;
+      if (groundY(wx, wz) > srcY + 0.01) continue;
       const idx = gz * PAINT_N + gx;
       if (paintGrid[idx] === f.team) continue;
       const old = paintGrid[idx];
@@ -3710,7 +3732,8 @@ function stampPaintAt(f, x, z, radiusScale = 1) {
 
   if (gridChanged) {
     paintCtx.save();
-    if (paintClip) paintCtx.clip(paintClip);
+    /* Même coupe que la grille : on n'éclabousse que son niveau et en dessous. */
+    if (paintClipAtY(srcY)) paintCtx.clip(paintClipAtY(srcY));
     paintCtx.fillStyle = f.css;
     paintCtx.globalAlpha = 1;
     drawOrganicSplat(paintCtx, cx, cz, r);

@@ -1383,6 +1383,103 @@ export function flatPoint(island, minD = 0, maxD = Infinity, rng = Math.random, 
   return { x: t.x + Math.cos(a) * rr, z: t.z + Math.sin(a) * rr, tile: t };
 }
 
+/* ============================== Nappe de peinture ==============================
+   La peinture était plaquée sur un quad unique, puis sur une grille déformée.
+   Aucun des deux ne sait faire un décrochement net : la résolution de la
+   grille impose la pente, si bien qu'une falaise donnait un plan incliné
+   traversant la roche au lieu d'une coulée.
+
+   On construit donc la surface tuile par tuile :
+     · une CAPE hexagonale à la hauteur de la dalle ;
+     · sur chaque arête dominant un voisin plus bas, une JUPE en deux temps —
+       un épaulement court qui arrondit la sortie de la tuile, puis une chute
+       verticale jusqu'au niveau d'en dessous.
+
+   L'épaulement ne mesure que quelques centimètres : invisible en tant que
+   tel, mais c'est lui qui donne à la coulée son épaisseur de liquide plutôt
+   qu'une arête de papier pliée à 90°.
+
+   Les UV sont projetés depuis le plan (x, z) comme l'ancienne nappe, et la
+   jupe hérite des UV de la lèvre : la chute est donc une traînée verticale de
+   la couleur du bord. Là où la lèvre n'est pas peinte, la jupe est
+   transparente et disparaît d'elle-même — aucun test à écrire. */
+export function buildPaintSurface(island, opts = {}) {
+  const span = opts.span || 128;          // largeur monde couverte par la texture
+  const lift = opts.lift ?? 0.04;         // décollement au-dessus de la dalle
+  const shoulder = opts.shoulder ?? 0.16; // longueur de l'épaulement adouci
+  const coastDrip = opts.coastDrip ?? CRUST_H;   // coulée sur la côte
+
+  const pos = [], uv = [], idx = [];
+  const uvOf = (x, z) => [x / span + 0.5, 0.5 - z / span];
+  const push = (x, y, z, u, v) => {
+    const i = pos.length / 3;
+    pos.push(x, y, z); uv.push(u, v);
+    return i;
+  };
+
+  /* Coins de l'hexagone, très légèrement élargis : deux capes voisines doivent
+     se recouvrir d'un cheveu, sinon un liseré de dalle nue apparaît entre
+     elles au moindre arrondi flottant. */
+  const R = HEX_R * 1.004;
+  const cornerAt = (t, i) => {
+    const a = (i / 6) * Math.PI * 2;
+    return [t.x + R * Math.cos(a), t.z + R * Math.sin(a)];
+  };
+
+  for (const t of island.tiles) {
+    const capY = (t.h || 0) + lift;
+
+    /* --- Cape --- */
+    const [cu, cv] = uvOf(t.x, t.z);
+    const c = push(t.x, capY, t.z, cu, cv);
+    const ring = [];
+    for (let i = 0; i < 6; i++) {
+      const [x, z] = cornerAt(t, i);
+      const [u, v] = uvOf(x, z);
+      ring.push(push(x, capY, z, u, v));
+    }
+    for (let i = 0; i < 6; i++) idx.push(c, ring[(i + 1) % 6], ring[i]);
+
+    /* --- Jupes --- */
+    for (let i = 0; i < 6; i++) {
+      const [dq, dr] = DIRS[i];
+      const nb = island.byKey.get(key(t.q + dq, t.r + dr));
+      const lowY = nb ? (nb.h || 0) + lift : capY - coastDrip;
+      if (lowY >= capY - 0.02) continue;      // voisin au même niveau ou plus haut
+
+      /* Arête i = coins (i+5)%6 → i, comme le contour de côte. */
+      const ia = (i + 5) % 6, ib = i;
+      const [ax, az] = cornerAt(t, ia);
+      const [bx, bz] = cornerAt(t, ib);
+      const [nx, nz] = NORMALS[i];
+
+      const [au, av] = uvOf(ax, az);
+      const [bu, bv] = uvOf(bx, bz);
+
+      /* Lèvre, puis épaulement sorti vers l'extérieur ET descendu d'autant :
+         c'est ce quart de tour raccourci qui fait le bourrelet. */
+      const a0 = push(ax, capY, az, au, av);
+      const b0 = push(bx, capY, bz, bu, bv);
+      const sx = nx * shoulder, sz = nz * shoulder;
+      const a1 = push(ax + sx, capY - shoulder, az + sz, au, av);
+      const b1 = push(bx + sx, capY - shoulder, bz + sz, bu, bv);
+      /* Puis la chute, franchement verticale. */
+      const a2 = push(ax + sx, lowY, az + sz, au, av);
+      const b2 = push(bx + sx, lowY, bz + sz, bu, bv);
+
+      idx.push(a0, b0, b1, a0, b1, a1);
+      idx.push(a1, b1, b2, a1, b2, a2);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
+  geo.setIndex(idx);
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 /** Réserve une place de sanctuaire : la tuile et ses six voisins passent en
  *  ROLE.SANCTUARY. Aucun `kind` de ROLE_FOR n'accepte ce rôle, donc plus rien
  *  ne se plante sur l'emprise — à condition d'appeler ceci AVANT de semer le
