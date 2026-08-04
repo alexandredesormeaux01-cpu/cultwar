@@ -31,7 +31,7 @@ import {
 import {
   generateIsland, buildIslandMeshes, buildVoid, updateVoid, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
-  HEX_R, nearestSolidPoint, canJumpToward,
+  HEX_R, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, flatPoint,
 } from './hexmap.js';
 import { initNative } from './cap.js';
 import { getSkillMods } from './skills.js';
@@ -339,6 +339,11 @@ function onIsland(x, z) {
   return e;
 }
 
+/* Hauteur du sol sous un point. Tout ce qui se pose sur la carte doit passer
+   par là : depuis que les tuiles ont des niveaux, un `position.set(x, 0, z)`
+   enterre l'objet dans le premier plateau venu. */
+function groundY(x, z) { return groundHeightAt(island, x, z); }
+
 /* Guidage anti-vide : si la direction souhaitée mène hors dalle, on dévie
    vers la meilleure alternative encore solide (sinon on reste collé au mur
    invisible et on pousse dans le néant). Retourne un vecteur unitaire.
@@ -349,7 +354,8 @@ function steerOnIsland(x, z, wishX, wishZ, lookAhead = 3.2, preferSide = 0) {
   if (wn < 1e-5) return { x: 0, z: 0 };
   const wx = wishX / wn, wz = wishZ / wn;
 
-  const probeOk = (dx, dz, dist) => isSolid(island, x + dx * dist, z + dz * dist);
+  /* Sonde franchissable : sol présent ET pas de falaise entre ici et là. */
+  const probeOk = (dx, dz, dist) => canStep(island, x, z, x + dx * dist, z + dz * dist);
 
   if (preferSide === 0 && probeOk(wx, wz, lookAhead) && probeOk(wx, wz, lookAhead * 0.45)) {
     return { x: wx, z: wz };
@@ -396,8 +402,8 @@ function islandPathBlocked(x, z, tx, tz, lookAhead = 3.0) {
   if (d < 0.8) return false;
   const nx = dx / d, nz = dz / d;
   const dist = Math.min(lookAhead, d);
-  return !isSolid(island, x + nx * dist, z + nz * dist)
-      || !isSolid(island, x + nx * dist * 0.5, z + nz * dist * 0.5);
+  return !canStep(island, x, z, x + nx * dist, z + nz * dist)
+      || !canStep(island, x, z, x + nx * dist * 0.5, z + nz * dist * 0.5);
 }
 
 function disposeMap() {
@@ -492,7 +498,7 @@ function buildMap(biomeKey = 'temperate') {
     const flame = new THREE.Mesh(flameGeo, flameMat);
     flame.position.y = 1.35;
     torchGrp.add(flame);
-    torchGrp.position.set(tx, 0, tz);
+    torchGrp.position.set(tx, groundY(tx, tz), tz);
     // Légère inclinaison vers le centre
     torchGrp.lookAt(0, 0, 0);
     torchGrp.rotateX(-0.08);
@@ -2419,7 +2425,7 @@ function placeAltars() {
 
   let guard = 0;
   while (altars.length < ALTAR_COUNT && guard++ < 400) {
-    const p = islandRandomPoint(island, 7, Infinity);
+    const p = flatPoint(island, 7, Infinity);
     if (!p) break;
     const pz = p.z ?? p.y;
     let ok = true;
@@ -2445,15 +2451,16 @@ function placeAltars() {
 }
 
 function spawnAltar(x, z, variant) {
+  const y = groundY(x, z);
   const grp = makeAltarMesh();
-  grp.position.set(x, 0, z);
+  grp.position.set(x, y, z);
   scene.add(grp);
   const label = makeAltarLabel();
-  label.position.set(x, ALTAR_H + 2.0, z);
+  label.position.set(x, y + ALTAR_H + 2.0, z);
   scene.add(label);
 
   altars.push({
-    x, z,
+    x, z, y,
     variant,             // élément réclamé actuellement
     need: ALTAR_NEED_START,
     filled: 0,
@@ -2539,7 +2546,7 @@ function activateAltar(a, f) {
      désormais son opposé pour être brisé à son tour. */
   if (a.statue) scene.remove(a.statue);
   a.statue = makeOwnerStatue(f);
-  a.statue.position.set(a.x, ALTAR_H * 0.42, a.z);
+  a.statue.position.set(a.x, (a.y || 0) + ALTAR_H * 0.42, a.z);
   /* Orientation stable, tirée de la position : deux sanctuaires voisins ne
      regardent pas exactement dans la même direction. */
   a.statue.rotation.y = Math.atan2(a.x, a.z) + Math.PI;
@@ -2562,7 +2569,7 @@ function updateAltars(dt) {
     a.age += dt;
     a.grp.userData.ring.rotation.z += dt * 0.8;
     a.grp.userData.ring.position.y = ALTAR_H + 0.55 + Math.sin(a.age * 1.6) * 0.09;
-    a.label.position.y = ALTAR_H + 2.0 + Math.sin(a.age * 1.3) * 0.12;
+    a.label.position.y = (a.y || 0) + ALTAR_H + 2.0 + Math.sin(a.age * 1.3) * 0.12;
 
     /* Bon marché : la signature coupe court dès que rien n a changé. Nécessaire
        pour que l étiquette se redessine quand la vignette finit de charger. */
@@ -3366,7 +3373,7 @@ function makeShrine(x, z) {
     new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending }));
   beam.position.y = 17.5;
   grp.add(beam);
-  grp.position.set(x, 0, z);
+  grp.position.set(x, groundY(x, z), z);
   attachCartoonOutline(grp, 0.03);
   scene.add(grp);
   return { x, z, owner: -1, cap: -1, progress: 0, incomeT: SHRINE_INCOME_T, grp, ring, disc, crystal, beam };
@@ -3554,13 +3561,18 @@ function findBaseSite(ang) {
       const x = Math.cos(ang) * MAP_R * k;
       const z = Math.sin(ang) * MAP_R * k;
       if (!isSolid(island, x, z)) continue;
-      let ok = 0;
+      let ok = 0, flat = 0;
+      const y0 = groundY(x, z);
       for (let a = 0; a < 8; a++) {
         const px = x + Math.cos((a / 8) * Math.PI * 2) * (BASE_WALL_R * 0.65);
         const pz = z + Math.sin((a / 8) * Math.PI * 2) * (BASE_WALL_R * 0.65);
         if (isSolid(island, px, pz)) ok++;
+        if (Math.abs(groundY(px, pz) - y0) < 0.01) flat++;
       }
-      if (ok >= 6 && (!needGate || gateApproachSolid(x, z))) return { x, z };
+      /* La passe stricte exige aussi un terrain de niveau : la cour de départ
+         est un disque plat, à cheval sur une falaise elle traverserait le
+         flanc du plateau. La passe de repli s'en contente si l'île est ingrate. */
+      if (ok >= 6 && (!needGate || (flat >= 7 && gateApproachSolid(x, z)))) return { x, z };
     }
   }
   return onIsland(Math.cos(ang) * MAP_R * 0.7, Math.sin(ang) * MAP_R * 0.7);
@@ -3591,14 +3603,14 @@ function buildFortWalls(cx, cz, gateAng, teamColor) {
   // Disque de sol du sanctuaire aux couleurs de la faction
   const floor = new THREE.Mesh(new THREE.CircleGeometry(BASE_WALL_R - 1.2, 32), floorMat);
   floor.rotation.x = -Math.PI / 2;
-  floor.position.set(cx, 0.04, cz);
+  floor.position.set(cx, groundY(cx, cz) + 0.04, cz);
   floor.userData.sharedMat = true;
   scene.add(floor);
   meshes.push(floor);
 
   const ring = new THREE.Mesh(new THREE.RingGeometry(BASE_WALL_R - 1.4, BASE_WALL_R - 1.0, 32), ringMat);
   ring.rotation.x = -Math.PI / 2;
-  ring.position.set(cx, 0.05, cz);
+  ring.position.set(cx, groundY(cx, cz) + 0.05, cz);
   ring.userData.sharedMat = true;
   scene.add(ring);
   meshes.push(ring);
@@ -5074,7 +5086,7 @@ function resetGame() {
 
     if (sanctuaryModel) {
       const sMesh = sanctuaryModel.clone(true);
-      sMesh.position.set(site.x, 0, site.z);
+      sMesh.position.set(site.x, groundY(site.x, site.z), site.z);
       scene.add(sMesh);
       team.sanctuaryMesh = sMesh;
     }
@@ -5145,7 +5157,7 @@ function resetGame() {
     f.seatIndex = seat?.seatIndex ?? i;
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
-    f.grp.position.set(spawnPos.x, 0, spawnPos.z);
+    f.grp.position.set(spawnPos.x, groundY(spawnPos.x, spawnPos.z), spawnPos.z);
     factions.push(f);
   }
 
@@ -5321,7 +5333,7 @@ function bombMinNow() {
 function spawnBombAt(x, z) {
   if (!bombModel || bombs.length >= bombCapNow()) return null;
   const grp = bombModel.clone();
-  grp.position.set(x, 0, z);
+  grp.position.set(x, groundY(x, z), z);
   const glow = new THREE.Mesh(
     new THREE.PlaneGeometry(7, 7).rotateX(-Math.PI / 2),
     new THREE.MeshBasicMaterial({
@@ -5560,10 +5572,10 @@ const eventCtx = {
       const pt = islandRandomPoint(island, 8, Infinity);
       f.leader.x = pt.x;
       f.leader.z = pt.z;
-      f.leader.y = 0;
+      f.leader.y = groundY(pt.x, pt.z);
       f.leader.dx = 0;
       f.leader.dz = 0;
-      if (f.grp) f.grp.position.set(pt.x, 0, pt.z);
+      if (f.grp) f.grp.position.set(pt.x, f.leader.y, pt.z);
     }
     shake = Math.max(shake, 0.5);
   },
@@ -5583,8 +5595,8 @@ const eventCtx = {
     const ax = A.leader.x, az = A.leader.z;
     A.leader.x = B.leader.x; A.leader.z = B.leader.z;
     B.leader.x = ax; B.leader.z = az;
-    if (A.grp) A.grp.position.set(A.leader.x, 0, A.leader.z);
-    if (B.grp) B.grp.position.set(B.leader.x, 0, B.leader.z);
+    if (A.grp) A.grp.position.set(A.leader.x, A.leader.y || 0, A.leader.z);
+    if (B.grp) B.grp.position.set(B.leader.x, B.leader.y || 0, B.leader.z);
     shake = Math.max(shake, 0.35);
   },
   grantBelieversAll(n = 6) {
@@ -5894,7 +5906,7 @@ function updateShields(dt) {
       const f = factions[s.factionIdx];
       if (f?.leader && f.alive) {
         s.x = f.leader.x; s.z = f.leader.z;
-        s.grp.position.set(s.x, 0, s.z);
+        s.grp.position.set(s.x, f.leader.y || 0, s.z);
       }
     }
     /* Marque les fidèles/disciples propres dans le rayon comme immunisés
@@ -5947,7 +5959,7 @@ function updateCurses(dt) {
     }
     /* Suit la tête de la cible. */
     if (target.leader) {
-      c.grp.position.set(target.leader.x, 0, target.leader.z);
+      c.grp.position.set(target.leader.x, target.leader.y || 0, target.leader.z);
     }
     /* Drain de fuel — s'arrête à 0, ne descend pas dans le négatif. */
     target.fuel = Math.max(0, (target.fuel || 0) - c.drainRate * dt);

@@ -52,7 +52,12 @@
       "Bash(./gradlew.bat clean *)",
       "Bash(node --check src/gltf.js)",
       "Bash(node --check src/device.js)",
-      "Bash(awk '{printf \"%.1f Mo\\\\n\", $5/1048576}')"
+      "Bash(awk '{printf \"%.1f Mo\\\\n\", $5/1048576}')",
+      "Bash(node scripts/map-smoke-test.mjs 300)",
+      "Bash(node -)",
+      "Bash(node scripts/map-smoke-test.mjs 500)",
+      "Bash(awk 'NR>=4380 && NR<=4460 && /^function |^const .*= *\\\\\\(|drawMinimap/' src/main.js)",
+      "Bash(node --check src/hexmap.js)"
     ],
     "additionalDirectories": [
       "\\tmp"

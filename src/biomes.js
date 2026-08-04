@@ -1279,7 +1279,7 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
         const sc = spec.scale[0] + Math.random() * (spec.scale[1] - spec.scale[0]);
         if (placer) {
           const pt = placer(kind);
-          p.set(pt.x, 0, pt.z);
+          p.set(pt.x, pt.y || 0, pt.z);
         } else {
           const a = Math.random() * Math.PI * 2;
           const r = Math.sqrt(Math.random()) * (mapR - 2);
@@ -1327,7 +1327,7 @@ export function buildBiomeTrees(scene, biomeKey, mapR, placer = null) {
       const sc = spec.scale[0] + Math.random() * (spec.scale[1] - spec.scale[0]);
       if (placer) {
         const pt = placer('tree');
-        p.set(pt.x, 0, pt.z);
+        p.set(pt.x, pt.y || 0, pt.z);
       } else {
         const a = Math.random() * Math.PI * 2;
         const minR = spec.minR || 0;
@@ -1376,7 +1376,7 @@ export function buildBiomeGrass(scene, biomeKey, mapR, placer = null) {
       const sc = scale[0] + Math.random() * (scale[1] - scale[0]);
       if (placer) {
         const pt = placer('grass');
-        p.set(pt.x, 0, pt.z);
+        p.set(pt.x, pt.y || 0, pt.z);
       } else {
         const a = Math.random() * Math.PI * 2;
         const r = Math.sqrt(Math.random()) * (mapR - 2);
@@ -1434,16 +1434,16 @@ export function buildBiomeScenery(scene, biomeKey, mapR, placer = null) {
     const kind = propKind(prop);
     for (let i = 0; i < prop.count; i++) {
       const sc = prop.scale[0] + Math.random() * (prop.scale[1] - prop.scale[0]);
-      let x, z;
+      let x, z, y = 0;
       if (placer) {
         const pt = placer(kind);
-        x = pt.x; z = pt.z;
+        x = pt.x; z = pt.z; y = pt.y || 0;
       } else {
         const a = Math.random() * Math.PI * 2;
         const r = prop.minR + Math.sqrt(Math.random()) * (mapR - prop.minR - 2);
         x = Math.cos(a) * r; z = Math.sin(a) * r;
       }
-      p.set(x, 0, z);
+      p.set(x, y, z);
       q.setFromAxisAngle(UP, Math.random() * Math.PI * 2);
       s.set(sc, sc, sc);
       m.compose(p, q, s);

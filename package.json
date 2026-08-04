@@ -19,7 +19,8 @@
     "models:optimize": "node scripts/optimize-models.mjs",
     "check:scope": "node scripts/check-scope.mjs",
     "optimize:images": "node scripts/optimize-images.mjs",
-    "optimize:geojson": "node scripts/optimize-geojson.mjs"
+    "optimize:geojson": "node scripts/optimize-geojson.mjs",
+    "map:test": "node scripts/map-smoke-test.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.2",
