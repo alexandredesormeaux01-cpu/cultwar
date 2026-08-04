@@ -74,8 +74,6 @@ export const FLEE_R = 11;
 
 /* ---- Followers (convertis fidèles) ---- */
 export const FOLLOWER_SCALE = 0.55;
-/** Disciples : même mesh Leader que les followers, remis à taille Leader (1 / FOLLOWER_SCALE). */
-export const DISCIPLE_FORM_SCALE = 1 / FOLLOWER_SCALE;
 export const FOLLOWER_FLEE_R = 10;
 export const FOLLOWER_SPD = 2.8;
 export const FOLLOWER_WANDER_SPD = 0.8;

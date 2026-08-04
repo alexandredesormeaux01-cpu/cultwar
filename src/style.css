@@ -589,7 +589,6 @@ button.big:active { transform: scale(.95); }
   filter: grayscale(1);
 }
 
-/* Disciples — cadres ronds, bord droit, espacés régulièrement */
 /* ---- Slot vide : la place existe, l'esprit n'est pas encore là ----
    Cadre éteint, anneau XP neutre, silhouette d'esprit en creux. Le contraste
    avec un cadre rempli (portrait lumineux + anneau doré) doit être immédiat. */

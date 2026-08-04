@@ -8,7 +8,7 @@
 
 import {
   CONV_R, CONV_RITUAL_T, FLEE_R, CONV_BY_PROXIMITY,
-  FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD, DISCIPLE_FORM_SCALE,
+  FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
   FUEL_MAX,
 } from './constants.js';
 
@@ -254,9 +254,9 @@ export function stepCrowd(state, dt, ctx) {
       const fx = ax / n, fz = az / n;
       const crowdFear = Math.min(1, (nearF.count || 0) / 35);
       const urgency = Math.min(1, (1 - nearD / fleeR) * (0.75 + crowdFear * 0.45));
-      let fleeSpd = (fromDisciple
-        ? 3.6 + urgency * 2.2
-        : 4.8 + urgency * 3.8 + crowdFear * 1.2) * (grayPanic ? 1.28 : 1);
+      /* Une seule allure de fuite : la variante lente n'existait que face à un
+         disciple, dont la poursuite était molle. */
+      let fleeSpd = (4.8 + urgency * 3.8 + crowdFear * 1.2) * (grayPanic ? 1.28 : 1);
       /* Sprint de panique : sous 3,5 unités, l'esprit passe devant un Leader à
          allure normale (7,3 → 9,2). Une simple course-poursuite ne doit RIEN
          donner — on attrape à la toile, ou en l'acculant. Le boost du Leader

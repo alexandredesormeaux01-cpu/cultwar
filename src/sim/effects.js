@@ -25,8 +25,6 @@ export function createEffects() {
     /* --- Actions "en direct" : par défaut no-op, main.js installe les vraies --- */
     agentColor: noop,       // (agentId, colorHex) : recolorer une instance foule
     hideAgent: noop,        // (agentId) : cacher (mort/absorbé)
-    discHalo: noop,         // (agentId, x, y, z, colorHex, alpha, scale)
-    hideDiscHalo: noop,     // (agentId)
     shock: noop,            // (x, z, colorHex, maxR, dur)
     soulBurst: noop,        // (x, z, factionIdx)
     splash: noop,           // (x, z, r, teamIdx, css)

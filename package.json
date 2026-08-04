@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/check-scope.mjs && vite build",
     "preview": "vite preview",
     "server": "node server/index.js",
     "sim:test": "node scripts/sim-smoke-test.mjs",

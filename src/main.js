@@ -4547,9 +4547,6 @@ function resetGame() {
   skillMods = getSkillMods();
   // purge
   for (const f of factions) if (f.grp) scene.remove(f.grp);
-  for (let i = 0; i < AGENT_CAP; i++) discHalos.setMatrixAt(i, ZERO_MATRIX);
-  discHalos.count = 0;
-  discHalos.instanceMatrix.needsUpdate = true;
   agents = []; factions = []; grayCount = 0;
   freeAgentIds.length = 0;
   resetCrystals();
@@ -5987,8 +5984,6 @@ function update(dt) {
   soundEngine.setMusicIntensity(0.5);
   soundEngine.updateMusic(dt);
 
-  discHalos.count = agents.length;
-
   /* -- Intégration + rendu instancié de la foule : extrait dans
         src/sim/crowd-tick.js. La boucle est identique, mais toutes les
         dépendances passent par ctx — le sim tournera headless côté serveur. */
@@ -6017,7 +6012,6 @@ function update(dt) {
   updateBurrowEvents(dt);
 
   for (const m of crowds) { m.instanceMatrix.needsUpdate = true; }
-  discHalos.instanceMatrix.needsUpdate = true;
 
   /* -- Morph Leader : tous les convertis ; cristaux orbitaux OFF ; âmes OK -- */
   ensureAllFollowerMorphs();
