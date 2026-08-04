@@ -29,11 +29,8 @@ export function createAgent(id, x, z, ang = 0, baseScale = 1) {
     cooldown: 0,
     extractProgress: 0,
     converting: -1,
-    convertingDisc: null,
     stumbleT: 0,
     followerOf: -1,
-    discLvl: 1,
-    discXp: 0,
     _stuckT: 0,
     _detourT: 0,
     _detourSide: 0,
@@ -57,18 +54,27 @@ export function resetAgent(a, x, z, ang = 0) {
   a.cooldown = 0;
   a.extractProgress = 0;
   a.converting = -1;
-  a.convertingDisc = null;
   a.stumbleT = 0;
   a.followerOf = -1;
   a._followerSlot = null;
   a._followerKey = null;
+  /* Taille : la remettre à celle du spawn est INDISPENSABLE.
+     Un agent absorbé par un sanctuaire est recyclé pour un nouvel esprit, et
+     `convertToFollower` calcule `base = _origBase * FOLLOWER_SCALE` en posant
+     `_origBase` à la taille courante s'il est vide. Sans restauration, chaque
+     vie repartait de la taille RÉDUITE de la précédente et la remultipliait
+     par 0,55 : au bout de six recyclages l'esprit faisait 3 % de sa taille
+     d'origine. C'est le rétrécissement observé en cours de partie. */
+  if (a._spawnBase) a.base = a._spawnBase;
   a._origBase = undefined;
+  /* Un agent recyclé en plein plongeon garderait une taille intermédiaire. */
+  a._dive = null;
+  a._diveMoved = false;
+  a._diveD = null;
   a._stuckT = 0;
   a._detourT = 0;
   a._detourSide = 0;
   a.jmp = null;
-  a.discLvl = 1;
-  a.discXp = 0;
 }
 
 /* -------------------------------- Faction ------------------------------

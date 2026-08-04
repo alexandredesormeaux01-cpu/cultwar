@@ -2707,6 +2707,9 @@ function spawnAgent(x, z) {
   const baseScale = 0.88 + Math.random() * 0.22;
   const a = createAgent(id, x, z, ang, baseScale);
   if (isKnight(a)) a.base *= 1.12;   // le chevalier en impose un peu plus
+  /* Référence de taille, posée APRÈS le bonus chevalier : c'est elle que
+     resetAgent restaure à chaque recyclage. */
+  a._spawnBase = a.base;
   agents.push(a);
   grayCount++;
   setAgentColor(a.id, GRAY);
@@ -2858,7 +2861,6 @@ function convertToFollower(a, f, byDisc = null) {
   a.dead = false;
   a.extractProgress = 0;
   a.converting = -1;
-  a.convertingDisc = null;
   a.followerOf = f.i;
   if (!a._origBase) a._origBase = a.base;
   a.base = a._origBase * FOLLOWER_SCALE;
