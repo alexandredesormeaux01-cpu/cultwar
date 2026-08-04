@@ -23,7 +23,8 @@
     "map:test": "node scripts/map-smoke-test.mjs",
     "attack:test": "node scripts/attack-smoke-test.mjs",
     "orb:test": "node scripts/orb-smoke-test.mjs",
-    "sound:test": "node scripts/sound-smoke-test.mjs"
+    "sound:test": "node scripts/sound-smoke-test.mjs",
+    "optimize:audio": "node scripts/optimize-audio.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.2",
@@ -43,6 +44,7 @@
     "@gltf-transform/functions": "^4.4.2",
     "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",
+    "ffmpeg-static": "^5.3.0",
     "meshoptimizer": "^1.2.0",
     "sharp": "^0.35.3",
     "vite": "^5.4.0"
