@@ -3473,10 +3473,14 @@ const PAINT_N = 192;                       // résolution de la grille (cellule 
 const PAINT_SPAN = (MAP_R + 2) * 2;        // largeur du monde couverte
 const PAINT_CONVERT_T = 2.5;               // gris sur une couleur : converti en ~2,5 s
 const paintGrid = new Int8Array(PAINT_N * PAINT_N).fill(-1);
-const paintCounts = new Int32Array(8);
+const PAINT_SLOTS = 8;   // bornes de paintGrid : jusqu'à 8 cultes
+const paintCounts = new Int32Array(PAINT_SLOTS);
 let paintTotal = 1;                        // cellules peignables (dessus des tuiles)
 /* Masque de découpe : Path2D des hex (état avant les essais de coupe horizontale). */
 let paintClip = null;
+/* Minimap : cellule de peinture → index de tuile, et nombre de cellules par
+   tuile. Reconstruits par rebuildPaintMask à chaque nouvelle île. */
+let _cellTile = null, _tileCells = null, _tileTally = null;
 let paintClipByLevel = null;   // masque cumulatif par altitude (voir rebuildPaintMask)
 
 /** Masque de découpe correspondant à une altitude de source. */
@@ -3517,12 +3521,25 @@ function rebuildPaintMask() {
   for (const t of island.tiles) hexInto(path, t);
   paintClip = path;
 
+  /* Correspondance cellule de peinture → tuile, calculée UNE fois par île.
+     La minimap colorie chaque hexagone selon la peinture majoritaire dessus :
+     sans cette table il faudrait relocaliser 36 864 cellules à chaque
+     rafraîchissement. Ici c'est un simple parcours de tableau. */
+  for (let i = 0; i < island.tiles.length; i++) island.tiles[i]._idx = i;
+  _cellTile = new Int16Array(PAINT_N * PAINT_N).fill(-1);
+  _tileCells = new Int32Array(island.tiles.length);
+
   let n = 0;
   const kw = PAINT_SPAN / PAINT_N;
   for (let gz = 0; gz < PAINT_N; gz++) {
     for (let gx = 0; gx < PAINT_N; gx++) {
       const x = (gx + 0.5 - half) * kw, z = (gz + 0.5 - half) * kw;
-      if (isSolid(island, x, z)) n++;
+      if (!isSolid(island, x, z)) continue;
+      n++;
+      const t = tileAt(island, x, z);
+      if (!t) continue;
+      _cellTile[gz * PAINT_N + gx] = t._idx;
+      _tileCells[t._idx]++;
     }
   }
   paintTotal = Math.max(1, n);
@@ -4178,12 +4195,38 @@ function drawMinimap() {
   }
   mctx.fillStyle = miniGrad; mctx.fillRect(0, 0, W, W);
 
-  /* --- Silhouette de l'île : tuiles plus claires pour la lisibilité. --- */
+  /* --- Territoire : chaque tuile prend la couleur du culte qui la peint
+         MAJORITAIREMENT. Une tuile disputée ou à peine effleurée reste neutre,
+         si bien que la minimap dit qui tient quoi au lieu de refléter chaque
+         éclaboussure — c'est une carte, pas une réduction de l'écran. --- */
   if (island) {
     const hr = HEX_R * s;
     mctx.strokeStyle = 'rgba(170,210,255,.42)';
     mctx.lineWidth = 1.1 * k;
-    for (const t of island.tiles) {
+
+    /* Comptage : un seul parcours de la grille de peinture, réparti sur les
+       tuiles via la table pré-calculée. */
+    /* 8 emplacements comme paintCounts, et non NB_FACTIONS : en multi le
+       nombre de cultes d'une partie n'est pas celui de la constante, et une
+       couleur au-delà de la borne serait silencieusement ignorée. */
+    const nT = island.tiles.length;
+    if (!_tileTally || _tileTally.length < nT * PAINT_SLOTS) {
+      _tileTally = new Int32Array(nT * PAINT_SLOTS);
+    } else {
+      _tileTally.fill(0);
+    }
+    if (_cellTile) {
+      for (let i = 0; i < _cellTile.length; i++) {
+        const ti = _cellTile[i];
+        if (ti < 0) continue;
+        const o = paintGrid[i];
+        if (o < 0 || o >= PAINT_SLOTS) continue;
+        _tileTally[ti * PAINT_SLOTS + o]++;
+      }
+    }
+
+    for (let ti = 0; ti < nT; ti++) {
+      const t = island.tiles[ti];
       const tx = c + t.x * s, tz = c + t.z * s;
       mctx.beginPath();
       for (let i = 0; i < 6; i++) {
@@ -4192,25 +4235,24 @@ function drawMinimap() {
         if (i === 0) mctx.moveTo(px, pz); else mctx.lineTo(px, pz);
       }
       mctx.closePath();
-      mctx.fillStyle = 'rgba(130,185,235,.38)';
+
+      /* Majorité stricte : plus de la moitié des cellules de la tuile. */
+      let best = -1, bestN = 0;
+      if (_cellTile) {
+        for (let o = 0; o < PAINT_SLOTS; o++) {
+          const v = _tileTally[ti * PAINT_SLOTS + o];
+          if (v > bestN) { bestN = v; best = o; }
+        }
+      }
+      const cells = _tileCells ? _tileCells[ti] : 0;
+      const owned = best >= 0 && cells > 0 && bestN * 2 > cells && factions[best];
+
+      mctx.fillStyle = owned ? factions[best].css : 'rgba(130,185,235,.38)';
+      mctx.globalAlpha = owned ? 0.88 : 1;
       mctx.fill();
+      mctx.globalAlpha = 1;
       mctx.stroke();
     }
-  }
-
-  /* --- Territoire : on recopie le canvas de peinture ---
-     Il porte déjà la couleur de chaque culte, découpée sur la silhouette de
-     l'île. Le redessiner cellule par cellule depuis paintGrid coûterait
-     36 864 rectangles par rafraîchissement pour un résultat identique.
-     Le canvas couvre PAINT_SPAN unités centrées sur l'origine, exactement le
-     repère de la minimap — une seule mise à l'échelle suffit. */
-  {
-    const span = PAINT_SPAN * s;
-    mctx.save();
-    mctx.globalAlpha = 0.82;   // laisse deviner le quadrillage des tuiles dessous
-    mctx.imageSmoothingEnabled = true;
-    mctx.drawImage(paintCv, c - span / 2, c - span / 2, span, span);
-    mctx.restore();
   }
 
   // balayage radar (léger, tournant)
@@ -4242,25 +4284,6 @@ function drawMinimap() {
     mctx.lineWidth = 1.2 * k;
     mctx.fill(); mctx.stroke();
   }
-
-  // --- Esprits libres et cortèges ---
-  const dot = 2.2 * k;
-  for (const a of agents) {
-    if (a.dead) continue;
-    /* Un esprit enrôlé porte la couleur de son culte : on voit d'un coup d'œil
-       qui traîne un long cortège. La branche était morte depuis le retrait des
-       disciples — elle testait `discipleOf`, qui n'existe plus. */
-    const fi = a.followerOf ?? -1;
-    if (fi >= 0 && factions[fi]) {
-      mctx.fillStyle = factions[fi].css;
-      mctx.globalAlpha = 1;
-    } else {
-      mctx.fillStyle = GRAY_CSS;
-      mctx.globalAlpha = 0.9;
-    }
-    mctx.fillRect(c + a.x * s - dot / 2, c + a.z * s - dot / 2, dot, dot);
-  }
-  mctx.globalAlpha = 1;
 
   // --- Leaders : pastilles lumineuses ---
   for (const f of factions) {
