@@ -127,17 +127,10 @@ export function aiThink(f, dt, ctx) {
     if (s > bestRivalScore) { bestRivalScore = s; bestRival = o; }
   }
 
-  /* ---- 0) Dépôt au Sanctuaire de base si le leader a récolté des esprits ---- */
-  const team = ctx.teams && ctx.teams[f.team];
-  if (team && (f.count || 0) >= 4) {
-    const dBase = Math.hypot(team.baseX - L.x, team.baseZ - L.z);
-    const depositNeed = Math.min(3.5, (f.count || 0) * 0.45) * (1 + 12 / (10 + dBase));
-    if (depositNeed > 1.0) {
-      f.mode = 'deposit';
-      f.target = { x: team.baseX, z: team.baseZ };
-      return;
-    }
-  }
+  /* Le dépôt à la cour de départ a disparu avec les cours elles-mêmes : un
+     cortège ne se vide plus qu'aux sanctuaires, et c'est altarGoal qui s'en
+     charge au-dessus. Envoyer encore les bots au point d'apparition les
+     faisait traverser la carte pour rien. */
   const rivalTeam = bestRival ? bestRival.team : -1;
   const pressure = (bestRival && bestRivalScore > myScore)
     ? Math.min(1, (bestRivalScore - myScore) / 1000)
@@ -307,7 +300,6 @@ function finalizeTarget(f, T, matchLeft, ctx) {
     /* Boucle actuelle : fondre sur un esprit qui fuit, et courir livrer. */
     (f.mode === 'hunt' && dT > 6) ||
     (f.mode === 'altar' && dT > 7) ||
-    (f.mode === 'deposit' && dT > 10) ||
     (f.mode === 'bomb' && dT > 5 && dT < 28) ||
     (f.mode === 'raid' && dT > 8) ||
     dT > 22 ||

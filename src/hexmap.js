@@ -1342,20 +1342,34 @@ export function makeTilePlacer(island, rng = Math.random) {
  *  Tout ce qui pose une surface plane plus large qu'une tuile — disque de
  *  base, pad d'autel — doit s'y installer, sinon la géométrie traverse le
  *  flanc du plateau voisin. */
-export function isFlatTile(island, t) {
+export function isFlatTile(island, t, rings = 1) {
   if (!island || !t) return false;
-  for (const [dq, dr] of DIRS) {
-    const nb = island.byKey.get(key(t.q + dq, t.r + dr));
-    if (nb && nb.level !== t.level) return false;
+  /* Balayage du disque axial de rayon `rings` autour de la tuile. Une place de
+     sanctuaire fait maintenant plus d'une tuile de rayon : se contenter des
+     six voisins laisserait son dallage mordre sur le flanc du plateau suivant. */
+  for (let dq = -rings; dq <= rings; dq++) {
+    const lo = Math.max(-rings, -dq - rings);
+    const hi = Math.min(rings, -dq + rings);
+    for (let dr = lo; dr <= hi; dr++) {
+      const nb = island.byKey.get(key(t.q + dq, t.r + dr));
+      if (nb && nb.level !== t.level) return false;
+    }
   }
   return true;
 }
 
 /** Point aléatoire sur une tuile plate — repli sur randomPoint si l'île n'en
  *  a aucune de libre. */
-export function flatPoint(island, minD = 0, maxD = Infinity, rng = Math.random) {
-  const pool = island.tiles.filter((t) => t.d >= minD && t.d <= maxD
-    && t.role !== ROLE.SANCTUARY && isFlatTile(island, t));
+export function flatPoint(island, minD = 0, maxD = Infinity, rng = Math.random, rings = 1) {
+  let pool = island.tiles.filter((t) => t.d >= minD && t.d <= maxD
+    && t.role !== ROLE.SANCTUARY && isFlatTile(island, t, rings));
+  /* Repli progressif : sur une île très accidentée, une place parfaitement
+     plate de deux tuiles de rayon peut ne pas exister. On relâche l'exigence
+     plutôt que de renoncer au sanctuaire. */
+  if (!pool.length && rings > 1) {
+    pool = island.tiles.filter((t) => t.d >= minD && t.d <= maxD
+      && t.role !== ROLE.SANCTUARY && isFlatTile(island, t, 1));
+  }
   if (!pool.length) return randomPoint(island, minD, maxD, rng);
   const t = pool[(rng() * pool.length) | 0];
   const a = rng() * Math.PI * 2, rr = Math.sqrt(rng()) * (APOTHEM - 1.2);

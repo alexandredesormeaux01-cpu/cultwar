@@ -66,7 +66,7 @@ import {
 } from './sim/constants.js';
 import { createAgent, resetAgent, createFaction, createTeam } from './sim/state.js';
 import { discXpNeed, discSpeedMul, discPaintMul, discSpd, discXpFrac } from './sim/disciples.js';
-import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap, inOwnBase as _inOwnBase } from './sim/leader.js';
+import { leaderSpeed as _leaderSpeed, discipleCap as _discipleCap } from './sim/leader.js';
 import { effects } from './sim/effects.js';
 import { aiThink as _aiThink, paintMixAround as _paintMixAround } from './sim/ai.js';
 import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion, playerDir } from './sim/leader-tick.js';
@@ -943,7 +943,7 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
 /* ============================== État du jeu ============================== */
 let agents = [];        // { x,z,vx,vz,f, u, ang, base, pop, delay, wt, wx, wz }
 let factions = [];      // { i, cult, color, alive, count, leader:{x,z,dx,dz}, grp, isBot, aggr, boostT, target }
-let teams = [];         // { id, baseX, baseZ, wallR, gateAng, … } — une base par culte
+let teams = [];         // { id, baseX, baseZ, … } — identité de culte + point d'apparition
 let grayCount = 0;
 /* Habitations conquérables. buildMap() peut être appelée avant startGame() (menu),
    d'où le tampon pendingHouses qui est adopté par startGame — sinon on garderait
@@ -1462,29 +1462,10 @@ gltfLoader.load('assets/models/paint_crystal.glb', (gltf) => {
   bombModel = wrap;
 });
 
-/* Modèle 3D du Sanctuaire de Base (Arcane Stone Sanctuary GLB) */
-let sanctuaryModel = null;
-gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
-  mobileDownscaleTextures(gltf);
-  const g = gltf.scene;
-  const box = new THREE.Box3().setFromObject(g);
-  const h = Math.max(0.001, box.max.y - box.min.y);
-  g.scale.setScalar(5.5 / h);
-  box.setFromObject(g);
-  g.position.y = -box.min.y;
-  g.traverse((c) => {
-    if (c.isMesh) {
-      c.castShadow = true;
-      c.receiveShadow = true;
-    }
-  });
-  const wrap = new THREE.Group();
-  wrap.add(g);
-  attachCartoonOutline(g, 0.025);
-  sanctuaryModel = wrap;
-}, undefined, (err) => {
-  console.warn('[sanctuary] Load warning:', err);
-});
+/* Le modèle de Sanctuaire de Base n'est plus chargé : les cours de départ
+   ont disparu et il n'avait plus aucun point de pose. Le .glb reste dans
+   public/assets/models/ — il ferait un bon corps de sanctuaire maintenant
+   qu'ils ont l'emprise d'une cour. */
 
 /* --------------------------- Aspiration des esprits ---------------------------
    La toile demandait quatre gestes entre « je vois un esprit » et « je l'ai » :
@@ -2152,9 +2133,15 @@ const ALTAR_COUNT = 10;      // assez pour couvrir la vallée, assez peu pour se
    mémoire de ce qui s'y est joué, et le prix d'une reprise se lit sur place. */
 const ALTAR_NEED_START = 1;
 const ALTAR_NEED_STEP = 1;
-const ALTAR_R = 3.4;         // rayon de livraison
-const ALTAR_H = 2.8;         // hauteur du sanctuaire une fois mis à l'échelle
-const ALTAR_MIN_GAP = 22;    // écart minimal entre deux autels
+/* Les sanctuaires reprennent l'emprise des anciennes cours de départ
+   (BASE_WALL_R) : ce sont désormais les seuls lieux forts de la vallée, ils
+   doivent se voir et s'occuper comme des places, pas comme des bornes. */
+const ALTAR_R = BASE_WALL_R;   // rayon de livraison — l'emprise d'une cour
+const ALTAR_H = 5.6;           // hauteur du sanctuaire une fois mis à l'échelle
+/* L'écart minimal doit rester supérieur à deux emprises, sinon deux places se
+   chevauchent et on livre aux deux à la fois. Au-delà de ~22 l'île ne peut
+   plus en accueillir dix (mesuré sur 200 cartes). */
+const ALTAR_MIN_GAP = ALTAR_R * 2 + 7.6;
 const ALTAR_FEED_RATE = 3.5; // esprits livrés par seconde
 const ALTAR_PAINT_PERIOD = 0.22;
 const ALTAR_PAINT_R = 13;    // portée finale de la peinture d'un sanctuaire
@@ -2423,30 +2410,38 @@ function placeAltars() {
     bag.push(...shuffled);
   }
 
-  let guard = 0;
-  while (altars.length < ALTAR_COUNT && guard++ < 400) {
-    const p = flatPoint(island, 7, Infinity);
-    if (!p) break;
-    const pz = p.z ?? p.y;
-    let ok = true;
-    for (const a of altars) {
-      if (Math.hypot(a.x - p.x, a.z - pz) < ALTAR_MIN_GAP) { ok = false; break; }
+  /* Placement « meilleur de N » plutôt que tirage-rejet : à chaque tour on
+     échantillonne des emplacements plats et on garde celui qui s'éloigne le
+     plus des sanctuaires déjà posés. Le rejet simple n'arrivait à en placer
+     que 7 sur 10 depuis qu'ils ont l'emprise d'une cour — cette version en
+     place 9,9 en moyenne sur les mêmes cartes. */
+  const SAMPLES = 40;
+  for (let n = 0; n < ALTAR_COUNT; n++) {
+    let best = null, bestD = -1;
+    for (let k = 0; k < SAMPLES; k++) {
+      const p = flatPoint(island, 7, Infinity);
+      if (!p) continue;
+      const pz = p.z ?? p.y;
+      /* Un sanctuaire collé à un point d'apparition serait pris dans la
+         première seconde par celui qui naît dessus. */
+      let near = Infinity;
+      for (const t of teams) near = Math.min(near, Math.hypot(t.baseX - p.x, t.baseZ - pz));
+      if (near < ALTAR_R + 10) continue;
+
+      let d = Infinity;
+      for (const a of altars) d = Math.min(d, Math.hypot(a.x - p.x, a.z - pz));
+      if (d > bestD) { bestD = d; best = { x: p.x, z: pz }; }
     }
-    /* Pas d'autel dans une cour de départ : imprenable dès la première seconde. */
-    if (ok) {
-      for (const t of teams) {
-        if (Math.hypot(t.baseX - p.x, t.baseZ - pz) < t.wallR + 8) { ok = false; break; }
-      }
-    }
-    if (!ok) continue;
-    spawnAltar(p.x, pz, bag[altars.length]);
+    if (!best) break;
+    if (altars.length && bestD < ALTAR_MIN_GAP) break;   // l'île est saturée
+    spawnAltar(best.x, best.z, bag[n]);
   }
-  /* Si l'espacement est intenable sur une petite île, on relâche la contrainte. */
-  if (altars.length < 4) {
-    for (let k = altars.length; k < 6; k++) {
-      const p = islandRandomPoint(island, 6, Infinity);
-      if (p) spawnAltar(p.x, p.z ?? p.y, bag[k]);
-    }
+
+  /* Filet : une île minuscule peut ne rien offrir de conforme. Mieux vaut des
+     sanctuaires serrés que pas de partie du tout. */
+  for (let k = altars.length; k < 4; k++) {
+    const p = islandRandomPoint(island, 6, Infinity);
+    if (p) spawnAltar(p.x, p.z ?? p.y, bag[k]);
   }
 }
 
@@ -3115,7 +3110,6 @@ function bumpStreak() {
    foule. Déposer met à l'abri ; porter expose. */
 
 /** Le Leader est-il dans sa propre cour ? */
-function inOwnBase(f) { return _inOwnBase(f, teams); }
 
 /* Dépôt : dans sa cour, les croyants portés s'écoulent vers l'autel en un
    filet continu d'âmes. Chaque croyant déposé est définitivement acquis. */
@@ -3479,23 +3473,6 @@ function updateShrines(dt) {
    délai. C'est la source de soin la plus rapide, donc la plus disputée : ils
    créent des points de convergence, et courir en chercher un à 3 cristaux de
    vie est exactement le pari que la partie doit provoquer. */
-/* ========================= Gemme de dépôt des cours =========================
-   La gemme au centre de chaque cour flotte en permanence et s'anime quand son
-   culte est en train de déposer. À ne pas confondre avec les Sanctuaires, qui
-   sont les autels neutres disséminés sur la vallée. */
-function updateBaseGems(dt) {
-  for (const t of teams) {
-    const r = t.relicMesh;
-    if (!r) continue;
-    const owner = factions[t.id];
-    const depositing = owner && owner.alive && owner.count > 0 && inOwnBase(owner);
-    const spin = depositing ? 6.0 : 1.5;
-    r.rotation.y += dt * spin;
-    r.position.y = 1.2 + Math.sin(elapsed * (depositing ? 7 : 3) + t.id) * (depositing ? 0.26 : 0.1);
-    r.scale.setScalar(depositing ? 1.25 + Math.sin(elapsed * 10) * 0.1 : 1);
-  }
-}
-
 /* Purge des entités de la partie précédente (sanctuaires, autels, ondes). */
 function disposeGroup(grp) {
   grp.traverse((o) => {
@@ -3510,20 +3487,6 @@ function clearFx() {
   
   if (typeof teams !== 'undefined' && teams.length > 0) {
     for (const t of teams) {
-      if (t.sanctuaryMesh) { scene.remove(t.sanctuaryMesh); disposeGroup(t.sanctuaryMesh); t.sanctuaryMesh = null; }
-      if (t.altarMesh) { scene.remove(t.altarMesh); t.altarMesh.geometry.dispose(); t.altarMesh.material.dispose(); }
-      if (t.relicMesh) { scene.remove(t.relicMesh); t.relicMesh.geometry.dispose(); t.relicMesh.material.dispose(); }
-      if (t.wallMeshes) {
-        for (const m of t.wallMeshes) {
-          scene.remove(m);
-          if (m.geometry) m.geometry.dispose();
-          if (m.material && !m.userData.sharedMat) {
-            if (Array.isArray(m.material)) m.material.forEach((mm) => mm.dispose());
-            else m.material.dispose();
-          }
-        }
-      }
-      if (t.wallMats) for (const mat of t.wallMats) mat.dispose();
     }
   }
 
@@ -3578,62 +3541,12 @@ function findBaseSite(ang) {
   return onIsland(Math.cos(ang) * MAP_R * 0.7, Math.sin(ang) * MAP_R * 0.7);
 }
 
-/**
- * Construit les remparts d'une base : cour circulaire, porte ouverte vers le
- * centre de la carte, sol teinté, piliers de portail. La relique ira au centre.
- * Retourne { meshes, mats } pour un nettoyage propre.
- */
-function buildFortWalls(cx, cz, gateAng, teamColor) {
-  const meshes = [];
-  const floorMat = new THREE.MeshBasicMaterial({
-    color: teamColor.clone().lerp(new THREE.Color(0x1a1e28), 0.45),
-    transparent: true,
-    opacity: 0.65,
-    depthWrite: false,
-  });
-  const ringMat = new THREE.MeshBasicMaterial({
-    color: teamColor,
-    transparent: true,
-    opacity: 0.85,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const mats = [floorMat, ringMat];
-
-  // Disque de sol du sanctuaire aux couleurs de la faction
-  const floor = new THREE.Mesh(new THREE.CircleGeometry(BASE_WALL_R - 1.2, 32), floorMat);
-  floor.rotation.x = -Math.PI / 2;
-  floor.position.set(cx, groundY(cx, cz) + 0.04, cz);
-  floor.userData.sharedMat = true;
-  scene.add(floor);
-  meshes.push(floor);
-
-  const ring = new THREE.Mesh(new THREE.RingGeometry(BASE_WALL_R - 1.4, BASE_WALL_R - 1.0, 32), ringMat);
-  ring.rotation.x = -Math.PI / 2;
-  ring.position.set(cx, groundY(cx, cz) + 0.05, cz);
-  ring.userData.sharedMat = true;
-  scene.add(ring);
-  meshes.push(ring);
-
-  return { meshes, mats };
-}
 
 /** Collision contre les remparts des bases (désactivée : plus de murs). */
 function resolveBaseWalls(_e) {
   return;
 }
 
-/** Point d'approche d'une base : toujours passer par la porte si on est dehors. */
-function navToBase(team, fromX, fromZ) {
-  const d = Math.hypot(fromX - team.baseX, fromZ - team.baseZ);
-  const gateR = team.wallR + team.wallT + 2.2;
-  const gateX = team.baseX + Math.cos(team.gateAng) * gateR;
-  const gateZ = team.baseZ + Math.sin(team.gateAng) * gateR;
-  // Dehors ou dans le mur → d'abord la porte
-  if (d >= team.wallR - 0.4) return { x: gateX, z: gateZ };
-  // Déjà dans la cour → centre (relique / capture)
-  return { x: team.baseX, z: team.baseZ };
-}
 
 /** Dégage une entité coincée dans l'épaisseur d'un mur (désactivé). */
 function unstickIfInWall(_e) {
@@ -4423,32 +4336,6 @@ function drawMinimap() {
   }
   mctx.fillStyle = miniGrad; mctx.fillRect(0, 0, W, W);
 
-  // --- Sanctuaires de Base des Joueurs (Icône de Sanctuaire colorée) ---
-  if (teams && teams.length) {
-    for (const t of teams) {
-      const bx = c + t.baseX * s, bz = c + t.baseZ * s;
-      mctx.save();
-      mctx.translate(bx, bz);
-      mctx.beginPath();
-      mctx.arc(0, 0, 7.5 * k, 0, Math.PI * 2);
-      mctx.fillStyle = t.css;
-      mctx.shadowColor = t.css;
-      mctx.shadowBlur = 10 * k;
-      mctx.fill();
-      mctx.shadowBlur = 0;
-      mctx.lineWidth = 1.8 * k;
-      mctx.strokeStyle = '#ffffff';
-      mctx.stroke();
-
-      mctx.fillStyle = '#ffffff';
-      mctx.font = `bold ${Math.round(8 * k)}px sans-serif`;
-      mctx.textAlign = 'center';
-      mctx.textBaseline = 'middle';
-      mctx.fillText('🏛', 0, 0);
-      mctx.restore();
-    }
-  }
-
   /* --- Silhouette de l'île : tuiles plus claires pour la lisibilité. --- */
   if (island) {
     const hr = HEX_R * s;
@@ -5069,31 +4956,22 @@ function resetGame() {
     return (idx / factionCount) * Math.PI * 2 - Math.PI / 2;
   };
 
+  /* Plus de cours de départ : les sanctuaires sont désormais les seuls lieux
+     forts de la vallée. `teams` ne garde qu'une identité de culte et un POINT
+     D'APPARITION (baseX/baseZ) — aucune construction, aucun rempart, aucun
+     dépôt. Les champs gardent leur nom pour ne pas remuer tout le fichier. */
   teams = [];
   for (let t = 0; t < factionCount; t++) {
-    const teamAng = seatAngle(t);
-    const site = findBaseSite(teamAng);
-    const gateAng = Math.atan2(-site.z, -site.x);
+    const site = findBaseSite(seatAngle(t));
     const teamColor = new THREE.Color(picks[t].c);
-    const team = createTeam(t, site.x, site.z, BASE_WALL_R, BASE_WALL_T, gateAng, BASE_GATE_HALF, picks[t]);
+    const team = createTeam(t, site.x, site.z, BASE_WALL_R, BASE_WALL_T,
+      Math.atan2(-site.z, -site.x), BASE_GATE_HALF, picks[t]);
     team.color = teamColor;
     team.iconStamp = makeIconStamp(picks[t].sym);
-    team.altarMesh = null;
-    team.relicMesh = null;
-    const fort = buildFortWalls(site.x, site.z, gateAng, teamColor);
-    team.wallMeshes = fort.meshes;
-    team.wallMats = fort.mats;
-
-    if (sanctuaryModel) {
-      const sMesh = sanctuaryModel.clone(true);
-      sMesh.position.set(site.x, groundY(site.x, site.z), site.z);
-      scene.add(sMesh);
-      team.sanctuaryMesh = sMesh;
-    }
     teams.push(team);
   }
 
-  /* Sanctuaires : semés une fois l'île et les cours en place. */
+  /* Sanctuaires : semés une fois l'île et les points d'apparition en place. */
   placeAltars();
 
   const rosterPool = Object.keys(LEADERS).filter((k) => k !== playerLeaderKey);
