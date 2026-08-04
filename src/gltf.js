@@ -33,12 +33,35 @@ export function modelURL(url) {
   return LO_AVAILABLE.has(file) ? `${dir}lo/${file}` : url;
 }
 
+/** Chemin de l'autre variante (hi ↔ lo), ou null s'il n'y en a pas. */
+function altURL(url) {
+  const i = url.lastIndexOf('/');
+  const dir = url.slice(0, i + 1);
+  const file = url.slice(i + 1);
+  if (dir.endsWith('/lo/')) return dir.slice(0, -3) + file;
+  return LO_AVAILABLE.has(file) ? `${dir}lo/${file}` : null;
+}
+
 export function makeGLTFLoader() {
   const loader = new GLTFLoader();
   loader.setMeshoptDecoder(MeshoptDecoder);
-  /* Redirection transparente : les appelants gardent leurs chemins d'origine. */
+  /* Redirection transparente : les appelants gardent leurs chemins d'origine.
+
+     Repli sur l'autre variante en cas d'échec : l'APK Android n'embarque que
+     les modèles lo/ (voir scripts/prune-android-assets.mjs), donc une erreur
+     de classement mobile/desktop rendait TOUS les personnages introuvables et
+     le jeu affichait ses fallbacks géométriques. Un 404 ne doit jamais coûter
+     un modèle quand l'autre variante est là. */
   const load = loader.load.bind(loader);
-  loader.load = (url, ...rest) => load(modelURL(url), ...rest);
+  loader.load = (url, onLoad, onProgress, onError) => {
+    const primary = modelURL(url);
+    load(primary, onLoad, onProgress, (err) => {
+      const alt = altURL(primary);
+      if (!alt) { if (onError) onError(err); return; }
+      console.warn(`[gltf] ${primary} indisponible — repli sur ${alt}`);
+      load(alt, onLoad, onProgress, onError);
+    });
+  };
   return loader;
 }
 

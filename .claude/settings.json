@@ -49,7 +49,10 @@
       "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead\\('C:\\\\Cult.io\\\\android\\\\app\\\\build\\\\outputs\\\\apk\\\\debug\\\\app-debug.apk'\\); $z.Entries | Sort-Object Length -Descending | Select-Object -First 15 @{n='MB';e={[math]::Round\\($_.Length/1MB,2\\)}}, FullName; $z.Dispose\\(\\))",
       "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[System.IO.Compression.ZipFile]::OpenRead\\('C:\\\\Cult.io\\\\android\\\\app\\\\build\\\\outputs\\\\apk\\\\debug\\\\app-debug.apk'\\); $s=\\($z.Entries | Measure-Object Length -Sum\\).Sum; $c=\\($z.Entries | Measure-Object Compressedlength -Sum\\).Sum; \"entries: $\\($z.Entries.Count\\)\"; \"uncompressed MB: $\\([math]::Round\\($s/1MB,1\\)\\)\"; \"compressed MB: $\\([math]::Round\\($c/1MB,1\\)\\)\"; $z.Entries | Group-Object { \\($_.FullName -split '/'\\)[0..2] -join '/' } | Sort-Object { \\($_.Group | Measure-Object Length -Sum\\).Sum } -Descending | Select-Object -First 8 Name, Count, @{n='MB';e={[math]::Round\\(\\(\\($_.Group | Measure-Object Length -Sum\\).Sum\\)/1MB,1\\)}}; $z.Dispose\\(\\))",
       "Bash(unzip -l /c/Cult.io/android/app/build/outputs/apk/debug/app-debug.apk)",
-      "Bash(./gradlew.bat clean *)"
+      "Bash(./gradlew.bat clean *)",
+      "Bash(node --check src/gltf.js)",
+      "Bash(node --check src/device.js)",
+      "Bash(awk '{printf \"%.1f Mo\\\\n\", $5/1048576}')"
     ],
     "additionalDirectories": [
       "\\tmp"

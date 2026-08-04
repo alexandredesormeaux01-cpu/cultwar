@@ -19,13 +19,26 @@ export const HAS_FINE_POINTER = matchMedia('(any-pointer: fine)').matches;
 /** L'appareil possède un écran tactile — dit seulement ça, rien sur la puissance. */
 export const HAS_TOUCH = matchMedia('(any-pointer: coarse)').matches;
 
-/** Budget mobile : tactile ET sans pointeur fin. */
-export const IS_MOBILE = HAS_TOUCH && !HAS_FINE_POINTER;
+/* Application native Capacitor : le pont injecte `window.Capacitor` AVANT le
+   chargement de la page, la valeur est donc lisible dès l'import.
+
+   Ce test n'est pas un raffinement : la WebView Android répond « oui » à
+   `any-pointer: fine` sur beaucoup d'appareils (support du stylet, souris
+   Bluetooth, émulateur). L'heuristique seule classait donc un téléphone en
+   desktop — et comme l'APK n'embarque que les modèles allégés, tous les
+   personnages tombaient sur leur fallback géométrique. Un APK est mobile,
+   point. */
+export const IS_NATIVE = !!(globalThis.Capacitor
+  && (globalThis.Capacitor.isNativePlatform?.() ?? globalThis.Capacitor.isNative));
+
+/** Budget mobile : application native, ou tactile sans pointeur fin. */
+export const IS_MOBILE = IS_NATIVE || (HAS_TOUCH && !HAS_FINE_POINTER);
 
 /** Pour le diagnostic console (window.__cult.env()). */
 export function describeDevice() {
   return {
     isMobile: IS_MOBILE,
+    isNative: IS_NATIVE,
     hasTouch: HAS_TOUCH,
     hasFinePointer: HAS_FINE_POINTER,
     pointerCoarse: matchMedia('(pointer: coarse)').matches,
