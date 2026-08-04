@@ -59,7 +59,9 @@
       "Bash(awk 'NR>=4380 && NR<=4460 && /^function |^const .*= *\\\\\\(|drawMinimap/' src/main.js)",
       "Bash(node --check src/hexmap.js)",
       "Bash(awk 'NR<=4975 && /^function [a-zA-Z]/ {n=NR\": \"$0} END{}{}' src/main.js)",
-      "Bash(awk 'NR<=4975 && /^function /{line=NR\": \"$0} END{print line}' src/main.js)"
+      "Bash(awk 'NR<=4975 && /^function /{line=NR\": \"$0} END{print line}' src/main.js)",
+      "Bash(awk -F: '$1>1480 && $1<1860')",
+      "Bash(grep -n \"^  /\\\\*\\\\|^    /\\\\* ---\\\\|ELEM_FIRST\\\\|for \\(const a of agents\\)\\\\|for \\(let i = 0\" src/sim/crowd-tick.js)"
     ],
     "additionalDirectories": [
       "\\tmp"

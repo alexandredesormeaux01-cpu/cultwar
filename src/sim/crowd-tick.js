@@ -37,7 +37,25 @@ export function stepCrowd(state, dt, ctx) {
     setFollowerColor, // (a, col) → teinte le slot follower
     // buffers réutilisables (main.js les partage — un neuf par tick coûterait cher)
     tmpM, tmpQ, tmpS, tmpP, UP_AXIS, GRAY, _convCol,
+    tmpQ2, SIDE_AXIS,   // pose « face au sol » des agents touchés
   } = ctx;
+
+  /* Pose « face au sol » : on bascule le personnage d'un quart de tour autour
+     de son axe latéral. Le mesh est instancié, donc tout passe par la matrice —
+     il n'y a pas d'animation de chute à jouer. */
+  const composeFallen = (a) => {
+    tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
+    if (tmpQ2 && SIDE_AXIS) {
+      tmpQ2.setFromAxisAngle(SIDE_AXIS, Math.PI * 0.5);
+      tmpQ.multiply(tmpQ2);
+    }
+    const sc = a.base || 1;
+    tmpP.set(a.x, (a.y || 0) + sc * 0.22, a.z);
+    tmpS.set(sc, sc, sc);
+    tmpM.compose(tmpP, tmpQ, tmpS);
+    if (a._followerSlot != null) updateFollowerTransform(a, tmpM, 0);
+    else crowdOf(a.id).setMatrixAt(slotOf(a.id), tmpM);
+  };
 
   const converters = [];
   for (const f of factions) {
@@ -53,6 +71,19 @@ export function stepCrowd(state, dt, ctx) {
 
   for (const a of agents) {
     if (a.dead) continue;
+
+    /* ========== À TERRE : touché par une attaque ==========
+       L'esprit ne fuit plus, ne plonge plus, ne suit plus personne — il gît
+       jusqu'à ce qu'un Leader le ramasse ou qu'il se relève. C'est la fenêtre
+       que l'attaque ouvre, et elle doit court-circuiter TOUS les autres
+       comportements, y compris le cortège : un esprit arraché d'une file
+       repartirait sinon derrière son ancien maître. */
+    if (a.downT > 0) {
+      a.vx = 0; a.vz = 0;
+      resolveIsland(island, a, 0, 0, dt, false);
+      composeFallen(a);
+      continue;
+    }
 
     /* ========== DISCIPLE : chasse et convertit comme un mini-Leader ========== */
     if ((a.discipleOf ?? -1) >= 0) {

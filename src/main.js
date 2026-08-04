@@ -78,6 +78,10 @@ import {
 } from './sim/events.js';
 import { createNetClient } from './net/client.js';
 import { createRng } from './sim/rng.js';
+import {
+  projectiles, clearProjectiles, pickTarget, fireAttack, stepProjectiles,
+  tickDownStates, collectDowned, LEADER_DOWN_T,
+} from './sim/attacks.js';
 
 const net = createNetClient();
 let multiMode = false;   // true = partie en ligne P2P (WebRTC via PeerJS)
@@ -1469,51 +1473,11 @@ gltfLoader.load('assets/models/paint_crystal.glb', (gltf) => {
    public/assets/models/ — il ferait un bon corps de sanctuaire maintenant
    qu'ils ont l'emprise d'une cour. */
 
-/* --------------------------- Aspiration des esprits ---------------------------
-   La toile demandait quatre gestes entre « je vois un esprit » et « je l'ai » :
-   lancer, attendre, marcher, récolter. Aucun réglage ne rendait ça rapide, et
-   une fois posée elle ne renvoyait plus rien au joueur.
+/* --------------------------- Attaques à distance ---------------------------
+   L'aspiration a été remplacée : voir src/sim/attacks.js pour la boucle
+   « tirer → la cible tombe → on la ramasse ». Ne subsiste ici que
+   l'orientation du Leader, dont la visée assistée a besoin. */
 
-   Ici on maintient le bouton : un cône s'ouvre devant le Leader et tire les
-   esprits vers lui. Ils résistent — leur IA de fuite pousse en sens inverse —
-   donc chaque frame dit au joueur s'il est en train de gagner. Au contact,
-   l'esprit rejoint le cortège.
-
-   L'interaction entre joueurs sort de la géométrie, sans une ligne de combat :
-   deux Leaders qui aspirent la même proie additionnent leurs forces, et
-   l'esprit glisse vers celui qui tire le plus fort. On se dispute une prise en
-   la tirant, et le vainqueur se lit à l'écran.
-
-   Chaque Leader a son élément (LEADER_ELEMENT), donc son propre souffle :
-   couleur, motif et vitesse de rotation en découlent — six effets distincts
-   sans six assets à produire. */
-const ASPIR_R = 9.5;          // portée du cône
-const ASPIR_ARC = 0.62;       // demi-angle (~35°)
-const ASPIR_PULL = 15.0;      // vitesse d'attraction à bout portant
-const ASPIR_GRAB = 1.7;       // distance de prise
-const ASPIR_Y = 1.15;         // hauteur de l'axe du souffle
-
-/* Recette de débris par élément. Aucun cône n'est dessiné : le souffle ne se
-   voit qu'à travers ce qu'il emporte — c'est plus lisible et bien plus vivant
-   qu'un volume translucide, qui restait immobile quoi qu'il arrive.
-   `mix` donne la proportion feuille / caillou / volute. */
-const ASPIR_STYLE = {
-  fire:  { spin: 2.6, mix: [0.25, 0.15, 0.60] },   // braises et souffle chaud
-  water: { spin: 1.5, mix: [0.15, 0.10, 0.75] },   // embruns
-  air:   { spin: 3.4, mix: [0.45, 0.10, 0.45] },   // feuilles emportées
-  light: { spin: 0.9, mix: [0.10, 0.05, 0.85] },   // volutes lumineuses
-  earth: { spin: 1.2, mix: [0.30, 0.50, 0.20] },   // cailloux et poussière
-  ether: { spin: 2.2, mix: [0.20, 0.20, 0.60] },   // éclats occultes
-};
-
-/** Prépare la couleur et la recette d'un culte — sans aucun mesh à afficher. */
-function ensureAspirStyle(f) {
-  if (f._aspirCol) return;
-  const key = LEADER_ELEM_KEY[f.leaderKey] || 'ether';
-  const e = ELEMENTS.find((x) => x.key === key) || ELEMENTS[5];
-  f._aspirStyle = ASPIR_STYLE[key] || ASPIR_STYLE.ether;
-  f._aspirCol = new THREE.Color(e.col);
-}
 /** Orientation visuelle du Leader — celle que le joueur voit, donc celle sur
     laquelle il vise. Repli sur le vecteur vitesse si le corps n'est pas prêt. */
 function leaderFace(f) {
@@ -1522,316 +1486,143 @@ function leaderFace(f) {
   return Math.atan2(f.leader.dx || 0, f.leader.dz || 1);
 }
 
-function startAspir(f) {
-  if (!f || !f.alive) return false;
-  if (!f.aspir) soundEngine.playSFX('paint_orb', { volume: 0.35, rate: 0.75 });
-  f.aspir = true;
-  return true;
-}
-function stopAspir(f) { if (f) f.aspir = false; }
+/* ---- Rendu des projectiles ----
+   Une bille émissive par tir, prise dans un petit bassin réutilisé : les tirs
+   sont brefs et nombreux, allouer une géométrie à chaque fois ferait tousser
+   le ramasse-miettes en pleine action. La teinte est celle de l'élément du
+   Leader — six attaques distinctes sans un seul asset à produire. */
+const _boltGeo = new THREE.SphereGeometry(0.42, 10, 8);
+const _boltMats = new Map();     // couleur → matériau partagé
+const _boltPool = [];
+const _boltLive = new Map();     // projectile → mesh
 
-/* Accumulateur de traction : plusieurs Leaders peuvent tirer le même esprit, et
-   c'est la somme des forces qui décide. On agrège d'abord, on applique ensuite —
-   sinon le dernier culte traité écraserait les autres. */
-const _pullX = new Map(), _pullZ = new Map(), _pullBy = new Map();
-
-
-/* ---- Bourrasque : tout ce que le souffle emporte ----
-   Aucun cône n'est dessiné. L'aspiration ne se voit qu'à travers la matière
-   qu'elle arrache au sol : feuilles qui tournoient, cailloux qui décollent,
-   volutes de vent. Un volume translucide restait immobile quoi qu'il arrive ;
-   des débris disent à chaque frame d'où souffle le vent et à quelle vitesse.
-
-   Trois familles, trois textures, trois nuages — donc trois appels de rendu au
-   total quel que soit le nombre de cultes. La couleur par sommet distingue les
-   six éléments à l'intérieur de chaque famille. */
-const WIND_MAX = 320;
-const KINDS = ['leaf', 'stone', 'wisp'];
-
-/** Petites textures dessinées une fois : une feuille, un caillou, une volute. */
-function makeDebrisTexture(kind) {
-  const S = 64;
-  const cv = document.createElement('canvas');
-  cv.width = cv.height = S;
-  const g = cv.getContext('2d');
-  g.translate(S / 2, S / 2);
-
-  if (kind === 'leaf') {
-    /* Amande nervurée : la forme la plus lisible à quelques pixels. */
-    g.fillStyle = '#fff';
-    g.beginPath();
-    g.moveTo(0, -26);
-    g.quadraticCurveTo(20, -6, 0, 26);
-    g.quadraticCurveTo(-20, -6, 0, -26);
-    g.fill();
-    g.strokeStyle = 'rgba(0,0,0,0.35)';
-    g.lineWidth = 2.5;
-    g.beginPath();
-    g.moveTo(0, -22); g.lineTo(0, 22);
-    g.stroke();
-  } else if (kind === 'stone') {
-    /* Éclat anguleux, pas un disque : un caillou doit avoir des arêtes. */
-    g.fillStyle = '#fff';
-    g.beginPath();
-    const pts = [[0, -20], [16, -8], [13, 12], [-4, 20], [-17, 6], [-13, -12]];
-    g.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
-    g.closePath();
-    g.fill();
-    g.strokeStyle = 'rgba(0,0,0,0.4)';
-    g.lineWidth = 3;
-    g.stroke();
-  } else {
-    /* Volute : virgule floue, sans contour — c'est le vent lui-même. */
-    const grd = g.createRadialGradient(0, 0, 0, 0, 0, 30);
-    grd.addColorStop(0, 'rgba(255,255,255,0.95)');
-    grd.addColorStop(0.45, 'rgba(255,255,255,0.35)');
-    grd.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = grd;
-    g.beginPath();
-    g.ellipse(0, 0, 30, 12, -0.5, 0, 7);
-    g.fill();
+function boltMaterial(col) {
+  let m = _boltMats.get(col);
+  if (!m) {
+    m = new THREE.MeshBasicMaterial({ color: col, toneMapped: false });
+    _boltMats.set(col, m);
   }
-
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  return m;
 }
 
-const _windPos = {}, _windCol = {}, _windPts = {};
-const _wind = [];
-
-function ensureWindPoints(kind) {
-  if (_windPts[kind]) return _windPts[kind];
-  _windPos[kind] = new Float32Array(WIND_MAX * 3);
-  _windCol[kind] = new Float32Array(WIND_MAX * 3);
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(_windPos[kind], 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(_windCol[kind], 3));
-  geo.setDrawRange(0, 0);
-  const pts = new THREE.Points(geo, new THREE.PointsMaterial({
-    map: makeDebrisTexture(kind),
-    size: kind === 'wisp' ? 0.95 : kind === 'leaf' ? 0.6 : 0.4,
-    sizeAttenuation: true,
-    vertexColors: true,
-    transparent: true,
-    alphaTest: 0.02,
-    depthWrite: false,
-    /* Les volutes s'ajoutent (lumière), feuilles et cailloux se composent
-       normalement : de la matière ne doit pas briller. */
-    blending: kind === 'wisp' ? THREE.AdditiveBlending : THREE.NormalBlending,
-    toneMapped: false,
-  }));
-  pts.frustumCulled = false;
-  pts.renderOrder = 5;
-  scene.add(pts);
-  setCharLayer(pts);
-  _windPts[kind] = pts;
-  return pts;
+function elementColorOf(f) {
+  const key = LEADER_ELEM_KEY[f?.leaderKey] || 'ether';
+  const e = ELEMENTS.find((x) => x.key === key) || ELEMENTS[5];
+  return e.col;
 }
 
-/** Sème un débris, arraché au sol à la bouche du souffle. */
-function spawnWind(f, col, style) {
-  /* Plafond global aligné sur la taille des tampons : au-delà, des débris
-     seraient calculés puis jetés au rendu. */
-  if (_wind.length >= WIND_MAX) return;
-  const mix = (style && style.mix) || [0.2, 0.2, 0.6];
-  const r = Math.random();
-  const kind = r < mix[0] ? 'leaf' : r < mix[0] + mix[1] ? 'stone' : 'wisp';
-  const spin = (style && style.spin) || 2;
-  _wind.push({
-    f, col, kind,
-    t: 0,                                   // 0 = bouche du souffle, 1 = Leader
-    ang: Math.random() * Math.PI * 2,
-    rad: 0.15 + Math.random() * 0.85,
-    spin: (Math.random() < 0.5 ? -1 : 1) * spin * (0.6 + Math.random() * 0.8),
-    spd: 0.8 + Math.random() * 0.6,
-    /* Feuilles et cailloux partent du SOL et décollent en chemin ; les volutes
-       naissent déjà en l'air. C'est ce décollage qui raconte l'arrachement. */
-    y0: kind === 'wisp' ? 0.6 + Math.random() * 1.2 : 0.05 + Math.random() * 0.2,
-    lift: kind === 'wisp' ? 0.3 : 0.9 + Math.random() * 0.9,
-    tumble: Math.random() * 6.28,
-  });
+function acquireBolt(p) {
+  const mesh = _boltPool.pop() || new THREE.Mesh(_boltGeo, boltMaterial(0xffffff));
+  mesh.material = boltMaterial(elementColorOf(factions[p.from]));
+  mesh.visible = true;
+  mesh.position.set(p.x, p.y, p.z);
+  scene.add(mesh);
+  _boltLive.set(p, mesh);
 }
 
-function updateWind(dt) {
-  /* Les tampons doivent exister AVANT qu'on y écrive. Les créer à la fin de la
-     fonction, comme c'était le cas, faisait échouer la toute première frame de
-     souffle sur un tableau indéfini — et l'exception emportait avec elle la fin
-     de update(), caméra comprise. */
-  for (const kind of KINDS) ensureWindPoints(kind);
-
-  const n = { leaf: 0, stone: 0, wisp: 0 };
-  for (let i = _wind.length - 1; i >= 0; i--) {
-    const w = _wind[i];
-    const f = w.f;
-    if (!f || !f.alive) { _wind.splice(i, 1); continue; }
-
-    /* Accélération à l'approche : le débris met bien moins de temps à parcourir
-       la dernière moitié que la première. Un flux qui se resserre se lit comme
-       une succion ; à vitesse constante, ce ne serait que de la pluie. */
-    w.t += dt * w.spd * (0.75 + w.t * w.t * 3.4);
-    if (w.t >= 1) { _wind.splice(i, 1); continue; }
-
-    const kind = w.kind;
-    if (n[kind] >= WIND_MAX) continue;
-    w.ang += dt * w.spin * (1 + w.t * 2);   // la spirale se serre en approchant
-    w.tumble += dt * 7;
-
-    const ang = leaderFace(f);
-    const d = ASPIR_R * (1 - w.t);
-    const r = Math.tan(ASPIR_ARC) * d * w.rad;
-    const cx = f.leader.x + Math.sin(ang) * d;
-    const cz = f.leader.z + Math.cos(ang) * d;
-    const px = Math.cos(ang), pz = -Math.sin(ang);
-    const o = Math.cos(w.ang) * r;
-
-    const arr = _windPos[kind], carr = _windCol[kind];
-    const j = n[kind] * 3;
-    arr[j]     = cx + px * o;
-    arr[j + 1] = w.y0 + w.lift * w.t + Math.sin(w.ang) * r * 0.35;
-    arr[j + 2] = cz + pz * o;
-
-    /* Fondu d'entrée ET de sortie : un débris qui apparaît net au bord du cône
-       trahit la limite invisible du souffle. */
-    const fade = Math.min(1, w.t / 0.12) * (1 - Math.max(0, (w.t - 0.8) / 0.2));
-    carr[j]     = w.col.r * fade;
-    carr[j + 1] = w.col.g * fade;
-    carr[j + 2] = w.col.b * fade;
-    n[kind]++;
-  }
-
-  for (const kind of KINDS) {
-    const pts = _windPts[kind];
-    pts.geometry.setDrawRange(0, n[kind]);
-    pts.geometry.attributes.position.needsUpdate = true;
-    pts.geometry.attributes.color.needsUpdate = true;
-    pts.visible = n[kind] > 0;
-  }
+function releaseBolt(p) {
+  const mesh = _boltLive.get(p);
+  if (!mesh) return;
+  scene.remove(mesh);
+  mesh.visible = false;
+  _boltPool.push(mesh);
+  _boltLive.delete(p);
 }
 
-function clearWind() {
-  _wind.length = 0;
-  for (const kind of KINDS) {
-    const pts = _windPts[kind];
-    if (pts) { pts.geometry.setDrawRange(0, 0); pts.visible = false; }
-  }
-}
-
-function updateAspiration(dt) {
-  _pullX.clear(); _pullZ.clear(); _pullBy.clear();
-  updateWind(dt);
-
-  for (const f of factions) {
-    if (!f || !f.alive || !f.leader) continue;
-    ensureAspirStyle(f);
-    const on = !!f.aspir;
-
-    /* Le souffle monte et retombe en fondu : couper net le débit produirait un
-       trou visible dans le flux au relâchement. */
-    f._aspirVis = (f._aspirVis || 0) + (on ? dt * 8 : -dt * 4);
-    f._aspirVis = Math.max(0, Math.min(1, f._aspirVis));
-
-    /* Débit constant, indépendant de la fréquence d'images. */
-    if (f._aspirVis > 0.02) {
-      f._windAcc = (f._windAcc || 0) + dt * 95 * f._aspirVis;
-      let emit = f._windAcc | 0;
-      f._windAcc -= emit;
-      while (emit-- > 0) spawnWind(f, f._aspirCol, f._aspirStyle);
-    }
-
-    if (!on) continue;
-
-    const ang = leaderFace(f);
-    const fx = Math.sin(ang), fz = Math.cos(ang);
-    const cosArc = Math.cos(ASPIR_ARC);
-
+/* Contexte de la simulation d'attaque : recréé une seule fois, ses champs
+   pointent sur les valeurs vivantes. */
+const _atkCtx = {
+  agents: null, factions: null,
+  /* ELEM_FIRST et finishConvert sont déclarés plus bas dans le fichier : les
+     lire ici, à l'évaluation du littéral, lèverait une ReferenceError de zone
+     morte. On les branche au premier tick. */
+  variantOf, ELEM_FIRST: 0,
+  groundY,
+  finishConvert: null,
+  releaseFollower: (a) => {
+    releaseFollowerSlot(a);
+    const prev = factions[a.followerOf];
+    if (prev) prev.count = Math.max(0, (prev.count || 0) - 1);
+    a.followerOf = -1;
+    setAgentColor(a.id, GRAY);
+  },
+  cancelDive: (a) => { a.base = a._diveBase || a.base; a._dive = null; a._diveMoved = false; },
+  dropOneFollower: (o) => {
     for (const a of agents) {
-      if (!a || a.dead) continue;
-      if (variantOf(a.id) < ELEM_FIRST) continue;      // seuls les esprits
-      if ((a.discipleOf ?? -1) >= 0) continue;
-      if ((a.followerOf ?? -1) === f.i) continue;      // déjà à nous
-      if (a._dive != null) continue;                   // en pleine fuite sous terre
-
-      const dx = a.x - f.leader.x, dz = a.z - f.leader.z;
-      const d = Math.hypot(dx, dz);
-      if (d > ASPIR_R || d < 1e-3) continue;
-      const dot = (dx / d) * fx + (dz / d) * fz;
-      if (dot < cosArc) continue;
-
-      /* Plus l'esprit est proche de l'axe et du Leader, plus il est tiré fort.
-         Le cône a donc un « cœur » où l'on gagne le bras de fer, et des bords
-         où il faut se replacer. */
-      const axis = (dot - cosArc) / (1 - cosArc);
-      const near = 1 - d / ASPIR_R;
-      const force = ASPIR_PULL * (0.35 + 0.65 * axis) * (0.45 + 0.55 * near);
-
-      _pullX.set(a, (_pullX.get(a) || 0) - (dx / d) * force);
-      _pullZ.set(a, (_pullZ.get(a) || 0) - (dz / d) * force);
-      /* Le culte le plus proche récolte si l'esprit atteint le contact. */
-      const prev = _pullBy.get(a);
-      if (!prev || d < prev.d) _pullBy.set(a, { f, d });
+      if (!a || a.dead || (a.followerOf ?? -1) !== o.i) continue;
+      _atkCtx.releaseFollower(a);
+      return a;
     }
-  }
+    return null;
+  },
+  onFire: (f) => {
+    if (f.i === 0) soundEngine.playSFX('paint_orb', { volume: 0.4, rate: 1.15 });
+  },
+  onImpact: (p) => {
+    releaseBolt(p);
+    spawnShock(p.x, p.z, new THREE.Color(elementColorOf(factions[p.from])), 1.6, 0.22);
+  },
+  onLeaderDown: (o, by) => {
+    spawnShock(o.leader.x, o.leader.z, o.color, 3.4, 0.4);
+    if (o.i === 0) banner('✖ Vous êtes à terre — un esprit vous échappe !');
+    else if (by && by.i === 0) banner('✦ Rival mis à terre !');
+  },
+};
 
-  if (!_pullX.size) return;
+function bindAtkCtx() {
+  _atkCtx.agents = agents;
+  _atkCtx.factions = factions;
+  _atkCtx.ELEM_FIRST = ELEM_FIRST;
+  _atkCtx.finishConvert = finishConvert;
+}
 
-  for (const [a, px] of _pullX) {
-    const pz = _pullZ.get(a) || 0;
-    /* On déplace directement : la simulation vient d'appliquer la fuite, donc
-       le résultat visible est bien la différence entre les deux — l'esprit
-       tremble et recule quand il résiste, avance quand il perd. */
-    a.x += px * dt;
-    a.z += pz * dt;
-    a._aspirT = elapsed;
+function updateAttacks(dt) {
+  bindAtkCtx();
+  tickDownStates(factions, agents, dt);
+  botAttacks(dt);
+  stepProjectiles(dt, _atkCtx);
+  collectDowned(factions, agents, _atkCtx);
 
-    const owner = _pullBy.get(a);
-    if (!owner) continue;
-    const d = Math.hypot(a.x - owner.f.leader.x, a.z - owner.f.leader.z);
-    if (d > ASPIR_GRAB) continue;
-
-    const stolen = (a.followerOf ?? -1) >= 0;
-    finishConvert(a, owner.f);
-    spawnShock(a.x, a.z, owner.f.color, stolen ? 2.2 : 1.5, 0.3);
-    if (owner.f.i === 0) {
-      bumpStreak();
-      if (stolen) banner('✦ Esprit arraché à un rival !');
-    }
+  /* Les meshes suivent leur projectile ; ceux qui viennent de naître prennent
+     une bille au passage. */
+  for (const p of projectiles) {
+    let mesh = _boltLive.get(p);
+    if (!mesh) { acquireBolt(p); mesh = _boltLive.get(p); }
+    mesh.position.set(p.x, p.y, p.z);
   }
 }
 
-/* ---- L'aspiration côté IA ----
-   Un bot aspire dès qu'un esprit capturable entre dans son cône, et relâche
-   sinon. Rien de plus : la difficulté vient déjà de sa navigation. */
-function updateBotAspir() {
+/** Tir du joueur. Retourne true si le coup est parti (bouton à animer). */
+function playerAttack() {
+  const f = factions[0];
+  if (!f || !f.alive || state !== 'play') return false;
+  bindAtkCtx();
+  return !!fireAttack(f, leaderFace(f), _atkCtx);
+}
+
+/* ---- Les bots tirent aussi ----
+   Sans ça l'attaque serait un privilège du joueur et les bots ne ramasseraient
+   plus rien : ils chassent des esprits qui fuient plus vite qu'eux. Ils tirent
+   dès qu'une cible entre dans leur cône, avec un délai de réaction qui dépend
+   de la difficulté — jamais une meilleure portée ni une meilleure cadence. */
+const BOT_AIM_DELAY = { easy: 0.75, normal: 0.35, hard: 0.12 };
+
+function botAttacks(dt) {
   for (const f of factions) {
     if (!f || !f.alive || f.i === 0 || !f.isBot) continue;
-    const ang = leaderFace(f);
-    const fx = Math.sin(ang), fz = Math.cos(ang);
-    const cosArc = Math.cos(ASPIR_ARC);
-    let want = false;
-    for (const a of agents) {
-      if (!a || a.dead) continue;
-      if (variantOf(a.id) < ELEM_FIRST) continue;
-      if ((a.discipleOf ?? -1) >= 0) continue;
-      if ((a.followerOf ?? -1) === f.i) continue;
-      const dx = a.x - f.leader.x, dz = a.z - f.leader.z;
-      const d = Math.hypot(dx, dz);
-      if (d > ASPIR_R || d < 1e-3) continue;
-      if ((dx / d) * fx + (dz / d) * fz < cosArc) continue;
-      want = true;
-      break;
-    }
-    f.aspir = want;
-  }
-}
+    if ((f.downT || 0) > 0) { f._aimT = 0; continue; }
+    if ((f.atkCd || 0) > 0) continue;
 
-/** Coupe tous les souffles entre deux parties. */
-function clearAspiration() {
-  for (const f of factions) {
-    if (!f) continue;
-    f.aspir = false;
-    f._aspirVis = 0;
+    const target = pickTarget(f, leaderFace(f), _atkCtx);
+    if (!target) { f._aimT = 0; continue; }
+
+    /* Temps de réaction : un bot qui tire à la frame où la cible entre dans le
+       cône est injouable, il ne raterait jamais rien. */
+    const delay = BOT_AIM_DELAY[f.aiDifficulty || currentDifficulty] ?? 0.35;
+    f._aimT = (f._aimT || 0) + dt;
+    if (f._aimT < delay) continue;
+    f._aimT = 0;
+    fireAttack(f, leaderFace(f), _atkCtx);
   }
 }
 
@@ -1982,8 +1773,12 @@ function clearWebs() {
   for (const h of holes) { h.mesh.visible = false; holePool.push(h.mesh); }
   holes.length = 0;
   for (const a of agents) if (a && a._dive != null) { a.base = a._diveBase; a._dive = null; a._diveMoved = false; }
-  clearAspiration();
-  clearWind();
+  for (const p of [...projectiles]) releaseBolt(p);
+  clearProjectiles();
+  /* Les états « à terre » ne doivent pas survivre à une partie : un Leader
+     figé au coup d'envoi serait injouable. */
+  for (const f of factions) { if (f) { f.downT = 0; f.atkCd = 0; f._aimT = 0; } }
+  for (const a of agents) if (a) a.downT = 0;
 }
 
 
@@ -3960,6 +3755,9 @@ const _crowdTickCtx = {
     fm.mesh.instanceColor.needsUpdate = true;
   },
   tmpM, tmpQ, tmpS, tmpP, UP_AXIS, GRAY,
+  /* Bascule « face au sol » des agents touchés par une attaque. */
+  tmpQ2: new THREE.Quaternion(),
+  SIDE_AXIS: new THREE.Vector3(1, 0, 0),
   _convCol: null,
 };
 function clearPaint() {
@@ -4472,13 +4270,12 @@ addEventListener('keydown', e => {
      (déplacement, voir playerDir). Le filet prend KeyQ — code physique, donc la
      touche voisine du déplacement aussi bien en QWERTY qu'en AZERTY. */
   if (e.code === 'KeyQ' && !keys.KeyQ && state === 'play') {
-    startAspir(factions[0]);
+    playerAttack();
   }
   keys[e.code] = true;
 });
 addEventListener('keyup', (e) => {
   keys[e.code] = false;
-  if (e.code === 'KeyQ') stopAspir(factions[0]);
 });
 
 const joyEl = $('joy'), stickEl = $('stick');
@@ -4523,30 +4320,18 @@ addEventListener('pointercancel', onUp);
 
 boostBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); doBoost(factions[0]); });
 
-/* Coup de filet — pointerdown et non click : sur tactile, attendre le click
-   ajoute ~120 ms de latence sur l'action principale du jeu. */
-/* Aspiration : on MAINTIENT. pointerdown/up plutôt que click — sur tactile,
-   attendre le click coûterait ~120 ms sur l'action centrale du jeu, et un
-   maintien ne produit de toute façon jamais de click. */
+/* Attaque : un appui = un tir. pointerdown plutôt que click — sur tactile,
+   attendre le click coûterait ~120 ms sur l'action centrale du jeu. */
 if (netBtnEl) {
-  const press = (e) => {
+  netBtnEl.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
     e.preventDefault();
     if (state !== 'play') return;
-    if (startAspir(factions[0])) netBtnEl.classList.add('swinging');
-  };
-  const release = () => {
-    stopAspir(factions[0]);
-    netBtnEl.classList.remove('swinging');
-  };
-  netBtnEl.addEventListener('pointerdown', press);
-  /* Relâcher hors du bouton, ou perdre le pointeur, doit couper le souffle —
-     sinon il resterait allumé indéfiniment. */
-  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
-    netBtnEl.addEventListener(ev, release);
-  }
-  addEventListener('pointerup', release);
-  addEventListener('blur', release);
+    if (playerAttack()) {
+      netBtnEl.classList.add('swinging');
+      setTimeout(() => netBtnEl.classList.remove('swinging'), 160);
+    }
+  });
 }
 
 /* ============================== IA ==============================
@@ -4623,7 +4408,7 @@ function botAltarGoal(f) {
     if (v < ELEM_FIRST) continue;
     if ((ag.discipleOf ?? -1) >= 0) continue;
     if ((ag.followerOf ?? -1) === f.i) continue;
-    if (ag._dive != null) continue;
+    if (ag._dive != null && !(ag.downT > 0)) continue;
 
     const dx = ag.x - f.leader.x, dz = ag.z - f.leader.z;
     const d = Math.hypot(dx, dz) || 1e-3;
@@ -4642,6 +4427,10 @@ function botAltarGoal(f) {
     const wanted = v === wantVar;
     if (!wanted) cost += 26;                      // utile, mais pas prioritaire
     if ((ag.followerOf ?? -1) >= 0) cost += 10;   // vol possible, mais plus dur
+    /* Un esprit à terre ne fuit plus : c'est une prise offerte, et elle
+       expire. Un bot qui l'ignorerait pour courir après un fuyard jouerait
+       nettement moins bien qu'un joueur. */
+    if (ag.downT > 0) cost -= 40;
 
     if (cost < bestScore) { bestScore = cost; best = ag; }
   }
@@ -6342,7 +6131,13 @@ function update(dt) {
     // léger roulis d'épaules sur le pas, calé sur l'horloge du shader
     const walk = Math.min(1, sp / 4);
     g.userData.body.rotation.z = 0;
-    g.userData.body.rotation.x = 0;
+    /* À terre : le corps bascule face au sol. Le relevé se fait en fondu sur
+       la fin du décompte, pour qu'on voie le Leader se remettre debout au lieu
+       de le voir claquer d'une pose à l'autre. */
+    const down = f.downT || 0;
+    g.userData.body.rotation.x = down > 0
+      ? -Math.PI * 0.5 * Math.min(1, down / (LEADER_DOWN_T * 0.45))
+      : 0;
     /* Locomotion du moine riggé : fondu enchaîné marche / course / sprint selon
        la vitesse au sol, cadence du clip calée sur cette vitesse (à l'arrêt le
        clip gèle en douceur, la direction étant déjà lissée par l'inertie). */
@@ -6395,8 +6190,7 @@ function update(dt) {
   /* -- Jauge de peinture (remplace la Ferveur dans la barre du HUD) -- */
   updateDisciplesUI();
   updateRaceUI();
-  updateBotAspir();
-  updateAspiration(dt);
+  updateAttacks(dt);
   updateAltars(dt);
   updateSpiritsUI();
   updateSpiritRespawn(dt);

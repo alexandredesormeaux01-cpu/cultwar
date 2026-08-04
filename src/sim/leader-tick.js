@@ -60,6 +60,19 @@ export function stepLeaders(state, input, dt, ctx) {
       continue;
     }
 
+    /* À terre : le Leader ne se pilote plus. On le laisse glisser jusqu'à
+       l'arrêt plutôt que de le figer net — un arrêt brutal donnerait
+       l'impression d'un blocage, alors qu'il vient d'être touché. */
+    if ((f.downT || 0) > 0) {
+      f.leader.dx *= Math.max(0, 1 - dt * 6);
+      f.leader.dz *= Math.max(0, 1 - dt * 6);
+      f.leader.x += f.leader.dx * dt;
+      f.leader.z += f.leader.dz * dt;
+      f.target = null;
+      finishLeaderStep(f, prevX, prevZ, dt, state, ctx);
+      continue;
+    }
+
     let dx = 0, dz = 0;
     if (f.isBot) {
       /* Escape lock : après un blocage détecté, on force une cible d'évasion
