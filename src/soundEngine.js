@@ -4,7 +4,10 @@
 
 /* Chemins relatifs à BASE_URL (vite `base: './'`) : obligatoire sur GitHub Pages
    (/cultwar/) et Capacitor — un chemin absolu `/assets/...` renvoie 404. */
-const asset = (file) => `${import.meta.env.BASE_URL}assets/${file}`;
+/* Chaînage optionnel volontaire : hors bundler (tests Node), import.meta.env
+   n'existe pas et lire .BASE_URL dessus lèverait une TypeError au chargement
+   même du module. */
+const asset = (file) => `${import.meta.env?.BASE_URL ?? './'}assets/${file}`;
 
 const SFX = {
   convert: asset('sfx_convert.mp3'),
@@ -15,6 +18,26 @@ const SFX = {
   bell: asset('sfx_bell.mp3'),
   crystal: asset('sfx_crystal_explode.mp3'),
   paint_orb: asset('sfx_paint_orb.mp3'),
+
+  fire_1: asset('sfx_fire_1.mp3'),
+  fire_2: asset('sfx_fire_2.mp3'),
+  fire_3: asset('sfx_fire_3.mp3'),
+  fire_4: asset('sfx_fire_4.mp3'),
+  fire_5: asset('sfx_fire_5.mp3'),
+  fire_6: asset('sfx_fire_6.mp3'),
+
+  earth_1: asset('sfx_earth_1.mp3'),
+  earth_2: asset('sfx_earth_2.mp3'),
+  earth_3: asset('sfx_earth_3.mp3'),
+};
+
+/* Familles de variantes. Un tir part toutes les 0,85 s : un son unique
+   deviendrait vite une scie. On tire au hasard dans la famille, en excluant la
+   dernière jouée — sur six variantes, le hasard pur redonne la même deux fois
+   de suite une fois sur six, et l'oreille l'entend immédiatement. */
+const SFX_GROUPS = {
+  fire: ['fire_1', 'fire_2', 'fire_3', 'fire_4', 'fire_5', 'fire_6'],
+  earth: ['earth_1', 'earth_2', 'earth_3'],
 };
 
 const MUSIC = {
@@ -242,6 +265,23 @@ class SoundEngine {
       a.playbackRate = Math.max(0.5, Math.min(2, rate));
       a.play().catch(() => {});
     } catch (_) { /* ignore */ }
+  }
+
+  /** Joue une variante au hasard d'une famille, jamais deux fois la même
+   *  d'affilée. Rend le nom joué, utile pour les tests. */
+  playSFXGroup(group, opts = {}) {
+    const list = SFX_GROUPS[group];
+    if (!list || !list.length) return null;
+    if (!this._lastVariant) this._lastVariant = {};
+
+    let pool = list;
+    if (list.length > 1 && this._lastVariant[group]) {
+      pool = list.filter((n) => n !== this._lastVariant[group]);
+    }
+    const name = pool[(Math.random() * pool.length) | 0];
+    this._lastVariant[group] = name;
+    this.playSFX(name, opts);
+    return name;
   }
 
   playFootstep() {}

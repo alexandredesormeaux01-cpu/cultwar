@@ -1597,7 +1597,18 @@ const _atkCtx = {
     return null;
   },
   onFire: (f) => {
-    if (f.i === 0) soundEngine.playSFX('paint_orb', { volume: 0.4, rate: 1.15 });
+    /* Les tirs adverses s'entendent, mais seulement de près et en retrait :
+       cinq bots qui tirent au même volume que le joueur transformeraient la
+       partie en vacarme, et on ne saurait plus quel coup est le sien. */
+    if (f.i === 0) {
+      soundEngine.playSFXGroup('fire', { volume: 0.55 });
+      return;
+    }
+    const me = factions[0];
+    if (!me || !me.leader) return;
+    const d = Math.hypot(f.leader.x - me.leader.x, f.leader.z - me.leader.z);
+    if (d > 30) return;
+    soundEngine.playSFXGroup('fire', { volume: 0.28 * (1 - d / 30) });
   },
   onImpact: (p) => {
     releaseBolt(p);
@@ -2464,6 +2475,11 @@ function activateAltar(a, f) {
   a.statue.rotation.y = Math.atan2(a.x, a.z) + Math.PI;
   scene.add(a.statue);
   setCharLayer(a.statue);
+  /* Grondement de pierre à la levée de la statue. Audible partout : une prise
+     de sanctuaire est un événement de partie, pas un détail local — même à
+     l'autre bout de la vallée on doit savoir qu'il vient de s'en passer une.
+     Un peu plus fort quand c'est le joueur qui vient de prendre le lieu. */
+  soundEngine.playSFXGroup('earth', { volume: f.i === 0 ? 0.8 : 0.5 });
   a.variant = ELEM_OPPOSITE[a.variant];
 
   spawnShock(a.x, a.z, f.color, 9, 1.2);
