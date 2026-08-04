@@ -4198,6 +4198,21 @@ function drawMinimap() {
     }
   }
 
+  /* --- Territoire : on recopie le canvas de peinture ---
+     Il porte déjà la couleur de chaque culte, découpée sur la silhouette de
+     l'île. Le redessiner cellule par cellule depuis paintGrid coûterait
+     36 864 rectangles par rafraîchissement pour un résultat identique.
+     Le canvas couvre PAINT_SPAN unités centrées sur l'origine, exactement le
+     repère de la minimap — une seule mise à l'échelle suffit. */
+  {
+    const span = PAINT_SPAN * s;
+    mctx.save();
+    mctx.globalAlpha = 0.82;   // laisse deviner le quadrillage des tuiles dessous
+    mctx.imageSmoothingEnabled = true;
+    mctx.drawImage(paintCv, c - span / 2, c - span / 2, span, span);
+    mctx.restore();
+  }
+
   // balayage radar (léger, tournant)
   const sweep = (elapsed * 0.8) % (Math.PI * 2);
   const sg = mctx.createRadialGradient(c, c, 0, c, c, c);
@@ -4232,7 +4247,10 @@ function drawMinimap() {
   const dot = 2.2 * k;
   for (const a of agents) {
     if (a.dead) continue;
-    const fi = -1;
+    /* Un esprit enrôlé porte la couleur de son culte : on voit d'un coup d'œil
+       qui traîne un long cortège. La branche était morte depuis le retrait des
+       disciples — elle testait `discipleOf`, qui n'existe plus. */
+    const fi = a.followerOf ?? -1;
     if (fi >= 0 && factions[fi]) {
       mctx.fillStyle = factions[fi].css;
       mctx.globalAlpha = 1;
