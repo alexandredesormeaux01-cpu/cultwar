@@ -46,10 +46,17 @@ async function convert(srcFile, outFile) {
     converted++;
   }
 
-  /* Sans cela l'extension resterait declaree alors qu'aucune texture ne
-     l'utilise, et glTFast refuserait encore le fichier. */
+  /* On retire deux extensions :
+     - EXT_texture_webp : sans cela elle resterait declaree alors qu'aucune
+       texture ne l'utilise, et glTFast refuserait encore le fichier ;
+     - EXT_meshopt_compression : glTFast plante dans son propre pipeline de
+       jobs (ConvertVector3FloatToFloatJob, InvalidOperationException) sur les
+       modeles articules compresses. Les buffers sont deja decodes en memoire,
+       les retirer suffit a ecrire du glTF non compresse. Les fichiers sont
+       plus lourds, mais c'est le prix d'un import qui fonctionne. */
+  const drop = new Set(['EXT_texture_webp', 'EXT_meshopt_compression']);
   for (const ext of doc.getRoot().listExtensionsUsed()) {
-    if (ext.extensionName === 'EXT_texture_webp') ext.dispose();
+    if (drop.has(ext.extensionName)) ext.dispose();
   }
 
   await io.write(outFile, doc);
