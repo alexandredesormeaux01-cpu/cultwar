@@ -756,6 +756,7 @@ trimCrowdCounts(0);   // rien à dessiner tant qu'aucun agent n'existe
 
 function makeLeaderGroup(cult, leaderKey = 'monk') {
   const grp = new THREE.Group();
+  grp.userData.leaderKey = leaderKey;
 
   // Registre : moine, sorcier, ... ; fallback moine si l'asset demandé n'est
   // pas prêt (chargement asynchrone), fallback chibi si aucun n'est encore là.
@@ -963,11 +964,36 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
   shield.visible = false; // Masqué pour éviter le nuage/halo sous le joueur
   grp.add(shield);
 
-  grp.userData = { body, ring, shield, crystal: crystalRef,
+  grp.userData = { leaderKey, body, ring, shield, crystal: crystalRef,
     mixer: grp.userData.mixer || null, gaits: grp.userData.gaits || null };
   scene.add(grp);
   setCharLayer(grp);
   return grp;
+}
+
+function refreshLeaderMeshIfLoaded(key) {
+  for (const f of factions) {
+    const fKey = f.leaderKey || f.grp?.userData?.leaderKey;
+    if (fKey === key && f.grp) {
+      const parent = f.grp.parent;
+      const oldPos = f.grp.position.clone();
+      const oldRot = f.grp.rotation.y;
+      const cultObj = CULTS[f.cultIdx] || CULTS[0];
+      const newGrp = makeLeaderGroup(cultObj, key);
+      newGrp.position.copy(oldPos);
+      newGrp.rotation.y = oldRot;
+      if (state === 'overworld') {
+        if (newGrp.userData.ring) newGrp.userData.ring.visible = false;
+        if (newGrp.userData.shield) newGrp.userData.shield.visible = false;
+      }
+      if (parent) {
+        parent.remove(f.grp);
+        parent.add(newGrp);
+      }
+      disposeGroup(f.grp);
+      f.grp = newGrp;
+    }
+  }
 }
 
 /* ============================== État du jeu ============================== */
@@ -3000,6 +3026,7 @@ for (const [key, def] of Object.entries(LEADERS)) {
     });
     leaderAssets[key] = { model: gltf.scene, texture: tex, clips: gltf.animations };
     if (key === 'monk') { monkModel = gltf.scene; monkTexture = tex; monkClips = gltf.animations; }
+    refreshLeaderMeshIfLoaded(key);
   }, undefined, (err) => console.warn('[leader] failed to load', def.url, err));
   gltfLoader.load(LEADER_ELEMENT[key], (elGltf) => {
     mobileDownscaleTextures(elGltf);
@@ -5305,7 +5332,13 @@ function openOverworldHub(ctx) {
   const biomeKey = getBiomeForIso(iso);
   buildMap(biomeKey);
 
-  const colorStr = overworldCtx.playerColor || overworldCtx.world?.color || '#ff2e7e';
+  const save = JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}');
+  const targetLeaderKey = overworldCtx?.playerLeader || save.playerLeader || playerLeaderKey || 'monk';
+  if (LEADERS[targetLeaderKey]) {
+    playerLeaderKey = targetLeaderKey;
+  }
+
+  const colorStr = save.playerColor || overworldCtx.playerColor || overworldCtx.world?.color || '#ff2e7e';
   const hex = parseInt(colorStr.replace('#', ''), 16);
   const ci = CULTS.findIndex((c) => c.c === hex);
   if (ci >= 0) playerCultIdx = ci;

@@ -3754,6 +3754,7 @@ export async function openProgression(opts = {}) {
         regions,
         zonesCount: regions.length,
         playerColor: save.playerColor,
+        playerLeader: save.playerLeader,
         launchZone: (i) => launchZone(regions[i]),
       });
       return;
