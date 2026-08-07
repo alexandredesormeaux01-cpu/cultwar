@@ -88,7 +88,9 @@ export function fireAttack(f, facing, ctx) {
   if (!f || !f.alive) return null;
   if ((f.atkCd || 0) > 0) return null;
   if ((f.downT || 0) > 0) return null;               // à terre : on ne tire pas
-  f.atkCd = ATTACK_CD;
+  /* `atkCdMul` : posé par la carte « Main leste ». Un multiplicateur plutôt
+     qu'une constante remplacée — la cadence de base reste lisible ici. */
+  f.atkCd = ATTACK_CD * (f.atkCdMul ?? 1);
 
   /* Visée assistée : on se rapproche de la cible sans jamais l'épouser.
      Tirer dans le vide reste permis — sans ça le bouton semblerait cassé
@@ -170,7 +172,7 @@ export function stepProjectiles(dt, ctx) {
         if ((a.downT || 0) > 0) continue;
         const dx = a.x - p.x, dz = a.z - p.z;
         if (dx * dx + dz * dz > R2) continue;
-        knockDownSpirit(a, ctx);
+        knockDownSpirit(a, ctx, factions[p.from] || null);
         p.dead = true;
         break;
       }
@@ -183,8 +185,10 @@ export function stepProjectiles(dt, ctx) {
   }
 }
 
-/** Un esprit touché s'effondre : plus de fuite, plus de plongeon. */
-export function knockDownSpirit(a, ctx) {
+/** Un esprit touché s'effondre : plus de fuite, plus de plongeon.
+ *  `by` = la faction qui a tiré, transmise aux effets : l'impact se teinte de
+ *  l'élément du tireur, sans quoi on ne lit pas QUI vient de marquer le coup. */
+export function knockDownSpirit(a, ctx, by = null) {
   a.downT = SPIRIT_DOWN_T;
   a.vx = 0; a.vz = 0;
   /* Un esprit arraché à un cortège redevient libre — c'est le coup qui punit
@@ -192,7 +196,7 @@ export function knockDownSpirit(a, ctx) {
   if ((a.followerOf ?? -1) >= 0 && ctx.releaseFollower) ctx.releaseFollower(a);
   /* Le plongeon souterrain est une échappatoire : à terre, elle est coupée. */
   if (a._dive != null && ctx.cancelDive) ctx.cancelDive(a);
-  if (ctx.onSpiritDown) ctx.onSpiritDown(a);
+  if (ctx.onSpiritDown) ctx.onSpiritDown(a, by);
 }
 
 /** Un Leader touché s'effondre et lâche un esprit. */
@@ -200,7 +204,7 @@ export function knockDownLeader(o, by, ctx) {
   o.downT = LEADER_DOWN_T;
   o.leader.dx = 0; o.leader.dz = 0;
   const lost = ctx.dropOneFollower ? ctx.dropOneFollower(o) : null;
-  if (lost) knockDownSpirit(lost, ctx);
+  if (lost) knockDownSpirit(lost, ctx, by);
   if (ctx.onLeaderDown) ctx.onLeaderDown(o, by, lost);
 }
 

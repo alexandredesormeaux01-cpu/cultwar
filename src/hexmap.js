@@ -1299,6 +1299,26 @@ export function updateVoid(dt, t) {
   shards.instanceMatrix.needsUpdate = true;
 }
 
+/**
+ * Assombrit le VIDE — fond, poussière, halo bas.
+ * `k` : 0 = normal, 1 = éteint au maximum.
+ *
+ * Pourquoi ça ne peut pas passer par l'exposition : la poussière est un
+ * ShaderMaterial qui écrit `gl_FragColor` sans inclure le chunk de tone mapping,
+ * elle est donc totalement insensible à l'exposition. Le fond, lui, est une
+ * texture d'environnement, pas un objet de la scène. Baisser les lumières
+ * n'assombrit que les tuiles : sans ce crochet, l'île plongeait dans le noir
+ * pendant que le ciel et l'abîme restaient en plein jour.
+ */
+export function setVoidDim(k) {
+  if (!fx) return;
+  const m = Math.max(0, 1 - k);
+  if (!fx.moteBase) fx.moteBase = fx.motes.material.uniforms.uColor.value.clone();
+  fx.motes.material.uniforms.uColor.value.copy(fx.moteBase).multiplyScalar(m);
+  if (fx.haloBase == null) fx.haloBase = fx.halo.material.opacity;
+  fx.halo.material.opacity = fx.haloBase * m;
+}
+
 export function disposeVoid() { fx = null; }
 
 /* ============================== Placement du décor ============================== */

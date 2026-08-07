@@ -781,6 +781,72 @@ button.big:active { transform: scale(.95); }
 }
 #banner.show { opacity: 1; }
 
+/* ---- Annonce de carte hasard ----
+   Doit se lire EN UN COUP D'OEIL sans arrêter la partie : le titre porte le
+   sens, la couleur porte le verdict. On se place au tiers haut de l'écran —
+   au-dessus de l'action, sous le HUD — et jamais au centre, qui est là où le
+   joueur regarde pour jouer. */
+#card-banner {
+  position: absolute;
+  top: 26%;
+  left: 50%;
+  transform: translate(-50%, -10px) scale(0.92);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  max-width: min(92vw, 620px);
+  padding: 12px 30px;
+  border-radius: 18px;
+  text-align: center;
+  color: #fff;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255,255,255,0.28);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 40;
+  transition: opacity 0.18s ease-out, transform 0.28s cubic-bezier(0.2, 1.5, 0.4, 1);
+}
+#card-banner.show {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+#card-banner.hidden { display: none; }
+
+#card-banner-title {
+  font-size: clamp(22px, 5.6vw, 40px);
+  font-weight: 900;
+  line-height: 1.05;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  text-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);
+}
+#card-banner-text {
+  font-size: clamp(12px, 2.9vw, 17px);
+  font-weight: 700;
+  opacity: 0.95;
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
+}
+
+/* La couleur EST le verdict : vert on a gagné quelque chose, rouge on a perdu,
+   violet il va se passer n'importe quoi. C'est ce qu'on lit avant même le mot. */
+#card-banner.tone-good {
+  background: linear-gradient(135deg, rgba(21, 128, 61, 0.94), rgba(74, 222, 128, 0.9));
+  border-color: rgba(187, 247, 208, 0.85);
+}
+#card-banner.tone-bad {
+  background: linear-gradient(135deg, rgba(153, 27, 27, 0.94), rgba(248, 113, 113, 0.9));
+  border-color: rgba(254, 202, 202, 0.85);
+}
+#card-banner.tone-chaos {
+  background: linear-gradient(135deg, rgba(91, 33, 182, 0.94), rgba(192, 132, 252, 0.9));
+  border-color: rgba(233, 213, 255, 0.85);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #card-banner { transition: opacity 0.18s ease-out; transform: translate(-50%, 0); }
+}
+
 /* ---- Carte événement (roulette) ---- */
 .event-overlay {
   position: fixed;
@@ -3316,4 +3382,125 @@ button.btn-secondary:hover {
 #net-btn.swinging { animation: net-hold 0.6s ease-in-out infinite; }
 @keyframes net-hold {
   50% { box-shadow: 0 4px 12px rgba(0,0,0,.6), inset 0 0 34px rgba(150,210,255,.62); }
+}
+
+/* ============ Manette : curseur de sélection dans les menus ============
+   La sélection au pad doit se voir d'un coup d'oeil à 2 m d'un écran, donc
+   anneau net + léger agrandissement, sans toucher au layout (transform seul). */
+.gp-focus {
+  outline: 3px solid #7ec8ff !important;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 6px rgba(126, 200, 255, .18), 0 0 22px rgba(126, 200, 255, .55) !important;
+  border-radius: 12px;
+  transform: scale(1.03);
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+
+/* ===================== Hub Overworld — bandeau de progression ===================== */
+#overworld-hud {
+  position: fixed;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 18px;
+  border-radius: 999px;
+  background: rgba(10, 14, 26, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  color: #e8eefc;
+  font-size: 0.92rem;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+#overworld-hud.hidden { display: none; }
+
+#overworld-hud .ow-region {
+  font-family: 'Cinzel', serif;
+  font-weight: 700;
+  color: #ffd766;
+}
+
+#overworld-hud .ow-stat b { color: #fff; font-weight: 800; }
+
+#overworld-hud .ow-sep {
+  width: 1px;
+  height: 16px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ===================== Hub Overworld — invite contextuelle ===================== */
+#overworld-prompt {
+  position: fixed;
+  left: 50%;
+  bottom: 14%;
+  transform: translateX(-50%) translateY(8px);
+  z-index: 41;
+  max-width: min(78vw, 460px);
+  padding: 10px 20px;
+  border-radius: 14px;
+  background: rgba(10, 14, 26, 0.82);
+  border: 1px solid rgba(255, 215, 102, 0.35);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  color: #e8eefc;
+  font-size: 0.95rem;
+  text-align: center;
+  line-height: 1.35;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+#overworld-prompt.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#overworld-prompt.hidden { display: none; }
+
+#overworld-prompt .owp-title {
+  display: block;
+  font-family: 'Cinzel', serif;
+  font-weight: 700;
+  color: #ffd766;
+  letter-spacing: 0.03em;
+}
+
+#overworld-prompt .owp-hint {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.8rem;
+  color: #a9b6d0;
+}
+
+#overworld-prompt.locked { border-color: rgba(255, 255, 255, 0.15); }
+#overworld-prompt.locked .owp-title { color: #9aa6bd; }
+
+/* En mode Hub, tout le HUD de match (minimap, rang, objectif, temps, boost,
+   attaque, cortège, cartes) disparaît : l'Overworld est une carte d'exploration,
+   pas une partie. */
+#hud.overworld-mode #hud-top-bar,
+#hud.overworld-mode #btn-concede,
+#hud.overworld-mode #hud-race,
+#hud.overworld-mode #hud-spirits,
+#hud.overworld-mode #card-banner,
+#hud.overworld-mode #streak,
+#hud.overworld-mode #duel,
+#hud.overworld-mode #net-btn { display: none; }
+
+/* Le boost reste disponible dans le Hub, mais illimité : pas de voile de
+   recharge, et le bouton est en permanence à l'état « prêt ». */
+#hud.overworld-mode #boost-cooldown-overlay { display: none; }
+#hud.overworld-mode #boost-btn .lbl::after { content: ' ∞'; }
+#hud.overworld-mode #boost-btn.boosting {
+  box-shadow: 0 0 18px 4px rgba(255, 215, 102, 0.75);
+  transform: scale(1.08);
+}
+
+@media (max-width: 640px) {
+  #overworld-hud { font-size: 0.78rem; gap: 8px; padding: 6px 12px; }
+  #overworld-prompt { font-size: 0.85rem; padding: 8px 14px; bottom: 18%; }
 }

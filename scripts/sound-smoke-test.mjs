@@ -72,5 +72,17 @@ console.log('\n== musique ==');
 console.log('\n== famille inconnue ==');
 ok('rend null sans exploser', soundEngine.playSFXGroup('inexistant') === null);
 
+/* La levée d'une statue de sanctuaire dure EXACTEMENT le temps du grondement.
+   Hors navigateur — et sur mobile avant décodage — `duration` vaut NaN : si le
+   repli ne tenait pas, l'animation durerait NaN seconde et la statue resterait
+   enterrée pour toujours. C'est un bug muet, d'où ce test. */
+console.log('\n== durée d\'un bruitage ==');
+{
+  ok('repli sur un son jamais joué', soundEngine.sfxDuration('earth_1', 1.4) === 1.4);
+  ok('repli sur un son inexistant', soundEngine.sfxDuration('inexistant', 0.9) === 0.9);
+  const d = soundEngine.sfxDuration('earth_1');
+  ok('toujours un nombre fini et positif', Number.isFinite(d) && d > 0);
+}
+
 console.log(`\n${pass} réussis, ${fail} échoués`);
 process.exit(fail ? 1 : 0);

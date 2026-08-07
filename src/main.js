@@ -21,7 +21,8 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { gltfLoader, makeGLTFLoader } from './gltf.js';
 import { renderSpiritPortrait, getSpiritPortrait } from './spirit-portrait.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { openProgression, setPlayHandler, getGlobalStats, formatBelievers } from './progression.js';
+import { openProgression, setPlayHandler, setHubHandler, getGlobalStats, formatBelievers, getSpiritsCount, addSpirits, getCountryPortalState, recordPortalVictory } from './progression.js';
+import { createPortalMesh, createCentralAltarMesh, createGreatPlanetPortalMesh, updatePortalsSystem, setPortalState } from './portals.js';
 import {
   BIOMES, getBiomeForIso, randomBiomeKey, buildBiomeScenery, toonMaterial, patchToonOutline, attachCartoonOutline,
   loadGrass, onGrassReady, buildBiomeGrass,
@@ -29,7 +30,7 @@ import {
   loadNature, onNatureReady, buildBiomeNature,
 } from './biomes.js';
 import {
-  generateIsland, buildIslandMeshes, buildVoid, updateVoid, disposeVoid,
+  generateIsland, buildIslandMeshes, buildVoid, updateVoid, setVoidDim, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
   HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, tileAt,
   buildPaintSurface, flatTiles,
@@ -68,11 +69,16 @@ import { leaderSpeed as _leaderSpeed } from './sim/leader.js';
 import { effects } from './sim/effects.js';
 import { aiThink as _aiThink, paintMixAround as _paintMixAround } from './sim/ai.js';
 import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion, playerDir } from './sim/leader-tick.js';
+import { initGamepad, pollGamepad } from './gamepad.js';
 import { stepCrowd as _stepCrowd } from './sim/crowd-tick.js';
 import {
   EVENT_TIMES, EVENT_SPIN_DUR, EVENT_REVEAL_DUR,
   EVENT_DECK, pickEvent, applyEvent,
 } from './sim/events.js';
+import {
+  CARD_PICK_R, CARD_MIN_D,
+  pickCard, buildCardSchedule, applyCard, bannerTone,
+} from './sim/cards.js';
 import { createNetClient } from './net/client.js';
 import { createRng } from './sim/rng.js';
 import { drawOrb, drawGlow } from './orb-texture.js';
@@ -170,9 +176,66 @@ const renderer = new THREE.WebGLRenderer({
    AA, on recharge pour recréer le renderer. */
 const _bootGfxAA = gfx().aa;
 renderer.shadowMap.type = isCoarse ? THREE.BasicShadowMap : THREE.PCFShadowMap;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.12;
+/* Coupe locale : sans elle, les `clippingPlanes` posés sur un matériau sont
+   purement et simplement ignorés. Seule la levée des statues de sanctuaire s'en
+   sert (elles émergent du sol au lieu de le traverser), et la coupe est retirée
+   dès l'animation finie — le coût ne porte donc que sur ces deux secondes. */
+renderer.localClippingEnabled = true;
+/* ---- Tone mapping ----
+   NEUTRAL, et non ACES. ACESFilmic est une courbe photographique conçue pour du
+   rendu HDR réaliste : elle désature franchement et DÉPLACE les teintes — les
+   verts glissent vers le jaune, les oranges vers le rouge. Sur une palette
+   cartoon peinte à la main, c'est ce qui donnait cette image délavée dont les
+   couleurs n'étaient plus celles des textures.
+
+   `NeutralToneMapping` (Khronos PBR Neutral) ne touche qu'aux hautes lumières :
+   il comprime ce qui dépasse 1.0 et laisse le reste intact, teinte comprise. On
+   garde donc une protection contre le cramage sans payer la dérive chromatique.
+
+   Conséquence sur l'exposition : ACES multipliait en interne par `exposure/0.6`,
+   soit un facteur caché de 1,67. Les valeurs d'exposition ont été redescendues
+   d'autant, sinon toute la scène partait en surbrillance. */
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.0;
 document.getElementById('app').appendChild(renderer.domElement);
+
+/* ---- Étalonnage global ----
+   Saturation, contraste et teinte se règlent par un filtre CSS posé sur le
+   canvas. C'est du post-traitement gratuit : le compositeur du navigateur
+   l'applique sur le GPU, sans passe de rendu supplémentaire ni cible de rendu
+   intermédiaire — là où un EffectComposer coûterait un doublement de la bande
+   passante mémoire sur mobile, pour le même résultat visuel.
+
+   Le filtre ne porte que sur le canvas : le HUD, lui, garde ses couleurs
+   exactes. C'est voulu — étalonner l'interface avec le décor rendrait les
+   couleurs de culte fausses dans les jauges.
+
+   Ces trois valeurs sont le point de départ de la direction artistique. Elles
+   se règlent en direct par le panneau d'ambiance (window.__grade). */
+const GRADE = {
+  saturation: 1.08,   // 1 = neutre. Un cheveu au-dessus : le cartoon respire.
+  contrast: 1.04,     // 1 = neutre. Assez pour asseoir les ombres, pas plus.
+  hue: 0,             // degrés. 0 = teintes des textures respectées.
+  brightness: 1.0,    // 1 = neutre. À ne bouger qu'en dernier recours : la
+                      // luminosité appartient à l'exposition, pas au filtre.
+};
+
+/* Facteurs correctifs de réglage. Le cycle jour/nuit réécrit l'exposition et les
+   intensités à chaque image : sans ces multiplicateurs, toute valeur posée à la
+   main serait effacée à l'image suivante et le panneau d'ambiance ne servirait à
+   rien. À 1, ils n'ont aucun effet — ils ne changent donc pas le rendu livré. */
+const TUNE = { exposure: 1, sun: 1, hemi: 1 };
+
+function applyGrade() {
+  const g = GRADE;
+  const parts = [];
+  if (g.brightness !== 1) parts.push(`brightness(${g.brightness})`);
+  if (g.contrast !== 1) parts.push(`contrast(${g.contrast})`);
+  if (g.saturation !== 1) parts.push(`saturate(${g.saturation})`);
+  if (g.hue !== 0) parts.push(`hue-rotate(${g.hue}deg)`);
+  renderer.domElement.style.filter = parts.length ? parts.join(' ') : '';
+}
+applyGrade();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fdcff);
@@ -269,10 +332,15 @@ hemi.layers.set(LAYER_WORLD);
 sun.layers.set(LAYER_WORLD);
 sun.target.layers.set(LAYER_WORLD);
 
-const charHemi = new THREE.HemisphereLight(0xcfefff, 0x5a8a5f, 1.0);
+/* Intensités de référence des lumières « personnages ». Le cycle du jour ne les
+   pilote pas — les persos restent lisibles quelle que soit l'heure — mais la
+   nuit noire les éteint, et il lui faut une valeur d'origine où revenir. */
+const CHAR_HEMI_I = 1.0;
+const CHAR_SUN_I = 1.55;
+const charHemi = new THREE.HemisphereLight(0xcfefff, 0x5a8a5f, CHAR_HEMI_I);
 charHemi.layers.set(LAYER_CHARS);
 scene.add(charHemi);
-const charSun = new THREE.DirectionalLight(0xfff2d8, 1.55);
+const charSun = new THREE.DirectionalLight(0xfff2d8, CHAR_SUN_I);
 charSun.layers.set(LAYER_CHARS);
 scene.add(charSun, charSun.target);
 
@@ -290,6 +358,12 @@ function setCharLayer(root) {
    paliers durs, le disque garantit un bord parfaitement diffus. */
 const playerLamp = new THREE.PointLight(0xffd9a0, 0, 30, 2.2);
 playerLamp.position.y = 2.4;
+/* Doit atteindre les DEUX couches. Les personnages vivent sur LAYER_CHARS et
+   `layers.set()` est exclusif : une lampe posée sur le seul LAYER_WORLD éclaire
+   le sol autour du joueur mais laisse le joueur lui-même dans le noir — soit
+   exactement l'inverse de ce qu'une lanterne doit faire. */
+playerLamp.layers.set(LAYER_WORLD);
+playerLamp.layers.enable(LAYER_CHARS);
 scene.add(playerLamp);
 const lampGlowTex = (() => {
   const cv = document.createElement('canvas');
@@ -647,7 +721,14 @@ function setAgentColor(id, col) {
   const v = variantOf(id);
   const isElemental = v >= 3;
   const isNeutralCol = !col || col === GRAY || (col.r === GRAY.r && col.g === GRAY.g && col.b === GRAY.b);
-  const targetCol = (isElemental && isNeutralCol) ? GOLDEN_SPIRIT_COLOR : col;
+  /* Élémentaire au repos : AUCUNE teinte (blanc = texture d'origine). C'est la
+     couleur propre de l'élément qui doit se lire, puisque les autels réclament
+     un type précis — voir le commentaire des modèles de foule.
+     Le doré posé ici auparavant uniformisait les six types, et la capture les
+     faisait tous changer de couleur d'un coup : le suivant, lui, a toujours été
+     rendu sans teinte. Un esprit d'eau passait de l'or au bleu au moment même
+     où on le prenait, ce qui se lisait comme un bug d'attribution. */
+  const targetCol = (isElemental && isNeutralCol) ? WHITE : col;
 
   m.setColorAt(sl, isElemental ? targetCol : (m.userData.untinted ? WHITE : col));
   if (m.userData.hatCol) {
@@ -681,28 +762,25 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
   let body;
   let crystalRef = null;
   const asset = leaderAssets[leaderKey] || leaderAssets.monk;
-  const def = LEADERS[leaderKey] || LEADERS.monk;
 
-  /* Teinte de culte sur le Leader : désactivée — on garde l'apparence d'origine
-     du modèle. Le code ci-dessous reste prêt à être réactivé (LEADER_CULT_TINT). */
-  const LEADER_CULT_TINT = true;
+  /* AUCUNE teinte de culte sur le Leader : on affiche la texture d'origine du
+     modèle, telle que l'artiste l'a peinte.
+
+     Ce qui existait avant faisait deux choses, et la seconde était la plus
+     visible : repeindre la robe du moine, mais SURTOUT poser un émissif de la
+     couleur du culte sur tous les Leaders sans exception. Un émissif lave les
+     ombres et décale la teinte de l'ensemble du personnage — c'est ce voile
+     coloré qu'on voyait sur chacun d'eux.
+
+     L'appartenance au culte se lit ailleurs, et mieux : le cristal au-dessus de
+     la tête, l'anneau d'influence au sol, et la peinture du territoire. */
 
   if (asset && asset.model) {
     body = new THREE.Group();
     const inner = SkeletonUtils.clone(asset.model);
-    // Recolore la robe uniquement pour les persos qui portent une teinte de
-    // culte (moine). Le sorcier garde son habit sombre — sa couleur passe par
-    // le cristal au-dessus de la tête et par sa peinture au sol.
-    // const tex = def.tint === 'robe' ? monkTextureFor(cult.c) : null;
-    const tex = LEADER_CULT_TINT && def.tint === 'robe' ? monkTextureFor(cult.c) : null;
     inner.traverse((child) => {
       if (child.isMesh) {
-        child.material = toonMaterial({
-          map: tex || asset.texture,
-          // emissive: cult.c, emissiveIntensity: 0.18,  // teinte faction (off)
-          emissive: LEADER_CULT_TINT ? cult.c : 0x000000,
-          emissiveIntensity: LEADER_CULT_TINT ? 0.18 : 0,
-        });
+        child.material = toonMaterial({ map: asset.texture });
         child.castShadow = true;
         child.frustumCulled = false; // les SkinnedMesh clonés ont des bounds faux
       }
@@ -761,11 +839,10 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
     // Fallback : chibi procédural comme avant
     body = new THREE.Group();
 
-  // Fallback chibi : teinte de culte aussi gated par LEADER_CULT_TINT.
-  // const robeMat = toonMaterial({ color: cult.c, emissive: cult.c, emissiveIntensity: 0.28 });
-  const robeMat = toonMaterial(LEADER_CULT_TINT
-    ? { color: cult.c, emissive: cult.c, emissiveIntensity: 0.28 }
-    : { color: 0xc4a574, emissive: 0x000000, emissiveIntensity: 0 });
+  /* Chibi de secours : il n'apparaît que si le .glb n'a pas chargé. Lui garde la
+     couleur du culte — il n'a aucune texture d'origine à préserver, et sans
+     elle on ne saurait plus qui est qui le temps du chargement. */
+  const robeMat = toonMaterial({ color: cult.c, emissive: cult.c, emissiveIntensity: 0.28 });
   const meeple = new THREE.Mesh(meepleGeo, robeMat);
   meeple.castShadow = true;
   body.add(meeple);
@@ -788,8 +865,7 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
   }
 
   // Chapeau pointu de gourou + pompon
-  // const hatMat = toonMaterial({ color: cult.c });
-  const hatMat = toonMaterial({ color: LEADER_CULT_TINT ? cult.c : 0x5d4037 });
+  const hatMat = toonMaterial({ color: cult.c });
   const hat = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.55, 8), hatMat);
   hat.position.set(0, 1.12, -0.02);
   hat.rotation.x = -0.12;
@@ -799,9 +875,7 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
   brim.position.set(0, 0.9, -0.02);
   body.add(brim);
   const pompom = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 5),
-    toonMaterial(LEADER_CULT_TINT
-      ? { color: 0xffffff, emissive: cult.c, emissiveIntensity: 0.3 }
-      : { color: 0xffffff, emissive: 0x000000, emissiveIntensity: 0 }));
+    toonMaterial({ color: 0xffffff, emissive: cult.c, emissiveIntensity: 0.3 }));
   pompom.position.set(0, 1.44, -0.09);
   body.add(pompom);
 
@@ -943,18 +1017,22 @@ const UP_AXIS = new THREE.Vector3(0, 1, 0);
    Chaque personnage jouable est un .glb riggé avec les MÊMES clips (Walking /
    Running / RunFast) — même squelette humanoïde, seul l'habillage change. On
    ajoute un perso en collant une ligne dans LEADERS + son .glb. */
+/* Aucun champ de teinte : les Leaders s'affichent avec leur texture d'origine,
+   sans exception. Leur palette est déjà très signée (bronze de l'amazone, coiffe
+   du chef, peau grise de l'extraterrestre) et toute recolorisation l'abîmait. */
 const LEADERS = {
-  monk:     { url: 'assets/models/monk_rigged.glb',     tint: 'robe'   },  // recolore la robe orange
-  sorcerer: { url: 'assets/models/sorcerer_rigged.glb', tint: 'none'   },  // capuche noire : couleur du culte portée par le cristal
-  nomad:    { url: 'assets/models/nomad_rigged.glb',    tint: 'none'   },  // costume désertique riche en détails : on garde sa palette d'origine
-  amazon:   { url: 'assets/models/amazon_rigged.glb',   tint: 'none'   },  // guerrière : la palette bronze/vert est trop signée pour la recolorer
-  alien:    { url: 'assets/models/alien_rigged.glb',    tint: 'none'   },  // extraterrestre : peau grise + haillons — palette d'origine
-  chief:    { url: 'assets/models/chief_rigged.glb',    tint: 'none'   },  // chef des Premières Nations : coiffe et perles très signées
+  monk:     { url: 'assets/models/monk_rigged.glb'     },
+  sorcerer: { url: 'assets/models/sorcerer_rigged.glb' },
+  nomad:    { url: 'assets/models/nomad_rigged.glb'    },
+  amazon:   { url: 'assets/models/amazon_rigged.glb'   },
+  alien:    { url: 'assets/models/alien_rigged.glb'    },
+  chief:    { url: 'assets/models/chief_rigged.glb'    },
 };
 /* Chaque Leader a un esprit élémentaire assigné : son cortège prend la
-   forme de cet esprit au lieu d'être des copies humanoïdes du Leader. Les
-   élémentaires « sauvages » (villageois neutres) portent un halo doré tant
-   qu'ils n'ont pas été absorbés — visuel de « proie premium à convertir ». */
+   forme de cet esprit au lieu d'être des copies humanoïdes du Leader. Un esprit
+   garde sa couleur d'élément du début à la fin — sauvage comme capturé. C'est
+   la seule information qui compte pour alimenter un autel, elle ne doit jamais
+   être recouverte par une teinte de culte ni par un halo générique. */
 const LEADER_ELEMENT = {
   monk:     'assets/models/elemental_light_rigged.glb',   // lumière — halo, révélation
   sorcerer: 'assets/models/elemental_ether_rigged.glb',   // éther — occulte, void
@@ -1517,6 +1595,132 @@ function releaseBolt(p) {
   _boltLive.delete(p);
 }
 
+/* ---- Effets de capture ----
+   Trois moments à rendre lisibles, dans l'ordre où le joueur les vit :
+     · le DÉPART du tir (recul + gerbe au canon),
+     · l'IMPACT sur l'esprit (flash blanc + éclats + choc au sol),
+     · le RAMASSAGE (trait lumineux qui se résorbe vers le Leader).
+   Le milieu — l'esprit à terre — reste volontairement calme : c'est le temps
+   mort pendant lequel on court, et le surcharger noierait les deux autres. */
+
+/** Distance au Leader du joueur : sert à doser volume et secousse. Les effets
+    des bots doivent exister sans saturer l'écran quand cinq cultes tirent. */
+function distToPlayer(x, z) {
+  const me = factions[0];
+  if (!me || !me.leader) return Infinity;
+  return Math.hypot(x - me.leader.x, z - me.leader.z);
+}
+
+/** Éclats brefs. Chaque particule a SON matériau : le pool `updateParticles`
+    dispose le matériau de la première étincelle éteinte, et un matériau partagé
+    emporterait toutes les autres du même jet avec lui. */
+function spawnSparks(x, y, z, colorObj, n, opts = {}) {
+  const { spread = 5.5, lift = 3.2, dirX = 0, dirZ = 0, push = 0, size = 0.5 } = opts;
+  const count = isCoarse ? Math.ceil(n * 0.5) : n;
+  for (let i = 0; i < count; i++) {
+    const mesh = new THREE.Mesh(
+      SHARED_PARTICLE_GEO,
+      new THREE.MeshBasicMaterial({ color: colorObj, toneMapped: false }),
+    );
+    const sc = size * (0.7 + Math.random() * 0.6);
+    mesh.scale.setScalar(sc);
+    mesh.position.set(x, y, z);
+    scene.add(mesh);
+    const a = Math.random() * Math.PI * 2;
+    const sp = spread * (0.35 + Math.random() * 0.65);
+    particles.push({
+      mesh,
+      vx: Math.cos(a) * sp + dirX * push,
+      vy: lift * (0.4 + Math.random() * 0.8),
+      vz: Math.sin(a) * sp + dirZ * push,
+      scale: sc, isTrail: true, factionIdx: -1,
+    });
+  }
+}
+
+/* -- Flash d'impact --
+   L'esprit touché vire au blanc puis retombe sur sa teinte dorée. C'est le seul
+   retour qui dise « celui-là est à terre » à l'instant où ça se produit ; sans
+   lui, un tir réussi et un tir manqué se ressemblent. */
+const HIT_FLASH_T = 0.34;
+const _hitFlashes = [];
+const _flashCol = new THREE.Color();
+
+function spawnHitFlash(a) {
+  if (!a._hitFlash) _hitFlashes.push(a);
+  a._hitFlash = HIT_FLASH_T;
+}
+
+/* -- Trait de ramassage --
+   Le plan est couché dans le sol (rotateX) : son étendue en Z devient la
+   longueur du trait, son X sa largeur. */
+const LINK_GEO = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+const LINK_DUR = 0.3;
+const _links = [];
+
+function spawnCaptureLink(x, z, f) {
+  const mesh = new THREE.Mesh(LINK_GEO, new THREE.MeshBasicMaterial({
+    color: f.color, transparent: true, opacity: 0.8, depthWrite: false,
+    blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide,
+  }));
+  mesh.renderOrder = 5;
+  scene.add(mesh);
+  _links.push({ mesh, x0: x, z0: z, f, t: 0 });
+}
+
+function updateCaptureFx(dt) {
+  for (let i = _links.length - 1; i >= 0; i--) {
+    const l = _links[i];
+    l.t += dt;
+    const k = l.t / LINK_DUR;
+    if (k >= 1 || !l.f.alive) {
+      scene.remove(l.mesh); l.mesh.material.dispose();
+      _links.splice(i, 1);
+      continue;
+    }
+    /* La queue du trait glisse vers le Leader : l'esprit a l'air d'être aspiré,
+       et non relié par une corde qui s'efface sur place. */
+    const L = l.f.leader;
+    const sx = l.x0 + (L.x - l.x0) * k, sz = l.z0 + (L.z - l.z0) * k;
+    const dx = L.x - sx, dz = L.z - sz;
+    const len = Math.hypot(dx, dz);
+    l.mesh.position.set((sx + L.x) * 0.5, (L.y || 0) + 0.95, (sz + L.z) * 0.5);
+    l.mesh.rotation.y = Math.atan2(dx, dz);
+    l.mesh.scale.set(0.05 + 0.3 * (1 - k), 1, Math.max(0.01, len));
+    l.mesh.material.opacity = 0.85 * (1 - k * k);
+  }
+
+  for (let i = _hitFlashes.length - 1; i >= 0; i--) {
+    const a = _hitFlashes[i];
+    a._hitFlash -= dt;
+    /* Un esprit ramassé pendant son flash passe sous le contrôle du cortège :
+       continuer à le peindre en blanc écraserait la couleur du culte. */
+    const gone = a.dead || (a.followerOf ?? -1) >= 0 || a._followerSlot != null;
+    if (a._hitFlash <= 0 || gone) {
+      a._hitFlash = 0;
+      if (!gone) setAgentColor(a.id, GRAY);
+      _hitFlashes.splice(i, 1);
+      continue;
+    }
+    /* Surexposition, pas changement de teinte : l'esprit est rendu SANS teinte
+       (sa texture porte sa couleur d'élément, qu'on ne doit jamais masquer). Un
+       flash coloré le déguiserait en un autre type le temps de l'impact — on se
+       contente donc de le suréclairer, la teinte d'instance étant un facteur. */
+    const k = a._hitFlash / HIT_FLASH_T;
+    const b = 1 + 1.6 * k;
+    _flashCol.setRGB(b, b, b);
+    setAgentColor(a.id, _flashCol);
+  }
+}
+
+/** Vide les effets de capture entre deux parties. */
+function clearCaptureFx() {
+  for (const l of _links) { scene.remove(l.mesh); l.mesh.material.dispose(); }
+  _links.length = 0;
+  for (const a of _hitFlashes) a._hitFlash = 0;
+  _hitFlashes.length = 0;
+}
+
 /* Contexte de la simulation d'attaque : recréé une seule fois, ses champs
    pointent sur les valeurs vivantes. */
 const _atkCtx = {
@@ -1532,6 +1736,11 @@ const _atkCtx = {
     const prev = factions[a.followerOf];
     if (prev) prev.count = Math.max(0, (prev.count || 0) - 1);
     a.followerOf = -1;
+    /* Taille : un suivant est rétréci à FOLLOWER_SCALE par convertToFollower.
+       Sans cette restauration, l'esprit arraché d'un cortège redevenait sauvage
+       en gardant 55 % de sa taille — d'où les esprits de plus en plus petits
+       en cours de partie. */
+    if (a._origBase) a.base = a._origBase;
     setAgentColor(a.id, GRAY);
   },
   cancelDive: (a) => { a.base = a._diveBase || a.base; a._dive = null; a._diveMoved = false; },
@@ -1543,7 +1752,19 @@ const _atkCtx = {
     }
     return null;
   },
-  onFire: (f) => {
+  onFire: (f, p) => {
+    /* Départ du coup : le Leader se cabre et une gerbe part dans l'axe. Sans
+       ce contrecoup, l'orbe semblait naître à un mètre devant lui — le geste
+       n'avait pas d'auteur. Le recul est purement visuel : il ne déplace pas
+       le Leader, donc il ne peut pas gêner la course qui suit le tir. */
+    f._recoil = 0.26;
+    const col = new THREE.Color(elementColorOf(f));
+    spawnSparks(
+      f.leader.x + p.dx * 0.8, (f.leader.y || 0) + 1.15, f.leader.z + p.dz * 0.8,
+      col, 7, { spread: 1.6, lift: 1.4, dirX: p.dx, dirZ: p.dz, push: 6.5, size: 0.34 },
+    );
+    if (f.i === 0) shake = Math.max(shake, 0.1);
+
     /* Les tirs adverses s'entendent, mais seulement de près et en retrait :
        cinq bots qui tirent au même volume que le joueur transformeraient la
        partie en vacarme, et on ne saurait plus quel coup est le sien. */
@@ -1551,15 +1772,39 @@ const _atkCtx = {
       soundEngine.playSFXGroup('fire', { volume: 0.55 });
       return;
     }
-    const me = factions[0];
-    if (!me || !me.leader) return;
-    const d = Math.hypot(f.leader.x - me.leader.x, f.leader.z - me.leader.z);
+    const d = distToPlayer(f.leader.x, f.leader.z);
     if (d > 30) return;
     soundEngine.playSFXGroup('fire', { volume: 0.28 * (1 - d / 30) });
   },
   onImpact: (p) => {
     releaseBolt(p);
     spawnShock(p.x, p.z, new THREE.Color(elementColorOf(factions[p.from])), 1.6, 0.22);
+  },
+  onSpiritDown: (a, by) => {
+    /* Le moment qui compte : c'est ici que le joueur apprend qu'il a touché.
+       Flash sur la cible, éclats aux couleurs du tireur, choc au sol — trois
+       lectures redondantes, parce qu'une seule se perd dans une mêlée. */
+    spawnHitFlash(a);
+    const col = by ? new THREE.Color(elementColorOf(by)) : WHITE;
+    spawnSparks(a.x, (a.y || 0) + 0.7, a.z, col, 12, { spread: 4.6, lift: 3.4 });
+    spawnShock(a.x, a.z, col, 2.4, 0.3);
+
+    const d = distToPlayer(a.x, a.z);
+    if (by && by.i === 0) shake = Math.max(shake, 0.2);
+    if (d < 34) {
+      soundEngine.playSFXGroup('earth', {
+        volume: (by && by.i === 0 ? 0.6 : 0.3) * (1 - d / 34),
+        rate: 1.25,
+      });
+    }
+  },
+  onCollect: (a, f) => {
+    /* Ramassage : l'esprit était converti sur place, sans transition — on
+       voyait une disparition, pas une prise. Le trait qui se résorbe vers le
+       Leader donne la direction du gain, et dit à qui il profite. */
+    spawnCaptureLink(a.x, a.z, f);
+    spawnSparks(a.x, (a.y || 0) + 0.6, a.z, f.color, 8, { spread: 2.4, lift: 2.6, size: 0.4 });
+    if (f.i === 0) shake = Math.max(shake, 0.16);
   },
   onLeaderDown: (o, by) => {
     spawnShock(o.leader.x, o.leader.z, o.color, 3.4, 0.4);
@@ -1617,18 +1862,32 @@ function updateAttacks(dt) {
   botAttacks(dt);
   stepProjectiles(dt, _atkCtx);
   collectDowned(factions, agents, _atkCtx);
+  updateCaptureFx(dt);
 
   /* Les sprites suivent leur projectile ; ceux qui viennent de naître prennent
      une orbe au passage. */
   for (const p of projectiles) {
     let bolt = _boltLive.get(p);
-    if (!bolt) { acquireBolt(p); bolt = _boltLive.get(p); }
+    if (!bolt) { acquireBolt(p); bolt = _boltLive.get(p); bolt.trailT = 0; }
     bolt.grp.position.set(p.x, p.y, p.z);
     /* Rotation du corps et respiration du halo : deux mouvements de vitesses
        différentes, sinon l'ensemble se lit comme une seule image qui tourne. */
     bolt.spin += dt * 2.4;
     bolt.body.material.rotation = bolt.spin;
     bolt.glow.scale.setScalar(3.1 + Math.sin(bolt.spin * 3.1) * 0.22);
+
+    /* Traînée : à 30 u/s, l'orbe traverse l'écran en un souffle et on ne lit
+       pas d'où elle vient. Les braises restent une fraction de seconde et
+       dessinent la trajectoire APRÈS coup — c'est ce qui rend un tir manqué
+       compréhensible. Cadence fixe (et non par image) : le rendu ne doit pas
+       dépendre du framerate. */
+    bolt.trailT = (bolt.trailT || 0) + dt;
+    const step = isCoarse ? 0.05 : 0.025;
+    if (bolt.trailT >= step) {
+      bolt.trailT = 0;
+      spawnSparks(p.x, p.y, p.z, new THREE.Color(elementColorOf(factions[p.from])),
+        1, { spread: 0.5, lift: 0.35, size: 0.3 });
+    }
   }
 }
 
@@ -1883,6 +2142,8 @@ function clearWebs() {
   for (const a of agents) if (a && a._dive != null) { a.base = a._diveBase; a._dive = null; a._diveMoved = false; }
   for (const p of [...projectiles]) releaseBolt(p);
   clearProjectiles();
+  clearCaptureFx();
+  for (const f of factions) if (f) f._recoil = 0;
   /* Les états « à terre » ne doivent pas survivre à une partie : un Leader
      figé au coup d'envoi serait injouable. */
   for (const f of factions) { if (f) { f.downT = 0; f.atkCd = 0; f._aimT = 0; } }
@@ -2050,7 +2311,11 @@ const ALTAR_H = 5.6;           // hauteur du sanctuaire une fois mis à l'échel
    reste 3,6 u entre deux emprises — elles ne se chevauchent pas, donc on ne
    livre jamais à deux sanctuaires à la fois. */
 const ALTAR_MIN_GAP = ALTAR_R * 2 + 3.6;
-const ALTAR_FEED_RATE = 3.5; // esprits livrés par seconde
+/* Temps de présence avant que la livraison ne parte. La livraison étant tout ou
+   rien (voir feedAltar), ce n'est plus une cadence mais un court temps de pose :
+   de quoi voir le sanctuaire réagir avant qu'il ne bascule, et de quoi frôler
+   son emprise sans déclencher une prise qu'on ne voulait pas. */
+const ALTAR_DELIVER_DELAY = 0.28;
 const ALTAR_PAINT_PERIOD = 0.22;
 const ALTAR_PAINT_R = 13;    // portée finale de la peinture d'un sanctuaire
 const ALTAR_GROW_T = 45;     // temps pour atteindre cette portée
@@ -2298,6 +2563,9 @@ function makeOwnerStatue(f) {
 
 /* ---- Cycle de vie ---- */
 function clearAltars() {
+  /* Les levées en cours pointent sur des statues qu'on retire : les laisser
+     tourner ferait piloter des objets sortis de la scène. */
+  _statueRises.length = 0;
   for (const a of altars) {
     scene.remove(a.grp);
     if (a.label) scene.remove(a.label);
@@ -2423,31 +2691,57 @@ function refreshAltarVisual(a) {
   );
 }
 
-/** Consomme les esprits du bon élément dans le cortège d'un culte présent. */
+/**
+ * Livraison à un sanctuaire — TOUT OU RIEN.
+ *
+ * On ne consomme un seul esprit que si le cortège en porte assez pour couvrir
+ * la demande entière. Auparavant l'autel avalait les esprits au fil du passage :
+ * un culte qui n'en avait pas assez les perdait quand même et repartait les
+ * mains vides, sans rien avoir pris. Pire, un rival n'avait plus qu'à finir le
+ * travail sur un autel à moitié rempli aux frais du premier.
+ *
+ * Le gain n'est pas seulement d'équité : passer devant un sanctuaire cesse
+ * d'être dangereux. On peut traverser la vallée en portant sa cargaison sans
+ * craindre de la voir grignotée en chemin, ce qui rend le trajet jouable.
+ */
 function feedAltar(a, dt) {
+  /* Qui peut livrer MAINTENANT : présent dans l'emprise ET porteur du compte
+     exact. On cherche d'abord, on agit ensuite — sans ça le temps de pose
+     s'accumulerait pendant qu'un culte trop léger campe sur place, et la
+     livraison partirait dès qu'il complète son cortège, sans temps de pose. */
+  let deliverer = null, held = null;
   for (const f of factions) {
     if (!f || !f.alive || !f.leader) continue;
     if (f.i === a.owner) continue;           // on ne brise pas son propre autel
     if (Math.hypot(f.leader.x - a.x, f.leader.z - a.z) > ALTAR_R) continue;
 
-    a.feedAcc += dt * ALTAR_FEED_RATE;
-    let n = a.feedAcc | 0;
-    if (n <= 0) continue;
-    a.feedAcc -= n;
-
-    while (n-- > 0 && a.filled < a.need) {
-      const spirit = agents.find((s) => s && !s.dead
-        && (s.followerOf ?? -1) === f.i && variantOf(s.id) === a.variant);
-      if (!spirit) break;
-      consumeFollower(spirit, f);
-      a.filled++;
-      spawnShock(a.x, a.z, elemOf(a.variant).col, 2.2, 0.3);
-      if (f.i === 0) soundEngine.playSFX('convert', { volume: 0.5 });
+    const mine = [];
+    for (const s of agents) {
+      if (!s || s.dead) continue;
+      if ((s.followerOf ?? -1) !== f.i) continue;
+      if (variantOf(s.id) !== a.variant) continue;
+      mine.push(s);
+      if (mine.length >= a.need) break;
     }
-    if (a.filled >= a.need) activateAltar(a, f);
-    refreshAltarVisual(a);
-    return;   // un seul culte alimente par frame
+    if (mine.length < a.need) continue;      // pas de quoi : on ne touche à rien
+    deliverer = f; held = mine;
+    break;                                   // un seul culte livre par frame
   }
+
+  if (!deliverer) { a.feedAcc = 0; return; }
+
+  a.feedAcc += dt;
+  if (a.feedAcc < ALTAR_DELIVER_DELAY) return;
+  a.feedAcc = 0;
+
+  for (const s of held) {
+    consumeFollower(s, deliverer);
+    a.filled++;
+  }
+  spawnShock(a.x, a.z, elemOf(a.variant).col, 3.2, 0.4);
+  if (deliverer.i === 0) soundEngine.playSFX('convert', { volume: 0.6 });
+  activateAltar(a, deliverer);
+  refreshAltarVisual(a);
 }
 
 /** Retire un suivant du cortège : il est absorbé par l'autel. */
@@ -2460,6 +2754,108 @@ function consumeFollower(s, f) {
   f.count = Math.max(0, (f.count || 0) - 1);
 }
 
+/* ---- Levée de la statue ----
+   La statue sort du sol pendant que gronde la pierre. On la fait monter depuis
+   une position enterrée en la faisant trembler, puis le tremblement s'apaise sur
+   la fin : la secousse doit MOURIR avant que le mouvement ne s'arrête, sinon on
+   voit une statue posée qui vibre encore, ce qui ressemble à un bug d'affichage.
+
+   Le plan de coupe (`clippingPlanes`) évite de voir la statue traverser le
+   dallage par en dessous : tout ce qui est sous le niveau du sanctuaire est
+   simplement découpé, donc elle émerge vraiment du sol au lieu de le percer. */
+const _statueRises = [];   // { a, t, dur, y0, plane }
+
+function beginStatueRise(a, dur) {
+  const y = a.y || 0;
+  /* Hauteur enterrée : plus que la statue elle-même n'est haute, sinon un bout
+     dépasse déjà au premier tick. */
+  const drop = STATUE_H + 1.2;
+  const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -y + 0.02);
+  a.statue.traverse((c) => {
+    if (c.isMesh || c.isSkinnedMesh) {
+      c.material = c.material.clone();
+      c.material.clippingPlanes = [plane];
+      c.material.clipShadows = true;
+    }
+  });
+  a.statue.position.y = y - drop;
+  /* Une seule levée par sanctuaire : une reprise éclair pendant l'animation
+     précédente laisserait deux entrées à piloter la même statue. */
+  for (let i = _statueRises.length - 1; i >= 0; i--) {
+    if (_statueRises[i].a === a) _statueRises.splice(i, 1);
+  }
+  _statueRises.push({ a, t: 0, dur, y0: y, drop, plane });
+}
+
+function updateStatueRises(dt) {
+  for (let i = _statueRises.length - 1; i >= 0; i--) {
+    const r = _statueRises[i];
+    if (!r.a.statue) { _statueRises.splice(i, 1); continue; }
+    r.t += dt;
+    const u = Math.min(1, r.t / r.dur);
+    /* Montée qui décélère : la pierre est lourde, elle s'arrache d'un coup puis
+       se pose. */
+    const ease = 1 - (1 - u) * (1 - u) * (1 - u);
+    const y = r.y0 - r.drop * (1 - ease);
+    /* Tremblement amorti : fort au départ, éteint bien avant l'arrivée. */
+    const q = Math.max(0, 1 - u / 0.8);
+    const amp = 0.16 * q * q;
+    r.a.statue.position.set(
+      r.a.x + (Math.random() - 0.5) * amp,
+      y + (Math.random() - 0.5) * amp * 0.7,
+      r.a.z + (Math.random() - 0.5) * amp,
+    );
+    /* Le plan de coupe suit le sol, pas la statue : il reste fixe, c'est la
+       statue qui le franchit. */
+    if (u >= 1) {
+      r.a.statue.position.set(r.a.x, r.y0, r.a.z);
+      /* Coupe retirée à l'arrivée : la garder coûterait une passe de clipping
+         pour rien pendant toute la partie. */
+      r.a.statue.traverse((c) => {
+        if (c.isMesh || c.isSkinnedMesh) c.material.clippingPlanes = null;
+      });
+      _statueRises.splice(i, 1);
+    }
+  }
+}
+
+/* ---- Éclatement de l'ancienne statue ----
+   On ne rejoue pas la sculpture en morceaux : on la remplace par une volée de
+   blocs de pierre. Découper un maillage riggé à la volée coûterait bien plus
+   cher que ce que l'effet rapporte, et à cette distance de caméra la gerbe se
+   lit exactement pareil. */
+function shatterStatue(a, wasOwner) {
+  scene.remove(a.statue);
+  disposeGroup(a.statue);
+  a.statue = null;
+
+  const col = wasOwner >= 0 && factions[wasOwner] ? factions[wasOwner].color : null;
+  const n = isCoarse ? 10 : 26;
+  for (let i = 0; i < n; i++) {
+    const mesh = new THREE.Mesh(
+      SHARED_PARTICLE_GEO,
+      new THREE.MeshBasicMaterial({ color: STONE_COL }),
+    );
+    const s = 0.22 + Math.random() * 0.4;
+    mesh.scale.setScalar(s);
+    mesh.position.set(
+      a.x + (Math.random() - 0.5) * 1.4,
+      (a.y || 0) + 0.6 + Math.random() * STATUE_H,
+      a.z + (Math.random() - 0.5) * 1.4,
+    );
+    scene.add(mesh);
+    const ang = Math.random() * Math.PI * 2;
+    const sp = 3.5 + Math.random() * 7;
+    particles.push({
+      mesh,
+      vx: Math.cos(ang) * sp, vy: 5 + Math.random() * 7, vz: Math.sin(ang) * sp,
+      scale: s, factionIdx: -1, noPaint: true,
+    });
+  }
+  spawnShock(a.x, a.z, col || new THREE.Color(STONE_COL), 6, 0.5);
+  shake = Math.max(shake, wasOwner === 0 ? 0.45 : 0.25);
+}
+
 function activateAltar(a, f) {
   const wasOwner = a.owner;
   a.owner = f.i;
@@ -2468,9 +2864,12 @@ function activateAltar(a, f) {
      qui vient de prendre l'autel. L'escalade appartient au lieu, pas au culte. */
   a.need += ALTAR_NEED_STEP;
   a.activeT = 0;
+  /* L'ANCIENNE statue vole en éclats. Elle ne disparaît pas : une prise se lit
+     comme un renversement, il faut voir tomber ce qui était là avant. */
+  if (a.statue) shatterStatue(a, wasOwner);
+
   /* Le gardien est de l'élément qui vient d'être livré ; l'autel réclame
      désormais son opposé pour être brisé à son tour. */
-  if (a.statue) scene.remove(a.statue);
   a.statue = makeOwnerStatue(f);
   /* Pieds au sol. L'ancien décalage (ALTAR_H * 0.42) posait la statue sur le
      petit autel d'alors ; avec l'emprise actuelle il la laissait planer à
@@ -2486,7 +2885,13 @@ function activateAltar(a, f) {
      de sanctuaire est un événement de partie, pas un détail local — même à
      l'autre bout de la vallée on doit savoir qu'il vient de s'en passer une.
      Un peu plus fort quand c'est le joueur qui vient de prendre le lieu. */
-  soundEngine.playSFXGroup('earth', { volume: f.i === 0 ? 0.8 : 0.5 });
+  const sfx = soundEngine.playSFXGroup('earth', { volume: f.i === 0 ? 0.8 : 0.5 });
+  /* La levée dure EXACTEMENT le temps du grondement : c'est ce qui fait croire
+     que c'est le son qui soulève la pierre, et non deux effets qui se croisent.
+     Bornée quand même — un fichier anormalement long figerait la statue sous
+     terre une éternité. */
+  const rise = Math.min(2.6, Math.max(0.8, soundEngine.sfxDuration(sfx, 1.4)));
+  beginStatueRise(a, rise);
   a.variant = ELEM_OPPOSITE[a.variant];
 
   spawnShock(a.x, a.z, f.color, 9, 1.2);
@@ -2500,6 +2905,7 @@ function activateAltar(a, f) {
 }
 
 function updateAltars(dt) {
+  updateStatueRises(dt);
   for (const a of altars) {
     a.age += dt;
     a.grp.userData.ring.rotation.z += dt * 0.8;
@@ -2661,49 +3067,6 @@ function buildFollowerMesh(key, gltf, tex) {
   flushPendingFollowers(key);
 }
 
-/* Texture du moine recolorée par culte : seuls les pixels de la tunique (orange
-   saturé dans l'atlas Meshy) prennent la teinte du culte — peau, barbe et
-   accessoires restent intacts. */
-const monkTexCache = {};
-function monkTextureFor(cultHex) {
-  if (monkTexCache[cultHex]) return monkTexCache[cultHex];
-  if (!monkTexture || !monkTexture.image) return null;
-  const img = monkTexture.image;
-  const cv = document.createElement('canvas');
-  cv.width = img.width; cv.height = img.height;
-  const ctx = cv.getContext('2d');
-  ctx.drawImage(img, 0, 0);
-  const d = ctx.getImageData(0, 0, cv.width, cv.height);
-  const target = new THREE.Color(cultHex);
-  for (let i = 0; i < d.data.length; i += 4) {
-    const r = d.data[i] / 255, g = d.data[i + 1] / 255, b = d.data[i + 2] / 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b), c = max - min;
-    const l = (max + min) / 2;
-    const sat = c === 0 ? 0 : c / (1 - Math.abs(2 * l - 1));
-    let h = 0;
-    if (c > 0) {
-      if (max === r) h = ((g - b) / c + 6) % 6;
-      else if (max === g) h = (b - r) / c + 2;
-      else h = (r - g) / c + 4;
-      h *= 60;
-    }
-    // robe + écharpe = bruns/oranges saturés de luminance basse à moyenne ;
-    // la peau est bien plus claire (l ≥ 0.62), la tunique crème désaturée
-    const isRobe = sat > 0.3 && h >= 10 && h <= 50 && l >= 0.15 && l < 0.62;
-    if (isRobe) {
-      const k = Math.min(1.6, l / 0.42); // conserve les ombres/plis
-      d.data[i]     = Math.min(255, Math.round(target.r * 255 * k));
-      d.data[i + 1] = Math.min(255, Math.round(target.g * 255 * k));
-      d.data[i + 2] = Math.min(255, Math.round(target.b * 255 * k));
-    }
-  }
-  ctx.putImageData(d, 0, 0);
-  const tex = new THREE.CanvasTexture(cv);
-  tex.flipY = monkTexture.flipY;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  monkTexCache[cultHex] = tex;
-  return tex;
-}
 /* Crédite des croyants portés à un culte : maisons vidées, âmes ramassées,
    sanctuaires activés. Remplace l'ancien gain de cristaux-vie. */
 function gainBelievers(f, n = 1) {
@@ -2789,7 +3152,11 @@ function creditConvert(a, f, opts = {}) {
     bumpStreak();
   }
 
-  const imprintR = 1.5 + (f.i === 0 ? Math.min(1.5, streak * 0.08) : 0.15);
+  /* `paintMul` : carte « Empreinte profonde ». Elle agit sur le RAYON de la
+     trace, pas sur un score — la carte se voit donc au sol, et ce qu'elle
+     rapporte se dispute encore : un rival peut repeindre par-dessus. */
+  const fervor = (f.paintMulT || 0) > 0 ? (f.paintMul || 1) : 1;
+  const imprintR = (1.5 + (f.i === 0 ? Math.min(1.5, streak * 0.08) : 0.15)) * fervor;
   stampSplash(a.x, a.z, imprintR, f.team, f.css);
 
   spawnSoulBurst(a.x, a.z, f);
@@ -2924,7 +3291,9 @@ function convertToFollower(a, f, byDisc = null) {
   a.extractProgress = 0;
   a.converting = -1;
   a.followerOf = f.i;
-  if (!a._origBase) a._origBase = a.base;
+  /* En plein plongeon, `base` est une taille intermédiaire (l'esprit est à
+     moitié avalé par le trou) : la référence est celle d'avant le plongeon. */
+  if (!a._origBase) a._origBase = (a._dive != null && a._diveBase) ? a._diveBase : a.base;
   a.base = a._origBase * FOLLOWER_SCALE;
   a.vx = 0; a.vz = 0;
   grayCount--;
@@ -3205,7 +3574,13 @@ function updateParticles(dt) {
     p.mesh.scale.setScalar(p.scale);
 
     if (p.mesh.position.y <= 0.38 && p.vy < 0) {
-      stampSplash(p.mesh.position.x, p.mesh.position.z, 1.8 + Math.random() * 2.2, p.factionIdx, p.colorCss);
+      /* `noPaint` : les gravats d'une statue brisée retombent sans rien teindre.
+         Sans ce garde-fou ils passeraient ici avec factionIdx -1, ce qui EFFACE
+         la peinture au lieu d'en poser — un sanctuaire pris blanchirait les
+         alentours de son propre preneur. */
+      if (!p.noPaint) {
+        stampSplash(p.mesh.position.x, p.mesh.position.z, 1.8 + Math.random() * 2.2, p.factionIdx, p.colorCss);
+      }
       scene.remove(p.mesh);
       if (p.mesh.geometry !== SHARED_PARTICLE_GEO) p.mesh.geometry.dispose();
       if (!_particleMatCache.has(p.factionIdx)) p.mesh.material.dispose();
@@ -3576,6 +3951,10 @@ const paintMat = new THREE.MeshBasicMaterial({
   depthWrite: false,
   blending: THREE.NormalBlending,
 });
+/* Le rendu « gel liquide » de la peinture est branché ici plutôt que collé à un
+   seul matériau : le mur de peinture des portails du Hub réutilise exactement
+   le même shader, pour que ce soit visiblement la MÊME matière qu'au sol. */
+function applyPaintShader(paintMat) {
 paintMat.onBeforeCompile = (shader) => {
   paintMat.userData.shader = shader;
   shader.uniforms.uTime = monkTimeU;
@@ -3686,6 +4065,38 @@ vec3 paintVoronoi(vec2 uv, float time) {
 };
 paintMat.customProgramCacheKey = () => 'paint-water-gel-v19';
 paintMat.needsUpdate = true;
+return paintMat;
+}
+applyPaintShader(paintMat);
+
+/* Mur de peinture d'un portail conquis : même shader que la nappe au sol, mais
+   alimenté par un aplat plein de la couleur du culte au lieu du canevas de
+   peinture du match. Résultat : l'espace vide de l'arche est rempli par la
+   MÊME matière liquide, à la verticale. */
+function makePortalPaintMaterial(cultColor) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 4;
+  const c = cv.getContext('2d');
+  c.fillStyle = cultColor;
+  c.fillRect(0, 0, 4, 4);
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = paintTex.colorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  /* Le shader dessine ses cellules de Voronoï en espace UV. La répétition
+     règle donc leur taille apparente : réglée pour ~3 cellules en travers de
+     l'arche, soit la même échelle de motif qu'au sol. */
+  tex.repeat.set(0.055, 0.055);
+
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  return applyPaintShader(mat);
+}
 /* ---- Nappe de peinture ----
    C'était un simple quad posé à y = 0.04. Depuis que les tuiles ont des
    niveaux, toute peinture sur un plateau se retrouvait ENTERRÉE dans la
@@ -3844,7 +4255,7 @@ const _leaderTickInput = { x: 0, z: 0, keys: null };
 /* Contexte partagé de la boucle crowd — set une fois, mis à jour par référence. */
 const _crowdTickState = { agents: null, factions: null, island: null, elapsed: 0, bombs: null };
 const _crowdTickCtx = {
-  resolveIsland, isSolid, canJumpToward, steerOnIsland,
+  resolveIsland, isSolid, canStep, canJumpToward, steerOnIsland,
   islandApproachScore, islandPathBlocked, islandRandomPoint,
   finishConvert: null,   // défini plus tard (déclaration circulaire)
   stampPaintAt: null,
@@ -3876,13 +4287,9 @@ const _crowdTickCtx = {
       fm.mesh.userData.anim.needsUpdate = true;
     }
   },
-  setFollowerColor: (a, col) => {
-    if (a._followerSlot == null || !a._followerKey) return;
-    const fm = followerMeshes[a._followerKey];
-    if (!fm) return;
-    fm.mesh.instanceColor.setXYZ(a._followerSlot, col.r, col.g, col.b);
-    fm.mesh.instanceColor.needsUpdate = true;
-  },
+  /* Pas de teinte de suivant : un esprit capturé garde la couleur de son
+     élément, c'est elle qui dit à quel autel il peut servir. Sa teinte
+     d'instance est posée à blanc une fois pour toutes (assignFollowerSlot). */
   tmpM, tmpQ, tmpS, tmpP, UP_AXIS, GRAY,
   /* Bascule « face au sol » des agents touchés par une attaque. */
   tmpQ2: new THREE.Quaternion(),
@@ -4041,19 +4448,31 @@ function updateRaceUI() {
 /* ---- Cycle jour/nuit : l'horloge silencieuse de la partie ----
    t = 0 aube pénombre → plein jour → 1 soirée. 2 minutes = une journée.
    Exposition, soleil, hémisphère et brouillard racontent l'heure sans HUD. */
+/* Expositions calibrées pour NeutralToneMapping (voir le réglage du renderer).
+   Elles valent ~0,62× les anciennes, qui compensaient le facteur 1/0,6 caché
+   dans ACES. Repère : `exp` 1.0 = restitution neutre, la texture sort à l'écran
+   telle qu'elle est peinte. */
 const DAY_KEYS = [
-  { t: 0.00, exp: 0.52, sun: 0xffb078, sunI: 0.55, hemiI: 0.42, fogK: 0.55 },  // aube — pénombre chaude
-  { t: 0.08, exp: 0.68, sun: 0xffc090, sunI: 0.78, hemiI: 0.55, fogK: 0.65 },  // premier soleil
-  { t: 0.18, exp: 0.88, sun: 0xffe0b8, sunI: 1.05, hemiI: 0.72, fogK: 0.80 },  // matin
-  { t: 0.32, exp: 1.08, sun: 0xfff4e0, sunI: 1.40, hemiI: 0.90, fogK: 0.95 },  // montée
-  { t: 0.48, exp: 1.16, sun: 0xfff8ea, sunI: 1.65, hemiI: 0.98, fogK: 1.00 },  // plein jour
-  { t: 0.68, exp: 1.12, sun: 0xfff0d8, sunI: 1.45, hemiI: 0.92, fogK: 0.96 },  // après-midi
-  { t: 0.82, exp: 0.92, sun: 0xffb888, sunI: 1.05, hemiI: 0.70, fogK: 0.78 },  // doré du soir
-  { t: 0.92, exp: 0.68, sun: 0xc078a8, sunI: 0.70, hemiI: 0.48, fogK: 0.58 },  // crépuscule
-  { t: 1.00, exp: 0.48, sun: 0x6a78c0, sunI: 0.42, hemiI: 0.36, fogK: 0.45 },  // soir — fin de partie
+  { t: 0.00, exp: 0.34, sun: 0xffb078, sunI: 0.55, hemiI: 0.42, fogK: 0.55 },  // aube — pénombre chaude
+  { t: 0.08, exp: 0.44, sun: 0xffc090, sunI: 0.78, hemiI: 0.55, fogK: 0.65 },  // premier soleil
+  { t: 0.18, exp: 0.58, sun: 0xffe0b8, sunI: 1.05, hemiI: 0.72, fogK: 0.80 },  // matin
+  { t: 0.32, exp: 0.72, sun: 0xfff4e0, sunI: 1.40, hemiI: 0.90, fogK: 0.95 },  // montée
+  { t: 0.48, exp: 0.78, sun: 0xfff8ea, sunI: 1.65, hemiI: 0.98, fogK: 1.00 },  // plein jour
+  { t: 0.68, exp: 0.75, sun: 0xfff0d8, sunI: 1.45, hemiI: 0.92, fogK: 0.96 },  // après-midi
+  { t: 0.82, exp: 0.61, sun: 0xffb888, sunI: 1.05, hemiI: 0.70, fogK: 0.78 },  // doré du soir
+  { t: 0.92, exp: 0.44, sun: 0xc078a8, sunI: 0.70, hemiI: 0.48, fogK: 0.58 },  // crépuscule
+  { t: 1.00, exp: 0.31, sun: 0x6a78c0, sunI: 0.42, hemiI: 0.36, fogK: 0.45 },  // soir — fin de partie
 ];
 const fogBase = new THREE.Color(0x9fdcff);
-function captureDayBase() { if (scene.fog) fogBase.copy(scene.fog.color); }
+let fogBaseNear = 70;
+let fogBaseFar = 165;
+function captureDayBase() {
+  if (scene.fog) {
+    fogBase.copy(scene.fog.color);
+    fogBaseNear = scene.fog.near;
+    fogBaseFar = scene.fog.far;
+  }
+}
 const _dayCol = new THREE.Color();
 let nightK = 0;   // 0 = plein jour, 1 = obscurité maximale
 /* Heure figée de la vallée : plein jour légèrement décalé vers l'après-midi. */
@@ -4066,14 +4485,73 @@ function applyDayCycle(t) {
     if (t >= DAY_KEYS[i].t && t <= DAY_KEYS[i + 1].t) { a = DAY_KEYS[i]; b = DAY_KEYS[i + 1]; break; }
   }
   const k = (t - a.t) / Math.max(1e-5, b.t - a.t);
-  const exp = a.exp + (b.exp - a.exp) * k;
-  renderer.toneMappingExposure = exp;
-  nightK = Math.min(1, Math.max(0, (1.12 - exp) / (1.12 - 0.48)));
-  sun.intensity = a.sunI + (b.sunI - a.sunI) * k;
+  let exp = a.exp + (b.exp - a.exp) * k;
+  let sunI = a.sunI + (b.sunI - a.sunI) * k;
+  let hemiI = a.hemiI + (b.hemiI - a.hemiI) * k;
+  let fogK = a.fogK + (b.fogK - a.fogK) * k;
+
+  /* ---- « Nuit sans lune » (carte hasard) ----
+     TOUT s'éteint : les tuiles, mais aussi le ciel, l'abîme et les personnages.
+     Seule reste la lanterne du joueur (voir la fin de updateWorld).
+
+     Éteindre par les seules lumières ne suffisait pas, et c'est ce qui faisait
+     échouer l'effet — trois choses y échappent complètement :
+       · le FOND est une texture d'environnement, pas un objet éclairé. On le
+         baisse par `backgroundIntensity` ;
+       · le VIDE (poussière, halo bas) est peint par un shader qui n'inclut ni
+         éclairage ni tone mapping. Il a son propre crochet, `setVoidDim` ;
+       · les PERSONNAGES vivent sur leur propre couche, éclairée par charSun /
+         charHemi, que le cycle du jour ne touche jamais. Sans les baisser, tous
+         les Leaders de la carte restaient en plein jour.
+
+     Fondu de 0,9 s aux deux bouts : une bascule sèche se lit comme un plantage
+     d'affichage. */
+  const BO_FADE = 0.9;
+  const boIn = (worldMods.blackoutMax || 0) - worldMods.blackoutT;   // temps écoulé depuis le début
+  /* Conditionné à l'état « play » : une partie qui se termine en pleine nuit
+     laisserait sinon le menu dans le noir jusqu'à la partie suivante. */
+  const bo = (state === 'play' && worldMods.blackoutT > 0)
+    ? Math.max(0, Math.min(1, boIn / BO_FADE, worldMods.blackoutT / BO_FADE))
+    : 0;
+  if (bo > 0) {
+    exp *= 1 - 0.60 * bo;
+    sunI *= 1 - 0.94 * bo;
+    hemiI *= 1 - 0.92 * bo;
+    fogK *= 1 - 0.92 * bo;
+    if (scene.fog) {
+      scene.fog.near = 4 + (fogBaseNear - 4) * (1 - bo);
+      scene.fog.far = 22 + (fogBaseFar - 22) * (1 - bo);
+    }
+  } else if (scene.fog) {
+    scene.fog.near = fogBaseNear;
+    scene.fog.far = fogBaseFar;
+  }
+  /* Fond, vide et personnages. Écrits à chaque image plutôt qu'aux transitions :
+     le fond est reconstruit à chaque changement de biome, et une valeur posée
+     une seule fois serait perdue au chargement de la carte suivante. */
+  scene.backgroundIntensity = 1 - 0.93 * bo;
+  setVoidDim(0.95 * bo);
+  charSun.intensity = CHAR_SUN_I * (1 - 0.93 * bo);
+  charHemi.intensity = CHAR_HEMI_I * (1 - 0.9 * bo);
+
+  renderer.toneMappingExposure = exp * TUNE.exposure;
+  /* Bornes calées sur DAY_KEYS : plein jour 0.78, plus sombre 0.31. Elles ont
+     suivi le passage à NeutralToneMapping — laissées à l'ancienne échelle,
+     `nightK` serait resté collé à 1 et tout ce qui s'allume à la nuit (lampes,
+     fenêtres) serait resté allumé en plein midi. */
+  nightK = Math.min(1, Math.max(0, (0.78 - exp) / (0.78 - 0.31)));
+  sun.intensity = sunI * TUNE.sun;
   sun.color.set(a.sun).lerp(_dayCol.set(b.sun), k);
-  hemi.intensity = a.hemiI + (b.hemiI - a.hemiI) * k;
-  if (scene.fog) scene.fog.color.copy(fogBase).multiplyScalar(a.fogK + (b.fogK - a.fogK) * k);
+  hemi.intensity = hemiI * TUNE.hemi;
+  if (scene.fog) scene.fog.color.copy(fogBase).multiplyScalar(fogK);
 }
+
+/* Pas de lampe pour les rivaux pendant la nuit noire : ils restent dans le
+   noir, et c'est tout l'enjeu de la carte — on ne sait plus où ils sont, on ne
+   les découvre qu'en entrant dans leur zone ou en lisant leur peinture au sol.
+   Une lampe par Leader annulait l'effet : la vallée s'éteignait, mais six
+   projecteurs continuaient à désigner tout le monde.
+   La seule source restante est la lanterne du joueur (voir updateWorld). */
 /* Cadran du Boost : le tir étant automatique, le seul bouton restant est le
    sprint. Sa recharge est fixe, donc le cadran se lit toujours pareil. */
 let playerBoostCharge = 1.0;
@@ -4090,7 +4568,16 @@ function updateAttackUI() {
 /* Sprint. Aucun coût en croyants et aucun palier de compétence : juste une
    recharge. C'est l'outil d'esquive face aux météorites. */
 function doBoost(f) {
-  if (!f || !f.alive || f.boostT > 0) return;
+  if (!f || !f.alive) return;
+  /* Hub Overworld : exactement le même boost qu'en partie (même durée, même
+     multiplicateur, même inertie), mais sans charge à remplir ni cooldown —
+     on explore, il n'y a rien à rationner. Relançable même en pleine poussée. */
+  if (state === 'overworld') {
+    f.boostT = BOOST_DUR;
+    soundEngine.playSFX('boost');
+    return;
+  }
+  if (f.boostT > 0) return;
   if (f.i === 0) {
     if (playerBoostCharge < 1.0) return;
     playerBoostCharge = 0.0;
@@ -4321,7 +4808,9 @@ const keys = {};
 addEventListener('keydown', e => {
   if (e.code === 'Space') {
     e.preventDefault();
-    if (!keys.Space && state === 'play') doBoost(factions[0]);
+    // Espace = boost, en partie COMME dans le Hub. L'interaction du Hub est sur
+    // E : lui laisser Espace revenait à supprimer le boost à l'exploration.
+    if (!keys.Space && (state === 'play' || state === 'overworld')) doBoost(factions[0]);
   }
   /* Touches déjà prises : Espace (boost), E et F (pouvoirs), WASD et flèches
      (déplacement, voir playerDir). Le filet prend KeyQ — code physique, donc la
@@ -4340,7 +4829,8 @@ let joyId = null, joyOx = 0, joyOy = 0;
 let lastTap = 0;
 function onDown(e) {
   audioInit();
-  if (state !== 'play') return;
+  // Le Hub se pilote comme une partie : même joystick, même double-tap.
+  if (state !== 'play' && state !== 'overworld') return;
   if (e.target.closest('button') || e.target.closest('#hud-top-bar')) return;
 
   // double-tap sur l'écran = sprint, sans occuper de bouton au pouce
@@ -4375,7 +4865,30 @@ addEventListener('pointermove', onMove);
 addEventListener('pointerup', onUp);
 addEventListener('pointercancel', onUp);
 
-boostBtn.addEventListener('pointerdown', (e) => { e.stopPropagation(); doBoost(factions[0]); });
+boostBtn.addEventListener('pointerdown', (e) => {
+  e.stopPropagation();
+  // Dans le Hub : poussée d'élan, relançable sans limite.
+  doBoost(factions[0]);
+});
+
+/* Manette Xbox : mêmes actions que le tactile, branchées sur les mêmes fonctions.
+   Le polling se fait dans frame() (la Gamepad API n'émet pas d'événements). */
+initGamepad({
+  input,
+  getState: () => state,
+  isTouchActive: () => joyId !== null,
+  onBoost: () => { audioInit(); if (state === 'play') doBoost(factions[0]); },
+  onAttack: () => {
+    if (state !== 'play') return false;
+    audioInit();
+    const fired = playerAttack();
+    if (fired && netBtnEl) {
+      netBtnEl.classList.add('swinging');
+      setTimeout(() => netBtnEl.classList.remove('swinging'), 160);
+    }
+    return fired;
+  },
+});
 
 /* Attaque : un appui = un tir. pointerdown plutôt que click — sur tactile,
    attendre le click coûterait ~120 ms sur l'action centrale du jeu. */
@@ -4648,6 +5161,606 @@ let playerCultIdx = 0;
 let playerLeaderKey = 'monk';   // choix du perso jouable : cf. LEADERS
 let conquest = null;   // contexte de partie lancée depuis la carte de conquête
 
+/* ============================== MODE OVERWORLD 3D ============================== */
+let overworldPortals = [];
+let overworldSpirits = [];
+let overworldVillagers = [];
+let overworldCtx = null;
+let activeOverworldTrigger = null;
+let conquestPortalIdx = 0;
+
+/** Nombre de zones (portails) du pays courant : une par province réelle. */
+let OVERWORLD_ZONES = 8;
+
+/* Allure de base dans le Hub : celle d'un Leader sans foule en partie (V_MAX),
+   pour que le déplacement et le boost aient exactement le même toucher ici et
+   en match. Le boost applique BOOST_MULT par-dessus, sans charge ni cooldown. */
+const OVERWORLD_WALK_SPD = V_MAX;
+
+/* Teinte de la peinture d'un portail non gagné : le même gris que les
+   sceptiques de la foule, pour que « pas encore à moi » se lise pareil ici et
+   en partie. */
+const PORTAL_IDLE_PAINT = '#8c93a3';
+
+/** Nombre de villageois qui peuplent le Hub. */
+const HUB_VILLAGERS = 16;
+
+/** Libellé de la touche d'interaction, selon la plateforme. */
+const ACTION_HINT = IS_MOBILE ? 'Avancez pour entrer' : 'Avancez, ou E, pour entrer';
+
+/** Portails de niveau indexés par id (hors autel / grand portail). */
+let overworldZonePortals = [];
+
+/**
+ * Victoire en attente d'être célébrée au retour dans le Hub.
+ * { portalIndex, spirits } — posé par endGame(), consommé par openOverworldHub().
+ */
+let pendingHubVictory = null;
+
+/**
+ * Trouve un point posé sur du sol solide dans la direction (dx,dz), en partant
+ * du rayon voulu et en se rapprochant du centre si l'île est trouée à cet
+ * endroit. Sans ça, portails et villageois flottent au-dessus du vide.
+ */
+function findSolidSpot(dx, dz, radius, clearance = 0) {
+  const len = Math.hypot(dx, dz) || 1;
+  const a0 = Math.atan2(dx, dz);
+
+  /* Un point solide ne suffit pas pour un portail : il tient 4 unités de large
+     et le joueur doit pouvoir le traverser. On exige donc que TOUT son
+     empreinte tienne sur la terre ferme, sinon l'arche se retrouve à cheval sur
+     un trou (le vide qu'on voyait sous l'arche). */
+  /* `isSolid` tolère jusqu'à 4,4 du centre d'une tuile (filet anti-faux-vide aux
+     jointures) alors qu'un hexagone n'en fait que 4,1 : s'en contenter laissait
+     l'arche déborder légèrement dans le vide. Pour un placement on exige donc
+     d'être franchement DANS la tuile. */
+  const wellInside = (x, z) => {
+    const t = tileAt(island, x, z);
+    return !!t && Math.hypot(x - t.x, z - t.z) <= HEX_R * 0.92;
+  };
+
+  const fits = (x, z) => {
+    if (!wellInside(x, z)) return false;
+    if (clearance <= 0) return true;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      if (!wellInside(x + Math.cos(a) * clearance, z + Math.sin(a) * clearance)) return false;
+    }
+    return true;
+  };
+
+  /* On balaie en rayon ET en angle : si la direction voulue tombe pile sur une
+     brèche, glisser de quelques degrés de côté vaut mieux que se rabattre au
+     centre, où tous les portails finiraient empilés. */
+  for (let r = radius; r >= 4; r -= 1.2) {
+    for (const da of [0, 0.12, -0.12, 0.25, -0.25, 0.4, -0.4]) {
+      const a = a0 + da;
+      const x = Math.sin(a) * r, z = Math.cos(a) * r;
+      if (fits(x, z)) return { x, z };
+    }
+  }
+  // Dernier recours : le meilleur point solide, quitte à renoncer au dégagement.
+  for (let r = radius; r >= 3; r -= 1.2) {
+    const x = Math.sin(a0) * r, z = Math.cos(a0) * r;
+    if (isSolid(island, x, z)) return { x, z };
+  }
+  return { x: 0, z: 0 };
+}
+
+/** Repositionne un esprit sauvage sur une tuile solide, à l'écart du centre. */
+function respawnWildSpirit(mesh) {
+  const ang = Math.random() * Math.PI * 2;
+  const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 8 + Math.random() * 14);
+  mesh.position.set(p.x, (groundY(p.x, p.z) || 0) + 1.2, p.z);
+  mesh.userData.baseY = mesh.position.y;
+}
+
+/** Affiche (ou masque) l'invite contextuelle du Hub. */
+function setOverworldPrompt(title, hint, locked = false) {
+  const el = $('overworld-prompt');
+  if (!el) return;
+  if (!title) {
+    el.classList.remove('show');
+    return;
+  }
+  const html = `<span class="owp-title">${title}</span>`
+    + (hint ? `<span class="owp-hint">${hint}</span>` : '');
+  if (el.dataset.html !== html) {
+    el.innerHTML = html;
+    el.dataset.html = html;
+  }
+  el.classList.remove('hidden');
+  el.classList.toggle('locked', locked);
+  el.classList.add('show');
+}
+
+function openOverworldHub(ctx) {
+  overworldCtx = ctx || overworldCtx;
+  if (!overworldCtx) return;
+  // Le Hub n'est pas une partie : on relâche le contexte de match précédent.
+  conquest = null;
+  state = 'overworld';
+
+  // Purge des leaders/foules du match précédent : sans ça, les cultes rivaux
+  // restent plantés dans le Hub à chaque retour de partie.
+  for (const f of factions) if (f.grp) scene.remove(f.grp);
+  factions = [];
+  agents = [];
+
+  $('start').classList.add('hidden');
+  $('end').classList.add('hidden');
+  $('hud').classList.remove('hidden');
+  $('hud').classList.add('overworld-mode');
+  boostBtn.classList.add('ready');   // sprint toujours disponible dans le Hub
+
+  /* Aucune peinture dans le Hub. La nappe du match précédent restait affichée
+     et donnait l'impression que le territoire se conquiert ici — or ce n'est
+     qu'un choix de niveaux : la progression se lit sur les portails. */
+  clearPaint();
+  paintMesh.visible = false;
+
+  OVERWORLD_ZONES = Math.max(1, overworldCtx.zonesCount || overworldCtx.regions?.length || 8);
+
+  const iso = overworldCtx.world?.iso || 'FRA';
+  const biomeKey = getBiomeForIso(iso);
+  buildMap(biomeKey);
+
+  const colorStr = overworldCtx.playerColor || overworldCtx.world?.color || '#ff2e7e';
+  const hex = parseInt(colorStr.replace('#', ''), 16);
+  const ci = CULTS.findIndex((c) => c.c === hex);
+  if (ci >= 0) playerCultIdx = ci;
+
+  // Leader unique du joueur
+  const cultObj = CULTS[playerCultIdx] || CULTS[0];
+  // On apparaît DEVANT l'autel, pas dedans : ses marches font ~4.3 de rayon.
+  const spawn = findSolidSpot(0, 1, 8);
+  const pLeader = createFaction(0, 0, cultObj, playerLeaderKey, spawn.x, spawn.z);
+  pLeader.color = new THREE.Color(cultObj.c);
+  pLeader.grp = makeLeaderGroup(cultObj, playerLeaderKey);
+  pLeader.grp.position.set(spawn.x, groundY(spawn.x, spawn.z) || 0, spawn.z);
+  pLeader.leader.spd = 0;
+  // L'anneau d'influence et la bulle de bouclier appartiennent au match : dans
+  // le Hub ils n'ont aucun sens et polluent le sol.
+  if (pLeader.grp.userData.ring) pLeader.grp.userData.ring.visible = false;
+  if (pLeader.grp.userData.shield) pLeader.grp.userData.shield.visible = false;
+  scene.add(pLeader.grp);
+  factions = [pLeader];
+  agents = [pLeader.leader];
+
+  overworldPortals = [];
+  overworldSpirits = [];
+  overworldVillagers = [];
+
+  // 1. Autel Central des Compétences (0, 0)
+  const altarMesh = createCentralAltarMesh();
+  altarMesh.position.y = groundY(0, 0) || 0;
+  scene.add(altarMesh);
+  mapObjects.push(altarMesh);
+  overworldPortals.push(altarMesh);
+
+  // 2. Grand Portail de la Planète, adossé à l'autel
+  // Assez loin pour ne pas chevaucher les marches de l'autel (rayon ~4.3).
+  const gp = findSolidSpot(0, -1, 13, 3.6);   // arche dorée : 4,8 de large
+  const planetPortalMesh = createGreatPlanetPortalMesh(gp.x, gp.z);
+  planetPortalMesh.position.y = groundY(gp.x, gp.z) || 0;
+  scene.add(planetPortalMesh);
+  mapObjects.push(planetPortalMesh);
+  overworldPortals.push(planetPortalMesh);
+
+  // 3. Un portail par province du pays. Au-delà de PER_RING, on ouvre un
+  //    nouvel anneau plus large : un seul arc deviendrait illisible sur les
+  //    pays à 30 provinces.
+  const zonesCount = OVERWORLD_ZONES;
+  const PER_RING = 10;
+  overworldZonePortals = [];
+
+  // Si on rentre d'une victoire, on construit le portail conquis (et le suivant)
+  // dans leur état d'AVANT, pour pouvoir jouer la transition sous les yeux du joueur.
+  const vic = pendingHubVictory;
+  const rewindIdx = vic && vic.replayPaint ? vic.portalIndex : -1;
+  const nextIdx = vic && vic.replayUnlock ? vic.portalIndex + 1 : -1;
+
+  for (let i = 0; i < zonesCount; i++) {
+    const ring = Math.floor(i / PER_RING);
+    const inRing = i % PER_RING;
+    const ringSize = Math.min(PER_RING, zonesCount - ring * PER_RING);
+    const radius = 20 + ring * 12;
+    // Anneaux décalés d'un demi-pas : les portails du fond ne sont pas masqués
+    // par ceux du premier rang.
+    const ang = (inRing / ringSize) * Math.PI * 2 + (ring % 2 ? Math.PI / ringSize : 0);
+    // L'île est tirée au sort : le rayon nominal peut tomber dans un trou ou
+    // hors silhouette. On se rapproche du centre jusqu'à trouver du sol.
+    // 3.2 de dégagement : la largeur de l'arche (3,9) plus de quoi la franchir.
+    const spot = findSolidSpot(Math.sin(ang), Math.cos(ang), radius, 3.2);
+    const px = spot.x, pz = spot.z;
+
+    let pState = getCountryPortalState(iso, i);
+    if (i === rewindIdx) pState = 'unlocked';
+    else if (i === nextIdx && pState === 'unlocked') pState = 'locked';
+
+    const pMesh = createPortalMesh({
+      id: i,
+      x: px,
+      z: pz,
+      state: pState,
+      biomeKey,
+      cultColor: colorStr,
+      label: overworldCtx.regions?.[i]?.name || `Zone ${i + 1}`,
+      /* Un jeu de matériaux par portail : chacun anime sa propre montée de
+         peinture au moment de sa conquête. */
+      paintWallMat: makePortalPaintMaterial(colorStr),
+      paintWallIdleMat: makePortalPaintMaterial(PORTAL_IDLE_PAINT),
+    });
+    // Posé sur le relief, et tourné vers le centre du Hub : on voit l'arche de
+    // face en arrivant depuis l'autel.
+    pMesh.position.y = groundY(px, pz) || 0;
+    pMesh.rotation.y = Math.atan2(-px, -pz);
+    scene.add(pMesh);
+    mapObjects.push(pMesh);
+    overworldPortals.push(pMesh);
+    overworldZonePortals[i] = pMesh;
+  }
+
+  // 4. Esprits sauvages récoltables
+  const spiritMat = new THREE.MeshStandardMaterial({
+    color: 0xffea77,
+    emissive: 0xffaa00,
+    emissiveIntensity: 0.8,
+    roughness: 0.2,
+  });
+  const sGeo = new THREE.SphereGeometry(0.35, 12, 8);
+  for (let i = 0; i < 5; i++) {
+    const sMesh = new THREE.Mesh(sGeo, spiritMat);
+    respawnWildSpirit(sMesh);
+    scene.add(sMesh);
+    mapObjects.push(sMesh);
+    overworldSpirits.push(sMesh);
+  }
+
+  // 5. Villageois pacifiques : les VRAIS modèles de la foule (paysan, paysanne,
+  //    chevalier), pris dans les InstancedMesh VAT déjà chargés — donc animés,
+  //    contourés et gratuits en draw calls. On leur réserve des ids dont la
+  //    variante est un villageois PNJ (cf. CROWD_VARIANT).
+  for (const m of crowds) {
+    for (let i = 0; i < m.userData.slots; i++) m.setMatrixAt(i, ZERO_M);
+    if (m.instanceMatrix) m.instanceMatrix.needsUpdate = true;
+  }
+
+  const HUB_VILLAGER_SLOTS = [0, 6, 12, 18, 24];   // places PNJ d'un cycle
+  let maxVillagerId = 0;
+  for (let i = 0; i < HUB_VILLAGERS; i++) {
+    const id = Math.floor(i / HUB_VILLAGER_SLOTS.length) * CROWD_CYCLE
+      + HUB_VILLAGER_SLOTS[i % HUB_VILLAGER_SLOTS.length];
+    maxVillagerId = Math.max(maxVillagerId, id);
+    const ang = Math.random() * Math.PI * 2;
+    const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 6 + Math.random() * 18);
+    overworldVillagers.push({
+      id, x: p.x, z: p.z, face: Math.random() * Math.PI * 2,
+      tx: p.x, tz: p.z, spd: 0,
+      speed: 1.3 + Math.random() * 1.1,
+      pause: Math.random() * 4,
+    });
+    setAgentColor(id, GRAY);   // untinted → texture d'origine du modèle
+  }
+  trimCrowdCounts(maxVillagerId + 1);
+
+  const leader = factions[0].leader;
+
+  // Au retour d'une victoire, on réapparaît DEVANT le portail qu'on vient de
+  // conquérir : le joueur voit sa peinture s'étaler au lieu de la découvrir.
+  if (pendingHubVictory) {
+    const conquered = overworldZonePortals[pendingHubVictory.portalIndex];
+    if (conquered) {
+      const toCenter = Math.hypot(conquered.position.x, conquered.position.z) || 1;
+      leader.x = conquered.position.x * (1 - 6 / toCenter);
+      leader.z = conquered.position.z * (1 - 6 / toCenter);
+      leader.face = Math.atan2(conquered.position.x - leader.x, conquered.position.z - leader.z);
+      f_placeLeaderMesh(factions[0], leader);
+    }
+  }
+
+  camera.position.set(leader.x, 18, leader.z + 24);
+  camera.lookAt(leader.x, 1, leader.z);
+
+  updateOverworldHud(iso);
+
+  if (pendingHubVictory) {
+    scheduleVictoryCelebration(pendingHubVictory, colorStr, iso);
+    pendingHubVictory = null;
+  } else {
+    banner(`🚩 Hub Overworld : ${overworldCtx.world?.name || 'Vallée'}`);
+  }
+}
+
+/** Positionne le mesh du leader sur le terrain (partagé hub / célébration). */
+function f_placeLeaderMesh(f, leader) {
+  if (!f.grp) return;
+  f.grp.position.set(leader.x, groundY(leader.x, leader.z) || 0, leader.z);
+  f.grp.rotation.y = leader.face || 0;
+}
+
+/**
+ * Enchaîne la séquence de conquête : peinture du portail gagné, puis
+ * effondrement de l'obstacle du portail suivant.
+ */
+function scheduleVictoryCelebration(vic, cultColor, iso) {
+  const conquered = overworldZonePortals[vic.portalIndex];
+  const next = overworldZonePortals[vic.portalIndex + 1];
+
+  banner(`🎨 Zone ${vic.portalIndex + 1} conquise ! +${vic.spirits} esprits`);
+
+  if (vic.replayPaint) {
+    setTimeout(() => {
+      if (state !== 'overworld') return;
+      if (conquered) setPortalState(conquered, 'won', { animate: true, cultColor });
+      soundEngine.playSFX('boost');
+      updateOverworldHud(iso);
+    }, 600);
+  }
+
+  setTimeout(() => {
+    if (state !== 'overworld') return;
+    if (vic.replayUnlock && next && next.userData.state === 'locked') {
+      setPortalState(next, 'unlocked', { animate: true, cultColor });
+      soundEngine.playSFX('boost');
+      banner(`🔓 Zone ${vic.portalIndex + 2} déverrouillée !`);
+    } else if (!next) {
+      banner(`👑 Toutes les zones de ${overworldCtx?.world?.name || 'ce pays'} sont conquises !`);
+    }
+  }, 1900);
+}
+
+/** Bandeau permanent du Hub : zones conquises + esprits. */
+function updateOverworldHud(iso) {
+  const el = $('overworld-hud');
+  if (!el) return;
+  const isoKey = iso || overworldCtx?.world?.iso || 'FRA';
+  let won = 0;
+  for (let i = 0; i < OVERWORLD_ZONES; i++) {
+    if (getCountryPortalState(isoKey, i) === 'won') won++;
+  }
+  el.innerHTML =
+    `<span class="ow-region">${overworldCtx?.world?.name || 'Hub'}</span>`
+    + `<span class="ow-sep"></span>`
+    + `<span class="ow-stat">✨ <b>${getSpiritsCount()}</b></span>`
+    + `<span class="ow-sep"></span>`
+    + `<span class="ow-stat">🚩 <b>${won}</b>/${OVERWORLD_ZONES}</span>`;
+  el.classList.remove('hidden');
+}
+
+function updateOverworld(dt) {
+  if (state !== 'overworld' || !factions.length || !factions[0].leader) return;
+
+  // `elapsed` n'avance que dans update() : sans ça, orbes, anneaux et colonnes
+  // de lumière des portails restaient figés dans le Hub.
+  elapsed += dt;
+
+  applyDayCycle(DAY_FIXED);
+  const f = factions[0];
+  const leader = f.leader;
+
+  // Déplacement du Leader
+  let dx = input.x, dz = input.z;
+  if (keys.KeyW || keys.ArrowUp) dz -= 1;
+  if (keys.KeyS || keys.ArrowDown) dz += 1;
+  if (keys.KeyA || keys.ArrowLeft) dx -= 1;
+  if (keys.KeyD || keys.ArrowRight) dx += 1;
+
+  const len = Math.hypot(dx, dz);
+  if (len > 1) { dx /= len; dz /= len; }
+
+  /* Boost : rigoureusement le même modèle qu'en partie — `boostT` décompté ici,
+     multiplicateur BOOST_MULT sur la vitesse cible, et surtout la MÊME inertie
+     (dx/dz lissés à LEADER_RESP) qui donne le coup de reins. Maj le maintient
+     tant qu'elle est enfoncée ; le bouton relance la poussée à volonté. */
+  f.boostT = Math.max(0, (f.boostT || 0) - dt);
+  if (keys.ShiftLeft || keys.ShiftRight) f.boostT = Math.max(f.boostT, dt * 2);
+  const boosting = f.boostT > 0;
+  boostBtn.classList.toggle('boosting', boosting);
+
+  const sp = OVERWORLD_WALK_SPD * (boosting ? BOOST_MULT : 1);
+
+  leader.dx += (dx * sp - leader.dx) * Math.min(1, dt * LEADER_RESP);
+  leader.dz += (dz * sp - leader.dz) * Math.min(1, dt * LEADER_RESP);
+
+  leader.x += leader.dx * dt;
+  leader.z += leader.dz * dt;
+
+  /* Bords et trous : on délègue au MÊME solveur que la partie. Le test
+     « ce point est-il solide ? » que le Hub utilisait avant ne regardait que le
+     centre du perso, ce qui le laissait marcher au-dessus du vide dès qu'il
+     dépassait l'arête d'une tuile. resolveIsland tient compte du rayon, ramène
+     au dernier point sûr, et gère le saut de brèche. */
+  resolveIsland(island, leader, leader.dx, leader.dz, dt, true);
+
+  // Vitesse au sol réelle : c'est elle qui pilote le fondu des gaits.
+  leader.spd = Math.hypot(leader.dx, leader.dz);
+
+  if (len > 0) {
+    // Rotation amortie sur le plus court chemin : le perso pivote au lieu de
+    // claquer d'un cap à l'autre.
+    const want = Math.atan2(dx, dz);
+    let d = want - (leader.face || 0);
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    leader.face = (leader.face || 0) + d * Math.min(1, dt * 12);
+  }
+
+  // Placement mesh Leader — `leader.y` vient de resolveIsland : il porte le
+  // relief ET l'arc d'un éventuel saut de brèche.
+  if (f.grp) {
+    f.grp.position.set(leader.x, leader.y || 0, leader.z);
+    f.grp.rotation.y = leader.face || 0;
+
+    // Locomotion riggée : même fondu marche / course / sprint qu'en match, la
+    // cadence du clip étant calée sur la vitesse au sol.
+    const g = f.grp;
+    if (g.userData.gaits && g.userData.mixer) {
+      const sp = leader.spd || 0;
+      const gi = sp < MONK_GAIT_SPLITS[0] ? 0 : sp < MONK_GAIT_SPLITS[1] ? 1 : 2;
+      const k = Math.min(1, dt * 6);
+      for (let i = 0; i < g.userData.gaits.length; i++) {
+        const gait = g.userData.gaits[i];
+        if (!gait) continue;
+        const w = gait.action.getEffectiveWeight();
+        gait.action.setEffectiveWeight(w + ((i === gi ? 1 : 0) - w) * k);
+        gait.action.timeScale = Math.min(1.6, sp / gait.ref);
+      }
+      g.userData.mixer.update(dt);
+    }
+    // Cristal du culte au-dessus de la tête : il tourne aussi dans le Hub.
+    if (g.userData.crystal) {
+      g.userData.crystal.rotation.y += dt * 2.5;
+      g.userData.crystal.position.y = 1.1 + Math.sin(elapsed * 4) * 0.05;
+    }
+  }
+
+  // Caméra suit le personnage en 3D
+  camera.position.set(leader.x, 18, leader.z + 22);
+  camera.lookAt(leader.x, 1.2, leader.z);
+
+  // Villageois pacifiques : marche vers un point, pause, puis nouveau point.
+  // Ils ne fuient personne — c'est un village, pas une partie.
+  for (const v of overworldVillagers) {
+    let moving = false;
+    if (v.pause > 0) {
+      v.pause -= dt;
+    } else {
+      const vdx = v.tx - v.x, vdz = v.tz - v.z;
+      const d = Math.hypot(vdx, vdz);
+      if (d < 0.4) {
+        // Nouvelle flânerie : un point solide tiré ailleurs sur l'île.
+        const ang = Math.random() * Math.PI * 2;
+        const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 5 + Math.random() * 18);
+        v.tx = p.x; v.tz = p.z;
+        v.pause = 1 + Math.random() * 3.5;
+      } else {
+        const step = Math.min(d, v.speed * dt);
+        const nvx = v.x + (vdx / d) * step;
+        const nvz = v.z + (vdz / d) * step;
+        /* La ligne droite vers la destination peut traverser un trou : on
+           refuse le pas et on choisit une autre flânerie plutôt que de laisser
+           le villageois marcher au-dessus du vide. */
+        if (!isSolid(island, nvx, nvz)) {
+          const ang = Math.random() * Math.PI * 2;
+          const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 5 + Math.random() * 18);
+          v.tx = p.x; v.tz = p.z;
+          v.pause = 0.4 + Math.random();
+          continue;
+        }
+        v.x = nvx;
+        v.z = nvz;
+        // Pivot amorti, sinon le villageois claque d'un cap à l'autre au
+        // moment où il choisit sa prochaine destination.
+        let da = Math.atan2(vdx, vdz) - v.face;
+        while (da > Math.PI) da -= Math.PI * 2;
+        while (da < -Math.PI) da += Math.PI * 2;
+        v.face += da * Math.min(1, dt * 8);
+        moving = true;
+      }
+    }
+    // La vitesse pilote le cycle de marche du VAT (Y de l'attribut d'anim).
+    v.spd += ((moving ? v.speed : 0) - v.spd) * Math.min(1, dt * 8);
+
+    const cm = crowdOf(v.id), sl = slotOf(v.id);
+    if (!cm) continue;
+    tmpQ.setFromAxisAngle(UP_AXIS, v.face);
+    tmpS.set(1, 1, 1);
+    tmpP.set(v.x, groundY(v.x, v.z) || 0, v.z);
+    tmpM.compose(tmpP, tmpQ, tmpS);
+    cm.setMatrixAt(sl, tmpM);
+    cm.instanceMatrix.needsUpdate = true;
+    if (cm.userData.anim) {
+      cm.userData.anim.setY(sl, v.spd);
+      cm.userData.anim.needsUpdate = true;
+    }
+  }
+
+  // Portails & Détections
+  activeOverworldTrigger = updatePortalsSystem(overworldPortals, dt, elapsed, leader);
+
+  // Esprits sauvages récoltables au contact
+  for (let i = 0; i < overworldSpirits.length; i++) {
+    const s = overworldSpirits[i];
+    s.rotation.y += dt * 2;
+    s.position.y = (s.userData.baseY || 1.2) + Math.sin(elapsed * 3 + i) * 0.25;
+
+    const dist = Math.hypot(leader.x - s.position.x, leader.z - s.position.z);
+    if (dist < 1.4) {
+      addSpirits(1);
+      soundEngine.playSFX('boost');
+      updateOverworldHud();
+      respawnWildSpirit(s);
+    }
+  }
+
+  // Invite contextuelle : rien à l'écran tant qu'on n'est pas à portée.
+  if (!activeOverworldTrigger) {
+    setOverworldPrompt(null);
+  } else {
+    if (activeOverworldTrigger.isAltar) {
+      setOverworldPrompt('🏛️ Autel des Compétences', ACTION_HINT);
+      if (keys.KeyE || keys.KeyF) {
+        keys.KeyE = keys.KeyF = false;
+        audioInit();
+        closeOverworldHud();
+        openProgression({ view: 'skills' });
+      }
+    } else if (activeOverworldTrigger.isPlanetPortal) {
+      setOverworldPrompt('🌍 Grand Portail', ACTION_HINT + ' — Vue Planète');
+      if (keys.KeyE || keys.KeyF) {
+        keys.KeyE = keys.KeyF = false;
+        audioInit();
+        closeOverworldHud();
+        openProgression({ view: 'globe' });
+      }
+    } else if (activeOverworldTrigger.id != null) {
+      const pId = activeOverworldTrigger.id;
+      const pState = activeOverworldTrigger.state;
+      const pName = activeOverworldTrigger.label || `Zone ${pId + 1}`;
+      if (pState === 'locked') {
+        setOverworldPrompt(`🔒 ${pName}`, 'Conquérez la zone précédente pour briser le sceau', true);
+      } else if (pState === 'unlocked' || pState === 'won') {
+        setOverworldPrompt(
+          `${pState === 'won' ? '🎨' : '✨'} ${pName}${pState === 'won' ? ' — conquise' : ''}`,
+          ACTION_HINT,
+        );
+        /* Franchir l'arche lance la partie : c'est le geste du concept — on
+           entre dans le portail, on n'appuie pas sur un bouton devant. E reste
+           disponible pour ceux qui préfèrent valider explicitement. */
+        const pm = overworldZonePortals[pId];
+        const inGate = pm && Math.hypot(leader.x - pm.position.x, leader.z - pm.position.z) < 1.5;
+        if (inGate || keys.KeyE || keys.KeyF) {
+          keys.KeyE = keys.KeyF = false;
+          launchPortalMatch(pId);
+        }
+      }
+    }
+  }
+}
+
+function launchPortalMatch(portalIndex) {
+  conquestPortalIdx = portalIndex;
+  audioInit();
+  closeOverworldHud();
+  $('start').classList.add('hidden');
+  $('end').classList.add('hidden');
+  // Le portail EST le choix de zone : on demande à la progression de monter le
+  // contexte de la province correspondante, ce qui rappelle setPlayHandler().
+  if (overworldCtx?.launchZone) overworldCtx.launchZone(portalIndex);
+  else startGame();
+}
+
+/** Rend le HUD de match : on quitte le mode Hub. */
+function closeOverworldHud() {
+  const el = $('overworld-hud');
+  if (el) el.classList.add('hidden');
+  const p = $('overworld-prompt');
+  if (p) { p.classList.remove('show'); p.classList.add('hidden'); p.dataset.html = ''; }
+  boostBtn.classList.remove('boosting');
+  $('hud').classList.remove('overworld-mode');
+}
+
 function resetGame() {
   skillMods = getSkillMods();
   // purge
@@ -4687,6 +5800,11 @@ function resetGame() {
   worldMods.bombDroughtT = 0;
   worldMods.grayPanicT = 0;
   worldMods.zealT = 0;
+  worldMods.timeRushT = 0;
+  worldMods.timeRushMul = 1;
+  worldMods.blackoutT = 0;
+  worldMods.blackoutMax = 0;
+  resetHazardCards();
   netStatsT = 0;
   stats = { conv: 0, peak: 1, kills: 0, bestStreak: 0 };
   streak = 0; streakT = 0; rallyCd = 0; rallyT = 0;
@@ -4704,6 +5822,7 @@ function resetGame() {
   clearWebs();
   clearFx();
   clearPaint();
+  paintMesh.visible = true;   // le Hub la masque : une partie la remet en jeu
   for (const b of bombs) scene.remove(b.grp);
   bombs.length = 0;
   bombT = 1;   // le stock permanent se remplit dès les premières secondes
@@ -4978,14 +6097,29 @@ function endGame(forced) {
       : `${winnerName} a déposé 60 esprits au sanctuaire avant vous.`;
     btnRetry.textContent = 'Quitter la session';
     btnBack.classList.add('hidden');
-    $('btn-end-lobby').classList.toggle('hidden', !net.isHost());
   } else if (isCamp) {
+    const spiritsEarned = Math.max(5, Math.round((mine ? mine.pct : 10) * 0.4));
+    if (victory) {
+      const campIso = conquest.world?.iso || 'FRA';
+      // On relève l'état AVANT enregistrement : c'est lui qu'on rejouera dans le
+      // Hub, pour ne pas re-verrouiller une zone déjà conquise lors d'un rejeu.
+      const wasFirstWin = getCountryPortalState(campIso, conquestPortalIdx) !== 'won';
+      const nextWasLocked = getCountryPortalState(campIso, conquestPortalIdx + 1) === 'locked';
+      recordPortalVictory(campIso, conquestPortalIdx, spiritsEarned);
+      // Consommée au retour dans le Hub pour jouer la séquence de conquête.
+      pendingHubVictory = {
+        portalIndex: conquestPortalIdx,
+        spirits: spiritsEarned,
+        replayPaint: wasFirstWin,
+        replayUnlock: nextWasLocked,
+      };
+    }
     $('endTitle').textContent = victory ? 'Zone Conquise !' : 'Défaite';
     $('endSub').textContent = victory
-      ? `Votre sanctuaire est le premier à réunir 60 esprits dorés !`
-      : `Le Culte « ${winnerName} » a réuni 60 esprits dorés avant vous.`;
-    btnRetry.textContent = victory ? 'Retour à la Carte' : 'Réessayer';
-    btnBack.classList.toggle('hidden', victory);
+      ? `Votre sanctuaire s'empare du portail ! (+${spiritsEarned} esprits)`
+      : `Le Culte « ${winnerName} » s'est imposé sur la zone.`;
+    btnRetry.textContent = 'Retour au Hub 3D';
+    btnBack.classList.add('hidden');
   } else {
     $('endTitle').textContent = victory ? 'Victoire !' : 'Défaite';
     $('endSub').textContent = victory
@@ -5064,6 +6198,11 @@ const worldMods = {
   bombDroughtT: 0,
   grayPanicT: 0,
   zealT: 0,
+  /* Cartes hasard — effets de monde */
+  timeRushT: 0,
+  timeRushMul: 1,
+  blackoutT: 0,
+  blackoutMax: 0,
 };
 
 function bombCapNow() {
@@ -5129,6 +6268,283 @@ function updateBombs(dt) {
   }
 }
 
+/* ============================== Cartes hasard ==============================
+   Une carte tourne sur elle-même sur la carte ; le premier Leader qui la touche
+   déclenche un effet inconnu. Voir sim/cards.js pour le deck et le rythme.
+
+   La carte est VISIBLE DE LOIN (colonne de lumière + halo au sol) : elle ne doit
+   jamais se gagner par hasard en passant à côté. Tout l'intérêt est que les six
+   cultes la voient en même temps et décident, chacun, si le détour vaut le
+   risque — c'est ce qui en fait un point de rendez-vous conflictuel. */
+
+let hazardCard = null;      // { x, z, grp, spin, bob, beam, glow }
+let cardSchedule = [];      // créneaux d'apparition (s depuis le coup d'envoi)
+let cardNext = 0;           // index du prochain créneau
+const cardHistory = [];     // ids déjà sortis, pour dépondérer les répétitions
+
+/* Face de la carte : dessinée au canvas, pas d'asset à produire. Un « ? » sur un
+   fond violet — même dos pour toutes, puisque le contenu doit rester secret. */
+let _cardTex = null;
+function cardTexture() {
+  if (_cardTex) return _cardTex;
+  const cv = document.createElement('canvas');
+  cv.width = 256; cv.height = 360;
+  const c = cv.getContext('2d');
+  const g = c.createLinearGradient(0, 0, 0, 360);
+  g.addColorStop(0, '#3b1d6e');
+  g.addColorStop(0.5, '#6d28d9');
+  g.addColorStop(1, '#2e1065');
+  c.fillStyle = g;
+  c.fillRect(0, 0, 256, 360);
+  c.strokeStyle = '#fbbf24';
+  c.lineWidth = 10;
+  c.strokeRect(14, 14, 228, 332);
+  c.font = 'bold 190px system-ui, sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillStyle = 'rgba(0,0,0,0.35)';
+  c.fillText('?', 132, 192);
+  c.fillStyle = '#fde68a';
+  c.fillText('?', 128, 186);
+  _cardTex = new THREE.CanvasTexture(cv);
+  _cardTex.colorSpace = THREE.SRGBColorSpace;
+  return _cardTex;
+}
+
+function spawnHazardCard() {
+  if (hazardCard || !island) return false;
+
+  /* Loin de tout Leader : une carte qui naît sous les pieds de quelqu'un lui est
+     offerte, alors qu'elle doit se disputer. */
+  let pt = null;
+  for (let tries = 0; tries < 20; tries++) {
+    const p = islandRandomPoint(island, 6, Infinity);
+    if (!p) break;
+    const pz = p.z ?? p.y;
+    let far = true;
+    for (const f of factions) {
+      if (!f || !f.alive || !f.leader) continue;
+      if (Math.hypot(p.x - f.leader.x, pz - f.leader.z) < CARD_MIN_D) { far = false; break; }
+    }
+    pt = { x: p.x, z: pz };
+    if (far) break;
+  }
+  if (!pt) return false;
+
+  const y = groundY(pt.x, pt.z);
+  const grp = new THREE.Group();
+  grp.position.set(pt.x, y, pt.z);
+
+  const tex = cardTexture();
+  const face = new THREE.Mesh(
+    new THREE.BoxGeometry(1.5, 2.1, 0.09),
+    [
+      new THREE.MeshBasicMaterial({ color: 0x4c1d95 }),  // tranches
+      new THREE.MeshBasicMaterial({ color: 0x4c1d95 }),
+      new THREE.MeshBasicMaterial({ color: 0x4c1d95 }),
+      new THREE.MeshBasicMaterial({ color: 0x4c1d95 }),
+      new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+      new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }),
+    ],
+  );
+  face.position.y = 1.9;
+  grp.add(face);
+
+  /* Colonne de lumière : même code visuel que les sanctuaires, parce que c'est
+     la même promesse — « il se passe quelque chose ici ». */
+  const beam = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.5, 0.95, 30, 12, 1, true),
+    new THREE.MeshBasicMaterial({
+      color: 0xa78bfa, transparent: true, opacity: 0.4, depthWrite: false,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending, toneMapped: false,
+    }));
+  beam.position.y = 15;
+  grp.add(beam);
+
+  const glow = new THREE.Mesh(
+    new THREE.PlaneGeometry(8, 8).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({
+      map: lampGlowTex, color: 0xc4b5fd, transparent: true, opacity: 0.85,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    }));
+  glow.position.y = 0.08;
+  glow.renderOrder = 2;
+  grp.add(glow);
+
+  scene.add(grp);
+  hazardCard = { x: pt.x, z: pt.z, grp, face, beam, glow, spin: 0, age: 0 };
+
+  banner('❓ Une carte mystère est apparue !');
+  spawnShock(pt.x, pt.z, new THREE.Color(0xa78bfa), 7, 1.1);
+  soundEngine.playSFX('bell', { volume: 0.6 });
+  return true;
+}
+
+function removeHazardCard() {
+  if (!hazardCard) return;
+  scene.remove(hazardCard.grp);
+  disposeGroup(hazardCard.grp);
+  hazardCard = null;
+}
+
+/** Remise à zéro entre deux parties : nouveau calendrier, nouveau jitter. */
+function resetHazardCards() {
+  removeHazardCard();
+  hideCardBanner();
+  cardSchedule = buildCardSchedule();
+  cardNext = 0;
+  cardHistory.length = 0;
+}
+
+/* ---- Envol de la carte ----
+   Le ramassage n'applique RIEN tout de suite : la carte s'arrache du sol, part
+   en vrille de plus en plus vite et monte, puis éclate. C'est seulement à
+   l'éclatement que l'effet tombe et que le bandeau s'affiche.
+
+   Ce délai est le cœur de l'effet : il crée la seconde de suspense qui manquait
+   — on a pris la carte, on ne sait pas encore ce qu'on a pris — et il donne au
+   joueur un point de fixation, de sorte que le bandeau ne surgit pas de nulle
+   part. Un tiers de seconde de plus, et ce serait une attente ; ici c'est une
+   respiration. */
+const CARD_FLIGHT_T = 0.85;
+
+function takeHazardCard(f) {
+  /* Le tirage se fait MAINTENANT, pour que les prises soient impossibles à
+     départager après coup, mais il reste secret jusqu'à l'éclatement. */
+  const c = pickCard(Math.random, cardHistory);
+  cardHistory.push(c.id);
+  hazardCard.taking = { t: 0, card: c, f };
+  hazardCard.beam.visible = false;
+  soundEngine.playSFX('bell', { volume: 0.5, rate: 1.4 });
+}
+
+/** Fin de l'envol : l'effet tombe et le bandeau l'annonce. */
+function resolveHazardCard() {
+  const { card: c, f } = hazardCard.taking;
+  const x = hazardCard.x, z = hazardCard.z;
+  removeHazardCard();
+
+  spawnShock(x, z, f.color, 11, 0.9);
+  explodeShrine(x, z, f.color, f.css, f.team);
+  shake = Math.max(shake, f.i === 0 ? 0.45 : 0.2);
+
+  applyCard(c, cardCtx, f);
+
+  /* SEUL cas où la partie s'arrête : une conséquence COLLECTIVE. Tout le monde
+     la subit, donc tout le monde doit avoir le temps de la lire — cinq à six
+     secondes, carte plein écran. Un effet individuel, lui, ne concerne qu'un
+     joueur : figer les cinq autres pour le lui annoncer leur volerait du temps
+     de jeu sans rien leur apprendre d'utile. Ceux-là passent par le bandeau,
+     qui se lit d'un coup d'œil sans rien interrompre. */
+  if (c.scope === 'all') {
+    beginEventCard(c, { instant: true, dur: c.major ? 6 : 5 });
+    shake = Math.max(shake, c.major ? 0.5 : 0.35);
+  } else {
+    showCardBanner(c, f);
+    soundEngine.playEventReveal?.(c.tone);
+  }
+}
+
+/* ---- Bandeau d'annonce (effets INDIVIDUELS uniquement) ----
+   Gros titre + une ligne d'explication, la couleur donnant le verdict avant même
+   la lecture. Il ne met rien en pause : un effet qui ne touche qu'un joueur ne
+   justifie pas d'immobiliser les autres. Les conséquences collectives, elles,
+   passent par la carte plein écran — voir resolveHazardCard. */
+const cardBannerEl = () => $('card-banner');
+let cardBannerT = 0;
+
+function showCardBanner(c, f) {
+  const el = cardBannerEl();
+  if (!el) return;
+  const mine = f.i === 0;
+
+  /* Le bandeau annonce ce que ça fait AU JOUEUR, pas la nature de la carte dans
+     l'absolu (voir bannerTone). */
+  const tone = bannerTone(c, mine);
+
+  const titleEl = $('card-banner-title');
+  const textEl = $('card-banner-text');
+  if (titleEl) titleEl.textContent = `${c.icon} ${c.title}`;
+  if (textEl) textEl.textContent = mine ? c.blurb : `Culte ${f.cult.name} — ${c.blurb}`;
+
+  el.classList.remove('hidden', 'tone-good', 'tone-bad', 'tone-chaos', 'show');
+  el.classList.add('tone-' + tone);
+  /* Forcer un reflow : sans ça, retirer puis remettre `show` dans le même tick
+     ne rejoue pas la transition, et deux cartes rapprochées n'en animeraient
+     qu'une. */
+  void el.offsetWidth;
+  el.classList.add('show');
+  /* Assez pour lire deux lignes sans quitter l'action des yeux : le jeu continue
+     pendant ce temps, la durée est donc un compromis, pas un confort. */
+  cardBannerT = 2.8;
+}
+
+function updateCardBanner(dt) {
+  if (cardBannerT <= 0) return;
+  cardBannerT -= dt;
+  if (cardBannerT > 0) return;
+  const el = cardBannerEl();
+  if (el) el.classList.remove('show');
+}
+
+function hideCardBanner() {
+  cardBannerT = 0;
+  const el = cardBannerEl();
+  if (el) el.classList.remove('show');
+}
+
+function updateHazardCards(dt) {
+  updateCardBanner(dt);
+
+  if (hazardCard) {
+    const h = hazardCard;
+    h.age += dt;
+
+    /* -- Envol : vrille accélérée + montée, puis éclatement -- */
+    if (h.taking) {
+      h.taking.t += dt;
+      const u = Math.min(1, h.taking.t / CARD_FLIGHT_T);
+      /* Vitesse de rotation en u² : le départ reste lisible, la fin part en
+         toupie. Une accélération linéaire se lit comme un objet qui glisse. */
+      h.spin += dt * (5 + 46 * u * u);
+      h.face.rotation.y = h.spin;
+      h.face.rotation.z = u * u * 1.5;
+      /* Montée franche qui décélère : la carte semble jetée en l'air, pas
+         soulevée par un ascenseur. */
+      h.face.position.y = 1.9 + (1 - (1 - u) * (1 - u)) * 7.5;
+      h.face.scale.setScalar(1 + u * 0.5);
+      h.glow.material.opacity = 0.85 * (1 - u);
+      if (h.taking.t >= CARD_FLIGHT_T) resolveHazardCard();
+      return;
+    }
+
+    h.spin += dt * 1.15;
+    h.face.rotation.y = h.spin;
+    /* Flottement et respiration du halo : une carte parfaitement immobile se
+       lit comme un élément de décor. */
+    h.face.position.y = 1.9 + Math.sin(h.age * 1.9) * 0.22;
+    h.glow.material.opacity = 0.6 + Math.sin(h.age * 3.1) * 0.25;
+    h.beam.material.opacity = 0.3 + Math.sin(h.age * 2.2) * 0.12;
+
+    for (const f of factions) {
+      if (!f || !f.alive || !f.leader) continue;
+      if (Math.hypot(f.leader.x - h.x, f.leader.z - h.z) > CARD_PICK_R) continue;
+      takeHazardCard(f);
+      break;
+    }
+    /* Une carte non ramassée bloque la suivante : il n'y en a jamais deux à la
+       fois. Le créneau manqué n'est pas perdu pour autant — la carte suivante
+       sortira dès que celle-ci aura trouvé preneur. */
+    return;
+  }
+
+  if (cardNext >= cardSchedule.length) return;
+  if (elapsed < cardSchedule[cardNext]) return;
+  /* Le créneau est consommé même si la pose échoue faute de point valable :
+     `spawnHazardCard` réessaiera au tick suivant tant que l'index n'avance pas. */
+  if (spawnHazardCard()) cardNext++;
+}
+
 /* ============================== Cartes événement ============================== */
 const eventsFired = new Set();
 let eventShow = null; // { phase, t, pick, flashAcc }
@@ -5179,9 +6595,26 @@ function paintEventCard(ev) {
   if (blurbEl) blurbEl.textContent = ev.blurb || '';
 }
 
-function beginEventCard(ev) {
+/**
+ * Ouvre la carte plein écran, jeu en pause.
+ *
+ * `opts.instant` : saute la roulette et affiche directement le résultat. C'est
+ * le mode des cartes hasard COLLECTIVES — l'effet est déjà appliqué quand on
+ * arrive ici, la carte ne fait que l'annoncer. Faire tourner une roulette après
+ * coup mentirait sur le moment où le sort a été joué.
+ * `opts.dur` : durée de la pause.
+ */
+function beginEventCard(ev, opts = {}) {
+  const instant = !!opts.instant;
   eventFreeze = true;
-  eventShow = { phase: 'spin', t: 0, pick: ev, flashAcc: 0 };
+  eventShow = {
+    phase: instant ? 'reveal' : 'spin',
+    t: 0, pick: ev, flashAcc: 0,
+    /* En mode instant, l'appelant a déjà appliqué l'effet : la phase reveal ne
+       doit pas le rejouer. */
+    applied: instant,
+    revealDur: opts.dur || EVENT_REVEAL_DUR,
+  };
   const overlay = eventOverlayEl();
   const card = eventCardEl();
   const shockwave = eventShockwaveEl();
@@ -5192,11 +6625,16 @@ function beginEventCard(ev) {
 
   if (overlay) overlay.classList.remove('hidden');
   if (card) {
-    card.classList.remove('is-landing', 'is-reveal');
-    card.classList.add('is-spinning');
+    card.classList.remove('is-spinning', 'is-landing', 'is-reveal');
+    card.classList.add(instant ? 'is-reveal' : 'is-spinning');
   }
-  paintEventCard(EVENT_DECK[Math.floor(Math.random() * EVENT_DECK.length)]);
-  soundEngine.playSFX('convert', { volume: 0.35, rate: 0.7 });
+  paintEventCard(instant ? ev : EVENT_DECK[Math.floor(Math.random() * EVENT_DECK.length)]);
+  if (instant) {
+    if (shockwave) shockwave.classList.add('trigger');
+    soundEngine.playEventReveal?.(ev.tone);
+  } else {
+    soundEngine.playSFX('convert', { volume: 0.35, rate: 0.7 });
+  }
 }
 
 function endEventCard(silent = false) {
@@ -5348,6 +6786,165 @@ const eventCtx = {
   },
 };
 
+/* ---- Effets propres aux cartes hasard ----
+   Le contexte des cartes ÉTEND celui des événements : la moitié des effets
+   collectifs (zèle, panique, téléportation, lessivage…) existaient déjà et sont
+   repris tels quels. Seuls les effets individuels — ceux qui frappent le
+   ramasseur et lui seul — sont nouveaux ; c'est eux qui font du ramassage un
+   pari, puisqu'ils peuvent aussi bien lui coûter son cortège. */
+const cardCtx = {
+  ...eventCtx,
+
+  /* -- Individuel : bénéfique -- */
+  giftSpirits(f, n = 5) {
+    /* De VRAIS esprits, convertis sur place : gonfler `count` donnerait un
+       cortège fantôme, invisible et non livrable à un autel. */
+    let born = 0, guard = n * 6;
+    while (born < n && guard-- > 0) {
+      const a = Math.random() * Math.PI * 2;
+      const r = 2.5 + Math.random() * 3.5;
+      const ag = spawnAgent(f.leader.x + Math.cos(a) * r, f.leader.z + Math.sin(a) * r);
+      if (!ag) break;
+      finishConvert(ag, f);
+      born++;
+    }
+    spawnSoulBurst(f.leader.x, f.leader.z, f);
+  },
+  grantAltar(f) {
+    /* Le plus proche qui ne soit pas déjà à lui : offrir un autel qu'il tient
+       déjà ne serait pas un cadeau. */
+    let best = null, bestD = Infinity;
+    for (const a of altars) {
+      if (a.owner === f.i) continue;
+      const d = Math.hypot(a.x - f.leader.x, a.z - f.leader.z);
+      if (d < bestD) { bestD = d; best = a; }
+    }
+    if (!best) { cardCtx.giftSpirits(f, 4); return; }   // repli : aucun autel libre
+    activateAltar(best, f);
+  },
+  paintFervor(f, dur = 25, mul = 2) {
+    f.paintMulT = Math.max(f.paintMulT || 0, dur);
+    f.paintMul = Math.max(f.paintMul || 1, mul);
+  },
+  boostLeader(f, dur = 10) {
+    f.boostT = Math.max(f.boostT || 0, dur);
+  },
+  rapidFire(f, dur = 20, mul = 0.5) {
+    f.atkCdT = Math.max(f.atkCdT || 0, dur);
+    f.atkCdMul = Math.min(f.atkCdMul ?? 1, mul);
+  },
+  spiritCall(f, dur = 12) {
+    f.spiritCallT = Math.max(f.spiritCallT || 0, dur);
+  },
+  splashLeader(f, r = 14) {
+    stampSplash(f.leader.x, f.leader.z, r, f.team, f.css);
+    spawnShock(f.leader.x, f.leader.z, f.color, r * 0.9, 0.6);
+  },
+  stealAltarFromBest(f) {
+    /* Vise le culte qui tient le plus d'autels — la carte la plus agressive du
+       deck, et la seule qui frappe précisément le meneur. */
+    const held = new Map();
+    for (const a of altars) {
+      if (a.owner < 0 || a.owner === f.i) continue;
+      held.set(a.owner, (held.get(a.owner) || 0) + 1);
+    }
+    let victim = -1, most = 0;
+    for (const [owner, n] of held) if (n > most) { most = n; victim = owner; }
+    if (victim < 0) { cardCtx.grantAltar(f); return; }
+    let best = null, bestD = Infinity;
+    for (const a of altars) {
+      if (a.owner !== victim) continue;
+      const d = Math.hypot(a.x - f.leader.x, a.z - f.leader.z);
+      if (d < bestD) { bestD = d; best = a; }
+    }
+    if (best) activateAltar(best, f);
+  },
+
+  /* -- Individuel : néfaste -- */
+  loseAllSpirits(f) {
+    /* Ils redeviennent sauvages là où ils sont : le cortège se défait sous les
+       yeux du joueur, et ses rivaux peuvent le lui reprendre. Bien plus lisible
+       qu'une disparition sèche. */
+    let n = 0;
+    for (const a of agents) {
+      if (!a || a.dead || (a.followerOf ?? -1) !== f.i) continue;
+      _atkCtx.releaseFollower(a);
+      a.downT = Math.max(a.downT || 0, 0.6);
+      n++;
+    }
+    if (n) {
+      spawnShock(f.leader.x, f.leader.z, f.color, 12, 0.8);
+      shake = Math.max(shake, f.i === 0 ? 0.55 : 0.2);
+    }
+  },
+  loseAltar(f) {
+    const mine = altars.filter((a) => a.owner === f.i);
+    if (!mine.length) { cardCtx.loseAllSpirits(f); return; }   // repli : rien à perdre ici
+    const a = mine[(Math.random() * mine.length) | 0];
+    /* Même image que la reprise par un rival : la statue vole en éclats. Ce qui
+       change ici, c'est que personne ne la remplace. */
+    if (a.statue) shatterStatue(a, a.owner);
+    a.owner = -1;
+    a.filled = 0;
+    a.activeT = 0;
+    spawnShock(a.x, a.z, new THREE.Color(0x9aa2ad), 9, 1.0);
+    refreshAltarVisual(a);
+  },
+  stumbleLeader(f, dur = 6) {
+    f.downT = Math.max(f.downT || 0, 1.2);
+    f.slowT = Math.max(f.slowT || 0, dur);
+  },
+  wipePaintAround(f, r = 16) {
+    erasePaintAt(f.leader.x, f.leader.z, r);
+    spawnShock(f.leader.x, f.leader.z, new THREE.Color(0x9aa2ad), r, 0.7);
+  },
+  exileLeader(f) {
+    const pt = islandRandomPoint(island, 8, Infinity);
+    if (!pt) return;
+    const pz = pt.z ?? pt.y;
+    f.leader.x = pt.x; f.leader.z = pz;
+    f.leader.y = groundY(pt.x, pz);
+    f.leader.dx = 0; f.leader.dz = 0;
+    if (f.grp) f.grp.position.set(pt.x, f.leader.y, pz);
+    spawnShock(pt.x, pz, f.color, 8, 0.7);
+  },
+  doubleOrNothing(f) {
+    const mine = agents.filter((a) => a && !a.dead && (a.followerOf ?? -1) === f.i);
+    if (Math.random() < 0.5) {
+      cardCtx.giftSpirits(f, Math.max(3, mine.length));
+      banner(f.i === 0 ? '🎲 Double ! Votre cortège enfle.' : `🎲 Culte ${f.cult.name} : double !`);
+    } else {
+      cardCtx.loseAllSpirits(f);
+      banner(f.i === 0 ? '🎲 Perdu ! Votre cortège s\'évapore.' : `🎲 Culte ${f.cult.name} : tout perdu !`);
+    }
+  },
+
+  /* -- Collectif -- */
+  swapAllLeaders() {
+    const alive = factions.filter((f) => f && f.alive);
+    if (alive.length < 2) return;
+    const pos = alive.map((f) => ({ x: f.leader.x, z: f.leader.z }));
+    for (let i = 0; i < alive.length; i++) {
+      const src = pos[(i + 1) % alive.length];
+      const f = alive[i];
+      f.leader.x = src.x; f.leader.z = src.z;
+      f.leader.y = groundY(src.x, src.z);
+      f.leader.dx = 0; f.leader.dz = 0;
+      if (f.grp) f.grp.position.set(src.x, f.leader.y, src.z);
+      spawnShock(src.x, src.z, f.color, 6, 0.6);
+    }
+    shake = Math.max(shake, 0.5);
+  },
+  timeRush(dur = 30, mul = 2) {
+    worldMods.timeRushT = Math.max(worldMods.timeRushT, dur);
+    worldMods.timeRushMul = Math.max(worldMods.timeRushMul, mul);
+  },
+  blackout(dur = 18) {
+    worldMods.blackoutT = Math.max(worldMods.blackoutT, dur);
+    worldMods.blackoutMax = worldMods.blackoutT;
+  },
+};
+
 function updateEventCard(dt) {
   if (!eventShow) return;
   eventShow.t += dt;
@@ -5390,17 +6987,23 @@ function updateEventCard(dt) {
         card.classList.remove('is-landing');
         card.classList.add('is-reveal');
       }
-      applyEvent(eventShow.pick, eventCtx);
+      if (!eventShow.applied) {
+        applyEvent(eventShow.pick, eventCtx);
+        eventShow.applied = true;
+      }
       banner(`${eventShow.pick.icon} ${eventShow.pick.title}`);
       shake = Math.max(shake, 0.3);
       soundEngine.playEventReveal(eventShow.pick?.tone);
     }
   } else if (eventShow.phase === 'reveal') {
-    const progress = Math.max(0, 1 - eventShow.t / EVENT_REVEAL_DUR);
+    /* La barre se vide sur toute la pause : elle dit combien de temps il reste
+       pour lire, ce qui évite l'impression d'un jeu qui s'est figé. */
+    const dur = eventShow.revealDur || EVENT_REVEAL_DUR;
+    const progress = Math.max(0, 1 - eventShow.t / dur);
     if (timerBar) {
       timerBar.style.transform = `scaleX(${progress})`;
     }
-    if (eventShow.t >= EVENT_REVEAL_DUR) endEventCard();
+    if (eventShow.t >= dur) endEventCard();
   }
 }
 
@@ -5434,6 +7037,33 @@ function tickWorldMods(dt) {
   }
   if (worldMods.zealT > 0) {
     worldMods.zealT = Math.max(0, worldMods.zealT - dt);
+  }
+  /* ---- Cartes hasard ---- */
+  if (worldMods.timeRushT > 0) {
+    worldMods.timeRushT = Math.max(0, worldMods.timeRushT - dt);
+    if (worldMods.timeRushT <= 0) {
+      worldMods.timeRushMul = 1;
+      banner('⏱ Le temps reprend son cours normal.');
+    }
+  }
+  if (worldMods.blackoutT > 0) {
+    worldMods.blackoutT = Math.max(0, worldMods.blackoutT - dt);
+    if (worldMods.blackoutT <= 0) banner('☀ La lumière revient.');
+  }
+  /* Modificateurs individuels. Regroupés ici plutôt que dispersés : un effet de
+     carte qui ne redescend jamais serait invisible en lecture et permanent en
+     jeu — le pire des bugs d'équilibrage. */
+  for (const f of factions) {
+    if (!f) continue;
+    if (f.paintMulT > 0) {
+      f.paintMulT = Math.max(0, f.paintMulT - dt);
+      if (f.paintMulT <= 0) f.paintMul = 1;
+    }
+    if (f.atkCdT > 0) {
+      f.atkCdT = Math.max(0, f.atkCdT - dt);
+      if (f.atkCdT <= 0) f.atkCdMul = 1;
+    }
+    if (f.spiritCallT > 0) f.spiritCallT = Math.max(0, f.spiritCallT - dt);
   }
 }
 
@@ -5956,9 +7586,15 @@ function updateSpiritsUI() {
 }
 
 function update(dt) {
-  elapsed += dt;
+  /* « Le temps s'emballe » (carte hasard) : on accélère la SEULE horloge de
+     partie, pas le pas de simulation. Multiplier `dt` accélérerait aussi les
+     déplacements et les collisions — le jeu deviendrait injouable et la
+     physique franchirait les murs. Ici, seul le chrono court plus vite : la fin
+     de partie se rapproche, ce qui est exactement ce que la carte promet. */
+  elapsed += dt * (worldMods.timeRushT > 0 ? worldMods.timeRushMul : 1);
   checkBaseDeposits(dt);
   tickWorldMods(dt);
+  updateHazardCards(dt);
 
   // recharge du sprint (cadence fixe, identique pour tous)
   if (factions[0] && factions[0].alive) {
@@ -6084,7 +7720,8 @@ function update(dt) {
   /* -- Leaders : répulsion douce (extrait dans src/sim/leader-tick.js) -- */
   _stepLeaderRepulsion(_leaderTickState, dt, _leaderTickCtx);
 
-  /* Éclairage diurne agréable et fixe (le jour ne passe plus vers la nuit) */
+  /* Éclairage diurne agréable et fixe (le jour ne passe plus vers la nuit) —
+     seule la carte « Nuit sans lune » vient l'assombrir temporairement. */
   applyDayCycle(DAY_FIXED);
   soundEngine.setMusicIntensity(0.5);
   soundEngine.updateMusic(dt);
@@ -6155,9 +7792,13 @@ function update(dt) {
        la fin du décompte, pour qu'on voie le Leader se remettre debout au lieu
        de le voir claquer d'une pose à l'autre. */
     const down = f.downT || 0;
+    /* Recul du tir : le buste se cabre en arrière et revient. Il vit sur le
+       même axe que la chute — la chute l'emporte, un Leader à terre ne tire
+       pas. Amorti vite (×5) : c'est un contrecoup, pas une animation. */
+    f._recoil = Math.max(0, (f._recoil || 0) - dt * 5);
     g.userData.body.rotation.x = down > 0
       ? -Math.PI * 0.5 * Math.min(1, down / (LEADER_DOWN_T * 0.45))
-      : 0;
+      : f._recoil;
     /* Locomotion du moine riggé : fondu enchaîné marche / course / sprint selon
        la vitesse au sol, cadence du clip calée sur cette vitesse (à l'arrêt le
        clip gèle en douceur, la direction étant déjà lissée par l'inertie). */
@@ -6291,11 +7932,38 @@ function update(dt) {
   charSun.target.position.copy(sun.target.position);
   charSun.target.updateMatrixWorld();
 
-  /* Lanterne : s'allume en fin de journée pour la lisibilité. */
-  const lamp = Math.max(0, (DAY_FIXED - 0.78) / 0.22);
-  playerLamp.intensity = lamp * 1.35;
-  lampGlow.visible = lamp > 0.05;
-  if (lampGlow.visible) lampGlow.material.opacity = 0.12 + lamp * 0.22;
+  /* ---- Lanterne du joueur ----
+     Pilotée par `nightK`, la pénombre RÉELLE de l'image.
+
+     Elle lisait auparavant `DAY_FIXED`, une constante figée à 0,42 : le calcul
+     `(0.42 - 0.78) / 0.22` rendait toujours un négatif, donc zéro. La lanterne
+     n'a jamais éclairé quoi que ce soit depuis que le cycle du jour a été figé,
+     et le commentaire qui la disait « pilotée par nightK » décrivait une
+     intention, pas le code. C'est pour ça qu'une nuit noire laissait le joueur
+     sans halo.
+
+     `nightK` monte aussi bien au crépuscule que sous la carte « Nuit sans
+     lune » : la lanterne sert donc les deux cas sans traitement particulier. */
+  /* Zone morte : l'heure figée de la vallée laisse `nightK` à ~0,05 en plein
+     jour. Sans ce seuil, un halo pâle traînerait en permanence sous le joueur
+     et l'effet de nuit n'aurait plus rien de remarquable quand il arrive. */
+  const lamp = Math.max(0, (nightK - 0.15) / 0.85);
+  playerLamp.position.set(me.leader.x, (me.leader.y || 0) + 2.4, me.leader.z);
+  playerLamp.intensity = lamp * 22;
+  /* Portée élargie dans le noir complet : c'est la « zone de lumière » dans
+     laquelle on joue, elle doit contenir le personnage et de quoi lire le sol
+     devant lui. */
+  playerLamp.distance = 18 + lamp * 16;
+
+  lampGlow.visible = lamp > 0.02;
+  if (lampGlow.visible) {
+    lampGlow.position.set(me.leader.x, (me.leader.y || 0) + 0.06, me.leader.z);
+    /* Le disque au sol fait le gros du travail : le rendu toon quantifie la
+       lumière en paliers durs, seul un dégradé peint donne un bord diffus. */
+    lampGlow.material.opacity = 0.1 + lamp * 0.75;
+    const s = 0.8 + lamp * 0.7;
+    lampGlow.scale.set(s, 1, s);
+  }
 
   /* -- Le vide : éclats en suspension, brume et poussière lumineuse -- */
   updateVoid(dt, elapsed);
@@ -6578,6 +8246,193 @@ if (import.meta.env.DEV) {
   window.__ctl = () => ({ input, keys, multiMode, state, dir: playerDir(input, keys) });
   // avance le chrono de partie (test de l'écran de score) : __ff(160)
   window.__ff = (s) => { elapsed += s; };
+
+  /* ---- Réglage d'ambiance en direct ----
+     Chercher une direction artistique en recompilant à chaque essai est
+     intenable : on perd la comparaison entre deux valeurs proches. Ce panneau
+     déplace tout à chaud, puis `__grade.dump()` rend les constantes à recopier
+     dans le code — c'est le passage du tâtonnement au réglage définitif qui
+     compte, pas le panneau lui-même.
+
+     Réservé au mode DEV : rien de tout ceci n'existe dans le build livré. */
+  window.__grade = {
+    /* Étalonnage : saturation, contraste, teinte, luminosité. */
+    set(patch) { Object.assign(GRADE, patch); applyGrade(); return { ...GRADE }; },
+    get() { return { ...GRADE }; },
+    /* Exposition : facteur appliqué PAR-DESSUS la courbe du jour. 1 = valeurs
+       de DAY_KEYS telles quelles. Multiplier la valeur trouvée par les `exp` du
+       tableau donne les nouvelles constantes. */
+    exposure(v) {
+      if (v == null) return TUNE.exposure;
+      TUNE.exposure = v;
+      return v;
+    },
+    /* Lumières. `sun` et `hemi` sont des facteurs (le cycle du jour les pilote),
+       ceux des personnages sont des valeurs absolues (il ne les touche pas). */
+    lights(p = {}) {
+      if (p.sun != null) TUNE.sun = p.sun;
+      if (p.hemi != null) TUNE.hemi = p.hemi;
+      if (p.charSun != null) charSun.intensity = p.charSun;
+      if (p.charHemi != null) charHemi.intensity = p.charHemi;
+      return {
+        sunMul: TUNE.sun, hemiMul: TUNE.hemi,
+        charSun: charSun.intensity, charHemi: charHemi.intensity,
+      };
+    },
+    /* Brouillard : couleur et distances. C'est lui qui donne la profondeur. */
+    fog(p = {}) {
+      if (!scene.fog) return null;
+      if (p.color != null) {
+        fogBase.set(p.color);
+        scene.fog.color.copy(fogBase);
+      }
+      if (p.near != null) {
+        fogBaseNear = p.near;
+        scene.fog.near = p.near;
+      }
+      if (p.far != null) {
+        fogBaseFar = p.far;
+        scene.fog.far = p.far;
+      }
+      return { color: '#' + fogBase.getHexString(), near: fogBaseNear, far: fogBaseFar };
+    },
+    /* Bascule le tone mapping pour comparer côte à côte. */
+    TONES: {
+      neutral: THREE.NeutralToneMapping,
+      aces: THREE.ACESFilmicToneMapping,
+      agx: THREE.AgXToneMapping,
+      reinhard: THREE.ReinhardToneMapping,
+      none: THREE.NoToneMapping,
+    },
+    toneName() {
+      const e = Object.entries(this.TONES).find(([, v]) => v === renderer.toneMapping);
+      return e ? e[0] : 'neutral';
+    },
+    tone(name) {
+      const map = this.TONES;
+      if (map[name] === undefined) return Object.keys(map);
+      renderer.toneMapping = map[name];
+      /* Chaque matériau embarque la courbe dans son shader : sans recompilation
+         le changement resterait invisible. */
+      scene.traverse((o) => { if (o.material) {
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) m.needsUpdate = true;
+      } });
+      return name;
+    },
+    /* Rend les valeurs courantes, prêtes à recopier dans le code. */
+    dump() {
+      const out = {
+        GRADE: { ...GRADE },
+        /* Facteurs à répercuter dans DAY_KEYS : chaque `exp` × exposureMul,
+           chaque `sunI` × sunMul, chaque `hemiI` × hemiMul. */
+        exposureMul: +TUNE.exposure.toFixed(3),
+        sunMul: +TUNE.sun.toFixed(3),
+        hemiMul: +TUNE.hemi.toFixed(3),
+        lights: {
+          charSun: +charSun.intensity.toFixed(2), charHemi: +charHemi.intensity.toFixed(2),
+        },
+        fog: scene.fog ? {
+          color: '#' + fogBase.getHexString(),
+          near: +fogBaseNear.toFixed(1), far: +fogBaseFar.toFixed(1),
+        } : null,
+      };
+      console.log(JSON.stringify(out, null, 2));
+      return out;
+    },
+  };
+
+  /* ---- Panneau de développement ----
+     Import DYNAMIQUE : `import.meta.env.DEV` est remplacé par `false` au build,
+     la branche entière disparaît et devpanel.js n'est jamais téléchargé. Un
+     import statique aurait été empaqueté dans le bundle livré même mort.
+
+     Le panneau ne connaît rien au jeu : on lui décrit des contrôles. Ajouter un
+     réglage se fait donc ici, en une ligne, sans toucher au module. */
+  import('./devpanel.js').then(({ createDevPanel }) => {
+    const G = window.__grade;
+    const slider = (key, label, min, max, step, get, set) =>
+      ({ key, label, min, max, step, get, set });
+
+    window.__devpanel = createDevPanel({
+      hotkey: 'F9',
+      groups: [
+        {
+          title: 'Rendu',
+          controls: [
+            {
+              key: 'tone', label: 'courbe', options: Object.keys(G.TONES),
+              get: () => G.toneName(), set: (v) => G.tone(v),
+            },
+            slider('exposure', 'exposition', 0.3, 2.2, 0.01,
+              () => G.exposure(), (v) => G.exposure(v)),
+          ],
+        },
+        {
+          title: 'Étalonnage',
+          controls: [
+            slider('saturation', 'saturation', 0, 2, 0.01,
+              () => GRADE.saturation, (v) => G.set({ saturation: v })),
+            slider('contrast', 'contraste', 0.5, 1.8, 0.01,
+              () => GRADE.contrast, (v) => G.set({ contrast: v })),
+            slider('hue', 'teinte °', -30, 30, 1,
+              () => GRADE.hue, (v) => G.set({ hue: v })),
+            slider('brightness', 'luminosité', 0.4, 1.8, 0.01,
+              () => GRADE.brightness, (v) => G.set({ brightness: v })),
+          ],
+        },
+        {
+          title: 'Lumières',
+          controls: [
+            slider('sun', 'soleil ×', 0, 2.5, 0.01,
+              () => TUNE.sun, (v) => G.lights({ sun: v })),
+            slider('hemi', 'ciel ×', 0, 2.5, 0.01,
+              () => TUNE.hemi, (v) => G.lights({ hemi: v })),
+            slider('charSun', 'soleil persos', 0, 3, 0.01,
+              () => charSun.intensity, (v) => G.lights({ charSun: v })),
+            slider('charHemi', 'ciel persos', 0, 3, 0.01,
+              () => charHemi.intensity, (v) => G.lights({ charHemi: v })),
+          ],
+        },
+        {
+          title: 'Brouillard',
+          controls: [
+            {
+              key: 'fogColor', label: 'couleur', color: true,
+              get: () => '#' + fogBase.getHexString(),
+              set: (v) => G.fog({ color: v }),
+            },
+            slider('fogNear', 'début', 0, 160, 1,
+              () => fogBaseNear, (v) => G.fog({ near: v })),
+            slider('fogFar', 'fin', 20, 400, 1,
+              () => fogBaseFar, (v) => G.fog({ far: v })),
+          ],
+        },
+      ],
+      actions: [
+        { label: '▶ partie', run: () => { conquest = null; startGame(); } },
+        { label: '⏩ +60 s', run: () => { elapsed += 60; } },
+        { label: '❓ carte', run: () => { removeHazardCard(); spawnHazardCard(); } },
+        { label: '🌑 nuit', run: () => cardCtx.blackout(18) },
+        {
+          label: '↺ réinitialiser', wide: true,
+          run: (refresh) => {
+            G.set({ saturation: 1.08, contrast: 1.04, hue: 0, brightness: 1 });
+            G.exposure(1); G.lights({ sun: 1, hemi: 1, charSun: 1.55, charHemi: 1 });
+            G.fog({ color: '#9fdcff', near: 70, far: 165 });
+            G.tone('neutral');
+            refresh();
+          },
+        },
+        {
+          label: '📋 copier les constantes', wide: true,
+          run: () => {
+            const txt = JSON.stringify(G.dump(), null, 2);
+            navigator.clipboard?.writeText(txt).catch(() => {});
+          },
+        },
+      ],
+    });
+  });
   // inspecte le canvas d'encre : histogramme grossier des pixels non vides
   window.__paintInfo = () => {
     const d = paintCtx.getImageData(0, 0, paintCv.width, paintCv.height).data;
@@ -6602,7 +8457,7 @@ $('btn-continue').addEventListener('click', () => {
   audioInit();
   openProgression({
     onClose() {
-      conquest = null; state = 'menu';
+      conquest = null; overworldCtx = null; state = 'menu';
       $('hud').classList.add('hidden');
       $('end').classList.add('hidden');
       $('start').classList.remove('hidden');
@@ -6622,7 +8477,7 @@ $('btn-new-game').addEventListener('click', () => {
   audioInit();
   openProgression({
     onClose() {
-      conquest = null; state = 'menu';
+      conquest = null; overworldCtx = null; state = 'menu';
       $('hud').classList.add('hidden');
       $('end').classList.add('hidden');
       $('start').classList.remove('hidden');
@@ -7153,15 +9008,10 @@ $('retry').addEventListener('click', () => {
     exitMultiToMenu();
     return;
   }
-  if (conquest) {
-    if (lastVictory) {
-      const c = conquest; conquest = null;
-      $('end').classList.add('hidden');
-      c.onResult({ win: true, conversions: Math.round(stats.conv / DENSITY) });
-    } else {
-      $('end').classList.add('hidden');
-      startGame();
-    }
+  if (overworldCtx) {
+    // Fin d'un match de campagne : on retourne au Hub d'exploration du pays.
+    $('end').classList.add('hidden');
+    openOverworldHub(overworldCtx);
   } else {
     conquest = null;
     startGame();
@@ -7178,9 +9028,9 @@ $('btn-end-lobby').addEventListener('click', () => {
 
 $('btn-end-back').addEventListener('click', () => {
   if (conquest) {
-    const c = conquest; conquest = null;
+    const c = conquest; conquest = null; overworldCtx = null;
     $('end').classList.add('hidden');
-    
+
     // Vainqueur = culte adverse au meilleur score de peinture
     let winnerF = null, maxScore = -1;
     for (const f of factions) {
@@ -7203,27 +9053,14 @@ $('btn-concede').addEventListener('click', () => {
 updateMainMenu();
 audioInit();
 
-// Partie lancée depuis la carte de conquête : couleur = celle de la terre, retour au verdict
+// Entrer dans un pays : on atterrit directement dans le Hub Overworld 3D.
+setHubHandler((ctx) => {
+  openOverworldHub(ctx);
+});
+
+// Zone choisie (en franchissant un portail) : la partie démarre pour de bon.
 setPlayHandler((ctx) => {
   conquest = ctx;
-  
-  // Ajuster dynamiquement la population maximale de la partie en fonction de la zone
-  const save = JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}');
-  const maxPopKey = `${ctx.world.iso}_${ctx.region.id}`;
-  const maxPop = (save.conqMaxPop && save.conqMaxPop[maxPopKey]) || 500;
-  
-  // Population fixe : 250 esprits dorés + 50 villageois (300 agents au total)
-  /* 5 villageois pour 25 esprits dans le cycle de la foule : on remonte donc
-     la population totale depuis la cible en esprits. */
-  START_GRAYS = Math.round(SPIRITS_PER_PLAYER * NB_FACTIONS * (CROWD_CYCLE / 25));
-  
-  // Couleur du joueur = sa religion (save.playerColor), fallback couleur du pays
-  const colorStr = ctx.playerColor || ctx.world.color;
-  const hex = parseInt(colorStr.replace('#', ''), 16);
-  const ci = CULTS.findIndex((c) => c.c === hex);
-  if (ci >= 0) playerCultIdx = ci;
-  $('start').classList.add('hidden');
-  $('end').classList.add('hidden');
   startGame();
 });
 
@@ -7248,6 +9085,7 @@ function frame(now) {
   if (elapsed_ms < FRAME_MIN_MS) return;
   let dt = Math.min(0.05, elapsed_ms / 1000);
   last = now;
+  pollGamepad(dt);
   monkTimeU.value = now / 1000;
   if (state === 'play') {
     // ralenti dramatique (kill de Leader) : le temps s'étire un court instant
@@ -7260,6 +9098,8 @@ function frame(now) {
         console.error('[game loop error]', err);
       }
     }
+  } else if (state === 'overworld') {
+    updateOverworld(dt);
   } else {
     // Vue d'attente du menu : magnifique orbite cinématographique au-dessus de la vallée
     applyDayCycle(0.42);

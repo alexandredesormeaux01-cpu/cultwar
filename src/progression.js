@@ -202,6 +202,46 @@ function worldUnlocked(save, wid) {
   return true;
 }
 
+/* ============================ Économie & Portails ============================ */
+export function getSpiritsCount() {
+  const save = loadSave();
+  return save.spirits || 0;
+}
+
+export function addSpirits(amount) {
+  if (!amount || amount <= 0) return getSpiritsCount();
+  const save = loadSave();
+  save.spirits = (save.spirits || 0) + Math.round(amount);
+  persist(save);
+  return save.spirits;
+}
+
+export function getCountryPortalState(iso, portalIndex) {
+  const save = loadSave();
+  const cp = (save.portals && save.portals[iso]) || { won: [], unlocked: [0] };
+  const wonList = Array.isArray(cp.won) ? cp.won : [];
+  const unlockedList = Array.isArray(cp.unlocked) ? cp.unlocked : [0];
+
+  if (wonList.includes(portalIndex)) return 'won';
+  if (unlockedList.includes(portalIndex) || portalIndex === 0) return 'unlocked';
+  return 'locked';
+}
+
+export function recordPortalVictory(iso, portalIndex, spiritsGained = 0) {
+  const save = loadSave();
+  if (!save.portals) save.portals = {};
+  if (!save.portals[iso]) save.portals[iso] = { won: [], unlocked: [0] };
+  const cp = save.portals[iso];
+  if (!cp.won.includes(portalIndex)) cp.won.push(portalIndex);
+  const nextIdx = portalIndex + 1;
+  if (!cp.unlocked.includes(nextIdx)) cp.unlocked.push(nextIdx);
+  if (spiritsGained > 0) {
+    save.spirits = (save.spirits || 0) + Math.round(spiritsGained);
+  }
+  persist(save);
+  return { spirits: save.spirits || 0, won: cp.won, unlocked: cp.unlocked };
+}
+
 /* ============================ GeoJSON ============================ */
 let SHAPES = null;
 function ringFromCoords(coords) {
@@ -2461,6 +2501,12 @@ let root = null, star = null, globe = null, country = null, playHandler = null, 
 
 export function setPlayHandler(fn) { playHandler = fn; }
 
+/* Entrer dans un pays n'ouvre plus la carte des provinces : on atterrit dans le
+   Hub Overworld 3D, où le choix de la zone se fait en franchissant un portail.
+   La carte des provinces ne sert plus que de repli si aucun hub n'est branché. */
+let hubHandler = null;
+export function setHubHandler(fn) { hubHandler = fn; }
+
 export async function openProgression(opts = {}) {
   onCloseCb = opts.onClose || null;
   soundEngine.init();
@@ -3565,8 +3611,16 @@ export async function openProgression(opts = {}) {
   }
 
   zonePlay.addEventListener('click', () => {
-    if (!selectedRegion) return;
-    const world = curWorld, region = selectedRegion;
+    if (selectedRegion) launchZone(selectedRegion);
+  });
+
+  /**
+   * Lance la partie d'une zone. Appelé soit par la carte des provinces (repli),
+   * soit par un portail du Hub Overworld.
+   */
+  function launchZone(region) {
+    const world = curWorld;
+    if (!world || !region) return;
     const preHolder = holderOf(loadSave(), world.iso, region.id);
     const isBarbarian = !preHolder || preHolder === NEUTRAL;
 
@@ -3677,7 +3731,7 @@ export async function openProgression(opts = {}) {
         touchingOwners
       });
     } else { onResult(true); } // fallback autonome : conquête simulée
-  });
+  }
 
   async function enterCountry(world) {
     loading && loading.parentNode && (loading.textContent = 'Chargement du territoire…');
@@ -3687,6 +3741,24 @@ export async function openProgression(opts = {}) {
     initCountry(save, world, regions);
     curWorld = world; curRegions = regions; selectedRegion = null;
     curNeighbors = buildRegionNeighbors(regions);
+
+    // Nouveau flux : le pays s'explore en 3D. La carte des provinces est
+    // court-circuitée, chaque zone étant représentée par un portail du Hub.
+    if (hubHandler) {
+      root.classList.add('hidden');
+      if (globe) { globe.stop(); globe = null; }
+      if (star) { star.stop(); star = null; }
+      if (country) { country.stop(); country = null; }
+      hubHandler({
+        world,
+        regions,
+        zonesCount: regions.length,
+        playerColor: save.playerColor,
+        launchZone: (i) => launchZone(regions[i]),
+      });
+      return;
+    }
+
     const rel = getWorldReligion(save, world);
     const symHtml = (rel.sym.startsWith('data:') || rel.sym.startsWith('http'))
       ? `<img src="${rel.sym}" class="prog-head-icon" />`

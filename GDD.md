@@ -228,3 +228,43 @@ Les disciples (3 slots de base, extensibles via l'arbre de compétences) opèren
 **Règle de détour opportuniste** (paliers mixte et bas) : un objectif secondaire n'est pris que si dévier vers lui ajoute **≤ 25 %** de distance au trajet vers l'objectif primaire. Comportement lisible en une phrase : *« ils vont chercher ce qui manque, sans ignorer ce qu'ils croisent. »*
 
 **Portage** : un cristal ramassé est instantanément converti en peinture dans la jauge du Leader. Aucun état intermédiaire — la mort d'un disciple ne fait donc rien perdre.
+
+---
+
+## 9. Mode Campagne Overworld 3D : Hubs Régionaux, Portails Vivants & Économie d'Esprits
+
+### 9.1 Philosophie & Navigation 3D (Overworld Hub)
+Au lieu d'une interface 2D abstraite ou de menus administratifs, chaque pays de la planète possède sa propre **île 3D Overworld** générée avec le moteur du jeu (biomes *Prairie, Désert, Toundra, Jungle, Savane, Terres de Cendre*).
+
+Le joueur incarne son **Leader** directement dans ce Hub en 3D et se déplace librement entre :
+1. **Les Portails de Niveaux (Zone Portals)** disposés en arc de cercle autour de l'île.
+2. **L'Autel Central des Compétences** situé au centre du Hub.
+3. **Le Grand Portail de la Planète** permettant de retourner à la Vue Globe.
+4. **Les Villageois Pacifiques** qui déambulent sereinement sur l'île.
+5. **Les Esprits Sauvages** qui dérivent et peuvent être récoltés au passage.
+
+### 9.2 Les Portails 3D & Biomes (3 États Visuels)
+Chaque niveau d'un pays est matérialisé par un **Portail en pierre 3D** ayant 3 états visuels distincts :
+
+1. **Fermé (`locked`)** :
+   - L'entrée du portail est scellée par un **obstacle thématique du biome** :
+     - *Toundra / Hiver* : Bloc et cristaux de glace translucides.
+     - *Jungle / Tropical* : Ronces denses et pierres végétales.
+     - *Désert / Savane* : Dune et pile de sable ocre.
+     - *Prairie / Volcan* : Pierres basaltiques et rochers sombres.
+2. **Ouvert (`unlocked`)** :
+   - L'obstacle s'effondre/disparaît. Une **colonne de lumière pulsante** invite le joueur à franchir le portail.
+3. **Conquis (`won`)** :
+   - L'intérieur du portail se remplit de la **texture de peinture liquide animée du culte** du joueur. Un disque de peinture coloré s'étale au sol autour de l'arche et le portail suivant est déverrouillé !
+
+### 9.3 Économie des Esprits & Autel des Compétences
+- **Gain d'Esprits en Match** : Les esprits apportés au sanctuaire pendant une partie sont convertis en **monnaie permanente** conservée dans `localStorage` (`save.spirits`).
+- **Esprits Sauvages dans le Hub** : 3 à 5 esprits flottants dérivent sur la carte Overworld entre les parties. Le joueur peut les ramasser au contact (`+1 Esprit`) pour continuer à progresser même après une défaite.
+- **L'Autel Central (0, 0)** : Une structure à degrés octogonaux surmontée d'une Orbe dorée flottante. S'en approcher permet d'ouvrir l'arbre des compétences et de dépenser ses esprits.
+- **Le Grand Portail (Vue Globe)** : Situé près de l'autel, il offre une porte d'envol vers la Vue Planète pour explorer de nouveaux pays.
+
+### 9.4 Flux de Transition & Architecture Technique
+- **`state = 'overworld'`** dans [src/main.js](file:///c:/Cult.io/src/main.js) : Gère la boucle d'animation du Hub, le mouvement du Leader, le suivi de caméra 3D et les détections de proximité via [src/portals.js](file:///c:/Cult.io/src/portals.js).
+- **Lancement de partie** : Entrer dans un portail ouvert initialise la partie de la zone correspondante.
+- **Victoire** : À la fin du match, `recordPortalVictory(iso, portalIndex, spiritsEarned)` mémorise la conquête, puis le joueur est réexpédié dans le Hub Overworld 3D où le portail est peinté et le suivant est débloqué.
+

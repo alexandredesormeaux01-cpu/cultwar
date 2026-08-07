@@ -288,6 +288,22 @@ class SoundEngine {
     return name;
   }
 
+  /**
+   * Durée d'un bruitage, en secondes. Sert à caler une animation dessus — la
+   * statue d'un sanctuaire sort du sol exactement le temps du grondement.
+   *
+   * Rend `fallback` tant que le fichier n'est pas décodé : `duration` vaut NaN
+   * avant les métadonnées, et sur mobile le premier son d'une partie peut être
+   * joué avant le chargement complet. On lit le pool sans passer par
+   * `_acquire`, qui allouerait un élément audio au seul titre d'une mesure.
+   */
+  sfxDuration(name, fallback = 1.2) {
+    const list = this._pool.get(name);
+    if (!list || !list.length) return fallback;
+    const d = list[0].duration;
+    return Number.isFinite(d) && d > 0 ? d : fallback;
+  }
+
   playFootstep() {}
   playSprite() {}
 

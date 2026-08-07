@@ -22,6 +22,13 @@
 
   <!-- HUD -->
   <div id="hud" class="hidden">
+    <!-- Bandeau du Hub Overworld : région, zones conquises, esprits -->
+    <div id="overworld-hud" class="hidden"></div>
+
+    <!-- Invite contextuelle du Hub : ne s'affiche qu'à portée d'un portail,
+         de l'autel ou du grand portail. Remplace le bandeau de match. -->
+    <div id="overworld-prompt" class="hidden"></div>
+
     <!-- Top Bar Bandoulière : minimap | Rang + % | boule peinture -->
     <div id="hud-top-bar">
       <button id="btn-concede" class="hud-concede-btn" title="Céder la victoire aux rivaux (défaite immédiate)">Céder la victoire</button>
@@ -74,6 +81,15 @@
     <div id="hud-spirits" aria-label="Esprits en cortège"></div>
 
     <div id="banner"></div>
+
+    <!-- Annonce de carte hasard. Séparée de #banner : elle doit se lire d'un
+         coup d'oeil au milieu de l'action, donc gros texte et couleur de ton,
+         là où #banner sert aux messages courants qui peuvent s'empiler. -->
+    <div id="card-banner" class="hidden" role="status" aria-live="assertive">
+      <span id="card-banner-title"></span>
+      <span id="card-banner-text"></span>
+    </div>
+
     <div id="streak"></div>
     <div id="duel" class="hidden">⚔ 1:00</div>
 

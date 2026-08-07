@@ -40,6 +40,49 @@ console.log('\n== taille au fil des recyclages ==');
   ok('elle vaut bien le spawn × FOLLOWER_SCALE', Math.abs(first - SPAWN * FOLLOWER_SCALE) < 1e-9);
 }
 
+/* Sortie VIOLENTE du cortège : un esprit arraché par un tir n'est PAS recyclé,
+   il redevient sauvage sur place. C'est le seul chemin qui ne passe pas par
+   resetAgent — il doit donc restaurer la taille lui-même, sinon l'esprit reste
+   à 55 % pour le reste de la partie et la carte se couvre de miniatures. */
+function releaseFollower(a) {
+  if (a._origBase) a.base = a._origBase;
+}
+
+console.log('\n== esprit arraché d\'un cortège (tir) ==');
+{
+  const SPAWN = 0.93;
+  const a = createAgent(2, 0, 0, 0, SPAWN);
+  a._spawnBase = a.base;
+
+  for (let coup = 1; coup <= 5; coup++) {
+    convert(a);                     // capturé
+    releaseFollower(a);             // puis descendu d'un tir adverse
+    ok(`coup ${coup} : taille sauvage restaurée`, Math.abs(a.base - SPAWN) < 1e-9);
+  }
+  convert(a);
+  ok('la taille en cortège reste la bonne', Math.abs(a.base - SPAWN * FOLLOWER_SCALE) < 1e-9);
+}
+
+/* Capture pendant un plongeon : `base` est alors une taille intermédiaire.
+   La prendre comme référence figerait l'esprit à une fraction de sa taille. */
+console.log('\n== capturé en plein plongeon ==');
+{
+  const SPAWN = 1.0;
+  const a = createAgent(3, 0, 0, 0, SPAWN);
+  a._spawnBase = a.base;
+  a._dive = 0.2;
+  a._diveBase = a.base;
+  a.base = 0.25;                    // à moitié avalé par le trou
+
+  // convertToFollower : la référence doit être _diveBase, pas la taille courante
+  if (!a._origBase) a._origBase = (a._dive != null && a._diveBase) ? a._diveBase : a.base;
+  a.base = a._origBase * FOLLOWER_SCALE;
+  ok('la référence est celle d\'avant le plongeon', Math.abs(a._origBase - SPAWN) < 1e-9);
+
+  releaseFollower(a);
+  ok('libéré, il retrouve sa taille pleine', Math.abs(a.base - SPAWN) < 1e-9);
+}
+
 console.log('\n== recyclage en plein plongeon ==');
 {
   const a = createAgent(1, 0, 0, 0, 1.0);

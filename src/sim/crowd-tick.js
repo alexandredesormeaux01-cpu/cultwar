@@ -1,13 +1,13 @@
 /* Boucle de la foule : cortèges (fidèles qui suivent leur Leader) et esprits
-   libres (fuite, errance, rituel de conversion). Extraite telle quelle depuis
-   main.js pour préserver toutes les invariants comportementaux.
+   libres (fuite, errance, esprits à terre). La conversion elle-même ne vit plus
+   ici : elle se joue au tir, dans sim/attacks.js.
 
    Toutes les dépendances passent par `ctx` : côté client, main.js branche les
    vraies fonctions Three.js ; côté serveur Node, on passe des no-ops et la sim
    tourne headless. */
 
 import {
-  CONV_R, CONV_RITUAL_T, FLEE_R, CONV_BY_PROXIMITY,
+  FLEE_R,
   FOLLOWER_FLEE_R, FOLLOWER_SPD, FOLLOWER_WANDER_SPD,
   FUEL_MAX,
 } from './constants.js';
@@ -15,25 +15,19 @@ import {
 export function stepCrowd(state, dt, ctx) {
   const {
     agents, factions, island, elapsed, bombs = [],
-    grayPanic = false, zeal = false,
+    grayPanic = false,
   } = state;
   const {
     // physique
-    resolveIsland, isSolid, canJumpToward, steerOnIsland,
+    resolveIsland, isSolid, canStep, canJumpToward, steerOnIsland,
     islandApproachScore, islandPathBlocked, islandRandomPoint,
-    // conversion
-    finishConvert,
-    // peinture
     // rendu / audio (injectés, no-ops sur serveur)
-    setAgentColor,
     crowdOf, slotOf, trimCrowdCounts,
-    spawnSoulBurst, tone,
     onFreed, // () → main.js recompte un esprit redevenu libre
     onFollowerLostFaction, // (a) → main.js libère le slot follower
     updateFollowerTransform, // (a, mat, spd) → met à jour le mesh follower
-    setFollowerColor, // (a, col) → teinte le slot follower
     // buffers réutilisables (main.js les partage — un neuf par tick coûterait cher)
-    tmpM, tmpQ, tmpS, tmpP, UP_AXIS, GRAY, _convCol,
+    tmpM, tmpQ, tmpS, tmpP, UP_AXIS,
     tmpQ2, SIDE_AXIS,   // pose « face au sol » des agents touchés
   } = ctx;
 
@@ -54,11 +48,26 @@ export function stepCrowd(state, dt, ctx) {
     else crowdOf(a.id).setMatrixAt(slotOf(a.id), tmpM);
   };
 
+  /* « Y a-t-il du sol là-bas, ET peut-on y aller ? »
+     `isSolid` seul répond oui des deux côtés d'une falaise : le sol d'en bas est
+     bien solide, il est juste inatteignable. Les esprits notaient donc leurs
+     directions de fuite avec isSolid pendant que steerOnIsland les filtrait avec
+     canStep — au bord d'un à-pic, ils choisissaient le vide, se faisaient
+     refuser, et repoussaient dans la falaise à chaque image. C'est exactement le
+     tremblement qu'on voyait. Toute décision de déplacement passe désormais par
+     ce test-ci, le même que celui du guidage. */
+  const reachable = (x0, z0, x1, z1) =>
+    isSolid(island, x1, z1) && (!canStep || canStep(island, x0, z0, x1, z1));
+
   /* Les convertisseurs se réduisent aux Leaders : il n'y a plus de disciples
      pour chasser à leur place. */
   const converters = [];
   for (const f of factions) {
     if (!f.alive) continue;
+    /* « Appel du berger » (carte hasard) : les esprits cessent de fuir CE
+       Leader. On le retire simplement de la liste des menaces — il devient
+       invisible pour le calcul de fuite, sans toucher au reste. */
+    if ((f.spiritCallT || 0) > 0) continue;
     converters.push({ f, x: f.leader.x, z: f.leader.z });
   }
 
@@ -80,10 +89,6 @@ export function stepCrowd(state, dt, ctx) {
 
     /* ========== FOLLOWER : erre tranquillement, fuit les ennemis ========== */
     if ((a.followerOf ?? -1) >= 0) {
-      const _setFCol = (col) => {
-        if (a._followerSlot != null) setFollowerColor(a, col);
-        else setAgentColor(a.id, col);
-      };
       const f = factions[a.followerOf];
       if (!f || !f.alive) {
         onFollowerLostFaction(a);
@@ -102,24 +107,10 @@ export function stepCrowd(state, dt, ctx) {
 
       a.vx = a.vx || 0; a.vz = a.vz || 0;
 
-      const inEnemyConvR = CONV_BY_PROXIMITY && enemyC && enemyD < CONV_R;
-      if (inEnemyConvR) {
-        if ((a.converting ?? -1) !== enemyC.f.i) {
-          a.converting = enemyC.f.i;
-          a.extractProgress = 0;
-        }
-        a.extractProgress = (a.extractProgress || 0) + dt * (zeal ? 2.35 : 1);
-        const ritualNeed = zeal ? CONV_RITUAL_T * 0.55 : CONV_RITUAL_T;
-        const u = Math.min(1, a.extractProgress / ritualNeed);
-        _convCol.copy(f.color).lerp(enemyC.f.color, Math.min(1, u * 1.35));
-        _setFCol(_convCol);
-        a.vx *= Math.max(0, 1 - dt * 10);
-        a.vz *= Math.max(0, 1 - dt * 10);
-        if (a.extractProgress >= ritualNeed) {
-          finishConvert(a, enemyC.f);
-          continue;
-        }
-      } else if (enemyC && enemyD < FOLLOWER_FLEE_R) {
+      /* Plus de vol par simple proximité : un rival qui frôle le cortège ne
+         prend rien, il faut lui tirer dessus (voir sim/attacks.js). Le suivant
+         n'a donc qu'un comportement face à un ennemi — fuir. */
+      if (enemyC && enemyD < FOLLOWER_FLEE_R) {
         const ax = a.x - enemyC.x, az = a.z - enemyC.z;
         const n = Math.hypot(ax, az) || 1;
         const urgency = 1 - enemyD / FOLLOWER_FLEE_R;
@@ -131,11 +122,6 @@ export function stepCrowd(state, dt, ctx) {
         }
         a.vx += (tx - a.vx) * Math.min(1, dt * 6);
         a.vz += (tz - a.vz) * Math.min(1, dt * 6);
-        if ((a.extractProgress || 0) > 0) {
-          _setFCol({ r: 1, g: 1, b: 1 });
-          a.converting = -1;
-          a.extractProgress = 0;
-        }
       } else {
         /* Cortège collant : les esprits convertis s'accrochent au Leader.
            - Loin (> 2 u) : sprint à la vitesse du Leader (V_MAX 9.2), plus rapide
@@ -190,11 +176,6 @@ export function stepCrowd(state, dt, ctx) {
         /* Réponse plus vive (dt * 8) pour que le cortège colle vraiment. */
         a.vx += (wx - a.vx) * Math.min(1, dt * 8);
         a.vz += (wz - a.vz) * Math.min(1, dt * 8);
-        if ((a.extractProgress || 0) > 0) {
-          _setFCol({ r: 1, g: 1, b: 1 });
-          a.converting = -1;
-          a.extractProgress = 0;
-        }
       }
 
       a.x += a.vx * dt; a.z += a.vz * dt;
@@ -243,12 +224,8 @@ export function stepCrowd(state, dt, ctx) {
 
     a.vx = a.vx || 0; a.vz = a.vz || 0;
     a.stumbleT = Math.max(0, (a.stumbleT || 0) - dt);
-    const inRitual = (a.extractProgress || 0) > 0.05 && nearF && nearD < CONV_R;
 
-    if (inRitual) {
-      a.vx *= Math.max(0, 1 - dt * 10);
-      a.vz *= Math.max(0, 1 - dt * 10);
-    } else if (nearF && nearD < fleeR) {
+    if (nearF && nearD < fleeR) {
       const ax = a.x - threatX, az = a.z - threatZ;
       const n = Math.hypot(ax, az) || 1;
       const fx = ax / n, fz = az / n;
@@ -285,15 +262,15 @@ export function stepCrowd(state, dt, ctx) {
         let inland = 0;
         let blocked = false;
         for (const dist of [1.3, 2.6, 4.0, 5.5]) {
-          if (isSolid(island, a.x + dx * dist, a.z + dz * dist)) inland += 1.0;
+          if (reachable(a.x, a.z, a.x + dx * dist, a.z + dz * dist)) inland += 1.0;
           else { inland -= (dist < 2.8 ? 3.5 : 1.8); blocked = dist < 2.8; break; }
         }
         if (blocked) continue;
         /* Largeur de corridor : pénalise les bords / langues de terre. */
         const side = 1.6;
-        if (isSolid(island, a.x - dz * side, a.z + dx * side)) inland += 0.55;
+        if (reachable(a.x, a.z, a.x - dz * side, a.z + dx * side)) inland += 0.55;
         else inland -= 1.1;
-        if (isSolid(island, a.x + dz * side, a.z - dx * side)) inland += 0.55;
+        if (reachable(a.x, a.z, a.x + dz * side, a.z - dx * side)) inland += 0.55;
         else inland -= 1.1;
         const away = dx * fx + dz * fz;
         const score = away * 2.2 + inland * 1.35 - Math.abs(ang - fan) * 0.12;
@@ -302,18 +279,16 @@ export function stepCrowd(state, dt, ctx) {
 
       let tx = bestDx * fleeSpd;
       let tz = bestDz * fleeSpd;
+      /* Le guidage a le DERNIER mot. L'ancien code annulait sa correction quand
+         elle ne menait pas assez « au large », et réimposait la direction issue
+         du scoring — c'est-à-dire précisément celle que le guidage venait de
+         juger infranchissable. Au bord d'une falaise, les deux se contredisaient
+         à chaque image et l'esprit trépidait sur place. Une direction longeant
+         l'à-pic vaut toujours mieux qu'une direction qui n'existe pas. */
       const steered = steerOnIsland(a.x, a.z, tx, tz, 3.6);
       if (steered.x * steered.x + steered.z * steered.z > 1e-6) {
-        /* Si le steer dévie vers le vide proche, retomber sur le meilleur score. */
-        const sx = steered.x, sz = steered.z;
-        const deepOk = isSolid(island, a.x + sx * 4.0, a.z + sz * 4.0);
-        if (deepOk || bestSc < -10) {
-          tx = sx * fleeSpd;
-          tz = sz * fleeSpd;
-        } else {
-          tx = bestDx * fleeSpd;
-          tz = bestDz * fleeSpd;
-        }
+        tx = steered.x * fleeSpd;
+        tz = steered.z * fleeSpd;
       }
 
       /* Micro-séparation : repousser des voisins gris tout proches pour
@@ -360,7 +335,7 @@ export function stepCrowd(state, dt, ctx) {
         const dx = Math.cos(ang), dz = Math.sin(ang);
         let sc = 0;
         for (const dist of [1.5, 3.0, 4.5]) {
-          if (isSolid(island, a.x + dx * dist, a.z + dz * dist)) sc += 1;
+          if (reachable(a.x, a.z, a.x + dx * dist, a.z + dz * dist)) sc += 1;
           else { sc -= 2; break; }
         }
         if (sc > wBest) { wBest = sc; wX = dx; wZ = dz; }
@@ -378,63 +353,94 @@ export function stepCrowd(state, dt, ctx) {
       a._fleeUrgency = 0;
       a._lookBack = false;
     }
+
+    /* ---- Anti-blocage ----
+       Filet de sécurité, pas la correction principale : celle-ci est en amont,
+       dans les directions candidates (voir `reachable`). Il reste des cas qu'un
+       scoring ne voit pas — un angle rentrant où toutes les issues longent
+       l'à-pic, ou un esprit poussé contre le bord par ses voisins. Sans lui,
+       un esprit coincé le reste jusqu'à la fin de la partie et vibre sur place.
+
+       On mesure le déplacement RÉEL : c'est le seul signe fiable. Vouloir avancer
+       sans avancer est la définition même d'être coincé, quelle qu'en soit la
+       cause — et ça ne demande de comprendre aucune géométrie. */
+    a._detourT = Math.max(0, (a._detourT || 0) - dt);
+    if (a._detourT > 0) {
+      /* Longer l'obstacle au lieu de pousser dedans. On glisse à 90° du cap
+         voulu, du côté choisi au moment du blocage. */
+      const spd = Math.hypot(a.vx, a.vz) || 2.5;
+      const n = spd || 1;
+      const nx = a.vx / n, nz = a.vz / n;
+      const lat = steerOnIsland(
+        a.x, a.z, -nz * a._detourSide, nx * a._detourSide, 3.0, a._detourSide);
+      if (lat.x * lat.x + lat.z * lat.z > 1e-6) {
+        a.vx = lat.x * spd;
+        a.vz = lat.z * spd;
+      }
+    }
+
+    const prevX = a.x, prevZ = a.z;
     a.x += a.vx * dt; a.z += a.vz * dt;
     resolveIsland(island, a, a.vx, a.vz, dt, false);
 
-    if (inRitual && nearF) {
-      a.face = Math.atan2(threatX - a.x, threatZ - a.z);
-    } else if (a._lookBack && nearF) {
+    const wanted = Math.hypot(a.vx, a.vz);
+    const moved = Math.hypot(a.x - prevX, a.z - prevZ);
+    if (wanted > 0.6 && moved < wanted * dt * 0.3) {
+      a._stuckT = (a._stuckT || 0) + dt;
+      /* 0,35 s : assez long pour ignorer un simple frottement de mur, assez
+         court pour que le tremblement ne soit jamais visible à l'œil. */
+      if (a._stuckT > 0.35 && a._detourT <= 0) {
+        /* Côté du contournement : celui qui est réellement praticable. Si les
+           deux le sont, on tranche par l'id — deux esprits côte à côte partent
+           alors dans des sens opposés au lieu de se gêner. */
+        const n = wanted || 1;
+        const nx = a.vx / n, nz = a.vz / n;
+        const P = 2.4;
+        const leftOk = reachable(a.x, a.z, a.x - nz * P, a.z + nx * P);
+        const rightOk = reachable(a.x, a.z, a.x + nz * P, a.z - nx * P);
+        a._detourSide = (leftOk && !rightOk) ? 1
+          : (rightOk && !leftOk) ? -1
+            : ((a.id & 1) ? 1 : -1);
+        a._detourT = 0.9;
+        a._stuckT = 0;
+        /* Repartir de zéro : garder la vitesse qui vient d'échouer ferait
+           reprendre le détour dans la direction du mur. */
+        a.vx = 0; a.vz = 0;
+        /* L'errance repart sur un autre cap, sinon l'esprit revient buter au
+           même endroit dès le détour terminé. */
+        a.wt = 0;
+      }
+    } else {
+      a._stuckT = 0;
+    }
+
+    if (a._lookBack && nearF) {
       a.face = Math.atan2(threatX - a.x, threatZ - a.z);
     } else {
       const spd = Math.hypot(a.vx, a.vz);
       if (spd > 0.12) a.face = Math.atan2(a.vx, a.vz);
     }
 
+    /* Chapardage : les PNJ non élémentaires (paysans, chevaliers) volent un
+       esprit au Leader qu'ils croisent. Seul reliquat de l'ancienne conversion
+       au contact — la capture, elle, passe par le tir. */
     const isElemental = typeof variantOf !== 'undefined' ? variantOf(a.id) >= 3 : true;
-    const closestF = (CONV_BY_PROXIMITY && isElemental && nearF && nearD < CONV_R) ? nearF : null;
-    let scaleMul = 1;
-    if (closestF) {
-      if ((a.converting ?? -1) !== closestF.i) {
-        a.converting = closestF.i;
-        a.extractProgress = 0;
-        if (closestF.i === 0) tone(420, 0.04, 'triangle', 0.02);
+    if (!isElemental && nearF && nearD < 2.2 && (nearF.count || 0) > 0) {
+      a.stealCd = (a.stealCd || 0) - dt;
+      if (a.stealCd <= 0) {
+        a.stealCd = 3.5;
+        if (ctx.stealSpiritFromLeader) ctx.stealSpiritFromLeader(nearF);
       }
-      a.extractProgress = (a.extractProgress || 0) + dt * (zeal ? 2.35 : 1);
-      const ritualNeed = zeal ? CONV_RITUAL_T * 0.55 : CONV_RITUAL_T;
-      const u = Math.min(1, a.extractProgress / ritualNeed);
-      _convCol.copy(GRAY).lerp(closestF.color, Math.min(1, u * 1.35));
-      setAgentColor(a.id, _convCol);
-      scaleMul = u < 0.65
-        ? 1 + u * 0.14
-        : Math.max(0.12, 1.09 * (1 - (u - 0.65) / 0.35));
-      if (a.extractProgress >= ritualNeed) {
-        finishConvert(a, closestF);
-        if (a.dead) continue;
-        scaleMul = 1.12;
-      }
-    } else {
-      if (!isElemental && nearF && nearD < 2.2 && (nearF.count || 0) > 0) {
-        a.stealCd = (a.stealCd || 0) - dt;
-        if (a.stealCd <= 0) {
-          a.stealCd = 3.5;
-          if (ctx.stealSpiritFromLeader) ctx.stealSpiritFromLeader(nearF);
-        }
-      }
-      if ((a.extractProgress || 0) > 0 || (a.converting ?? -1) >= 0) {
-        setAgentColor(a.id, GRAY);
-      }
-      a.converting = -1;
-      a.extractProgress = Math.max(0, (a.extractProgress || 0) - dt * 2.2);
     }
 
     tmpQ.setFromAxisAngle(UP_AXIS, a.face || 0);
-    const s = a.base * scaleMul * (a.stumbleT > 0 ? 0.92 : 1);
+    const s = a.base * (a.stumbleT > 0 ? 0.92 : 1);
     tmpS.set(s, s, s);
     tmpP.set(a.x, (a.y || 0) + (a.stumbleT > 0 ? 0.05 : 0), a.z);
     tmpM.compose(tmpP, tmpQ, tmpS);
     const cm = crowdOf(a.id), sl = slotOf(a.id);
     cm.setMatrixAt(sl, tmpM);
-    const runSpd = inRitual ? 0.15 : Math.hypot(a.vx, a.vz);
+    const runSpd = Math.hypot(a.vx, a.vz);
     cm.userData.anim.setY(sl, runSpd);
     cm.userData.anim.needsUpdate = true;
   }

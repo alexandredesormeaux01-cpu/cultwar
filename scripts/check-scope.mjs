@@ -24,7 +24,7 @@ const GLOBALS = new Set(['window', 'document', 'console', 'Math', 'JSON', 'Objec
   'Uint8ClampedArray', 'Uint16Array', 'Uint32Array', 'Int8Array', 'Int16Array', 'Int32Array',
   'ArrayBuffer', 'DataView', 'Infinity', 'NaN', 'undefined', 'globalThis', 'structuredClone',
   'URL', 'URLSearchParams', 'Blob', 'FileReader', 'Image', 'Audio', 'AudioContext', 'CustomEvent',
-  'Event', 'screen', 'history', 'alert', 'confirm', 'prompt', 'crypto', 'TextEncoder',
+  'Event', 'PointerEvent', 'MouseEvent', 'TouchEvent', 'KeyboardEvent', 'screen', 'history', 'alert', 'confirm', 'prompt', 'crypto', 'TextEncoder',
   'TextDecoder', 'Intl', 'Reflect', 'Proxy', 'BigInt', 'queueMicrotask', 'ResizeObserver',
   'WebSocket', 'RTCPeerConnection', 'btoa', 'atob', 'encodeURIComponent', 'decodeURIComponent',
   'Path2D', 'OffscreenCanvas', 'process',
