@@ -17,6 +17,9 @@ export function leaderSpeed(f, ctx) {
   }
   let v = vMax - (vMax - vMin) * t;
   if (f.leaderKey === 'nomad') v *= 1.20;
+  /* `spdMul` : allure du niveau de difficulté d'un bot (voir AI_STATS). Absent
+     chez le joueur, qui passe par skillMods juste au-dessus. */
+  if (f.spdMul) v *= f.spdMul;
   if (f.boostT > 0) v *= BOOST_MULT;
   return v;
 }

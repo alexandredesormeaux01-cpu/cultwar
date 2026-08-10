@@ -21,11 +21,14 @@
     "optimize:images": "node scripts/optimize-images.mjs",
     "optimize:geojson": "node scripts/optimize-geojson.mjs",
     "map:test": "node scripts/map-smoke-test.mjs",
+    "hub:test": "node scripts/hub-seed-test.mjs",
+    "tiles:build": "\"C:/Program Files/Blender Foundation/Blender 5.2/blender.exe\" --background --python blender/hex_tile_variants.py",
     "attack:test": "node scripts/attack-smoke-test.mjs",
     "orb:test": "node scripts/orb-smoke-test.mjs",
     "sound:test": "node scripts/sound-smoke-test.mjs",
     "optimize:audio": "node scripts/optimize-audio.mjs",
-    "recycle:test": "node scripts/agent-recycle-test.mjs"
+    "recycle:test": "node scripts/agent-recycle-test.mjs",
+    "ground:build": "node scripts/build-ground-textures.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.2",

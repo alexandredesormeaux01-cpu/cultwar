@@ -1,14 +1,97 @@
 /* Cerveau des Leaders IA.
-   Objectifs (ordre de priorité) :
-   1. CRISTAUX-BOMBES — peindre le territoire (fuel = capacité d'expansion).
-   2. Croyants en chemin — conversion opportuniste, jamais la mission principale.
-   3. Trajectoire stratégique :
-      · expand  → privilégier chemins / zones SANS peinture (neutre)
-      · raid    → privilégier chemins qui rongent le territoire d'un rival
+
+   La décision se prend en DEUX temps, et il faut le savoir avant de toucher
+   quoi que ce soit ici :
+
+   1. ctx.altarGoal (botAltarGoal, dans main.js) — la boucle RÉELLE du jeu :
+      chasser les esprits élémentaires, les livrer aux sanctuaires, défendre
+      les siens, intercepter le rival prêt à livrer. C'est elle qui décide
+      dans la quasi-totalité des cas, et c'est là que vit AI_BRAIN.
+
+   2. Le reste de ce fichier — cristaux, expansion, raids de peinture. Règle
+      ANTÉRIEURE, conservée comme filet : elle ne s'exécute que si la boucle
+      des sanctuaires n'a rien à proposer (aucun autel sur la carte). Ne pas
+      la prendre pour le comportement courant.
 
    Dépendances via `ctx` uniquement. Seul side-effect autorisé : ctx.doBoost(f). */
 
 import { FUEL_MAX, MATCH_DUR, MAP_R } from './constants.js';
+
+/* ---------------------------------------------------------------------------
+   Compréhension du jeu, par niveau de difficulté.
+
+   AI_TUNING (plus bas) règle la MÉCANIQUE : cadence de réflexion, bruit,
+   échantillonnage. Ça ne suffisait pas à rendre les niveaux perceptibles —
+   la boucle réelle du jeu (chasser des esprits, les livrer aux sanctuaires)
+   passe par botAltarGoal, qui ignorait complètement la difficulté. Tous les
+   bots y jouaient donc exactement le même jeu, à la vitesse de décision près.
+
+   La difficulté ne passe PAS par des erreurs volontaires. À tous les niveaux,
+   un bot joue de bons coups : il vise l'esprit qui sert son plan, coupe la
+   trajectoire des fuyards, prend les sanctuaires des rivaux, défend les siens
+   et attaque les porteurs. Un bot qui se trompe exprès se voit, et se voit
+   mal — on lit de la bêtise, pas un adversaire plus faible.
+
+   Elle passe par deux leviers :
+
+   1. AI_STATS — les CAPACITÉS. Recharge de sprint, cadence de tir, vitesse.
+      Un bot facile joue juste mais court moins vite et recharge plus
+      lentement : il est battu à la course, pas à la réflexion.
+
+   2. AI_MIND — la PROFONDEUR de réflexion. Tous raisonnent correctement ; les
+      plus forts raisonnent plus loin. Le facile joue au coup par coup — le
+      sanctuaire le plus accessible maintenant, l'esprit qui l'en rapproche.
+      Le difficile compare plusieurs sanctuaires, pèse la valeur de reprendre
+      une statue perdue, évite ceux qu'un rival va rafler, et choisit ses
+      esprits en fonction de ce plan.
+
+   ATTENTION — AI_STATS s'écarte volontairement du principe d'origine (« les
+   bots obéissent exactement aux mêmes règles que le joueur »). C'est un choix
+   assumé : sans écart de capacités, trois niveaux de difficulté qui jouent
+   tous bien se ressemblent. `normal` reste calé sur les valeurs du joueur, ce
+   qui garde une référence honnête.
+--------------------------------------------------------------------------- */
+
+/**
+ * Capacités physiques, en MULTIPLICATEURS des constantes du jeu.
+ *
+ * Cooldowns : > 1 = plus lent à recharger (handicap). Vitesse : < 1 = plus
+ * lent. `normal` vaut 1 partout, c'est-à-dire exactement le joueur — toute
+ * dérive se lit donc d'un coup d'œil par rapport à cette ligne.
+ */
+export const AI_STATS = {
+  easy:   { boostCd: 1.75, atkCd: 1.6,  speed: 0.88 },
+  normal: { boostCd: 1,    atkCd: 1,    speed: 1 },
+  hard:   { boostCd: 0.72, atkCd: 0.82, speed: 1.06 },
+};
+
+/**
+ * Profondeur de réflexion. Tout est ≥ 0 et rien n'est jamais désactivé : à
+ * valeur basse le bot raisonne juste, mais court.
+ *
+ * · horizon          nombre de sanctuaires réellement comparés. 1 = le
+ *                    meilleur immédiat, sans arbitrage.
+ * · recaptureBias    valeur ajoutée à la reprise d'une statue qu'on a perdue,
+ *                    au-delà de son coût brut : la reprendre restaure mon
+ *                    compte ET fait reculer l'autre.
+ * · contestAversion  répugnance à s'engager sur un sanctuaire qu'un rival est
+ *                    en train de rafler — « plutôt en viser un plus simple ».
+ * · spiritPlan       rigueur avec laquelle le choix des esprits sert le
+ *                    sanctuaire visé, plutôt que l'occasion du moment.
+ */
+export const AI_MIND = {
+  easy:   { horizon: 1, recaptureBias: 0.35, contestAversion: 0.3, spiritPlan: 0.5 },
+  normal: { horizon: 2, recaptureBias: 0.7,  contestAversion: 0.7, spiritPlan: 0.8 },
+  hard:   { horizon: 4, recaptureBias: 1.15, contestAversion: 1.1, spiritPlan: 1 },
+};
+
+export function brainOf(difficulty) {
+  return AI_MIND[difficulty] || AI_MIND.normal;
+}
+
+export function statsOf(difficulty) {
+  return AI_STATS[difficulty] || AI_STATS.normal;
+}
 
 export const AI_TUNING = {
   easy:   { think: [0.55, 0.35], samples: 6,  noise: 0.28, raidW: 0.40, refuelAt: 0.28, boost: 0.15, bombRange: 40 },

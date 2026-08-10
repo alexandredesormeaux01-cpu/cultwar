@@ -1,0 +1,11 @@
+Modeles de decor (CC0 — Creative Commons Zero 1.0)
+==================================================
+
+Quaternius — https://quaternius.com
+  Arbres, rochers, plantes, herbes, fleurs, champignons, cailloux, dalles.
+
+Kenney — https://kenney.nl  (Nature Kit 2.1)
+  cliff_steps_stone, cliff_steps_rock : volees de marches posees sur les rampes
+
+CC0 : libre d'usage en projet personnel, educatif et commercial, sans
+obligation de credit. Ce fichier est la par courtoisie envers les auteurs.

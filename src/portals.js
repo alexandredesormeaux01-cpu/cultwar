@@ -3,6 +3,102 @@
    ========================================================================== */
 
 import * as THREE from 'three';
+import { makeGLTFLoader, modelURL } from './gltf.js';
+import { toonMaterial, attachCartoonOutline } from './biomes.js';
+
+/* ---------------------------------------------------------------------------
+   Arche modélisée des portails de niveau
+
+   L'arche était bâtie en primitives (deux cylindres, un linteau, une clé de
+   voûte). Elle est remplacée par un modèle, mais l'ancienne construction reste
+   en REPLI : le .glb arrive de façon asynchrone, alors que le Hub peut être bâti
+   avant. Sans repli, un joueur qui entre dans le Hub au premier chargement
+   verrait des portails sans arche — juste un mur de peinture flottant.
+
+   Le modèle est chargé une fois, puis chaque portail en clone les meshes : la
+   géométrie et le matériau restent partagés.
+--------------------------------------------------------------------------- */
+const FRAME_URL = 'assets/models/portal_frame.glb';
+/* Hauteur voulue en unités monde. L'ancienne arche culminait à ~4,4 et son
+   ouverture accueillait un mur de peinture de 2,7 × 3,6 : on cale le modèle sur
+   la même enveloppe pour que le mur, l'obstacle et le rayon d'interaction
+   restent valables sans être retouchés. */
+const FRAME_H = 4.6;
+
+let frameTemplate = null;
+const frameWaiting = [];
+
+let cachedArchPortalGeo = null;
+
+/** Crée la géométrie sur-mesure de la nappe de peinture pour qu'elle épouse parfaitement la voûte du portail sans aucun jour. */
+function getArchPortalGeometry() {
+  if (!cachedArchPortalGeo) {
+    const shape = new THREE.Shape();
+    const r = 1.22;       // Rayon du demi-cercle supérieur (largeur totale = 2.44, s'encastre dans les piliers)
+    const yBase = 0.4;    // Bas de la nappe (caché sous le socle)
+    const yArch = 2.95;   // Naissance de la voûte (sommet atteint Y = 4.17, encastré dans la clé de voûte)
+
+    shape.moveTo(-r, yBase);
+    shape.lineTo(-r, yArch);
+    shape.absarc(0, yArch, r, Math.PI, 0, true);
+    shape.lineTo(r, yBase);
+    shape.closePath();
+
+    cachedArchPortalGeo = new THREE.ShapeGeometry(shape, 24);
+  }
+  return cachedArchPortalGeo;
+}
+
+export function loadPortalFrame() {
+  makeGLTFLoader().load(modelURL(FRAME_URL), (gltf) => {
+    const scene = gltf.scene;
+    scene.updateMatrixWorld(true);
+
+    scene.traverse((c) => {
+      if (!c.isMesh) return;
+      c.castShadow = true;
+      c.receiveShadow = true;
+      c.material = toonMaterial({ map: c.material && c.material.map });
+    });
+
+    const box = new THREE.Box3().setFromObject(scene);
+    const h = Math.max(0.001, box.max.y - box.min.y);
+    const scale = FRAME_H / h;
+    scene.scale.set(scale, scale, scale);
+    scene.updateMatrixWorld(true);
+
+    const box2 = new THREE.Box3().setFromObject(scene);
+    const cx = (box2.min.x + box2.max.x) * 0.5;
+    const cz = (box2.min.z + box2.max.z) * 0.5;
+    scene.position.set(-cx, -box2.min.y, -cz);
+
+    const template = new THREE.Group();
+    template.add(scene);
+
+    frameTemplate = template;
+    while (frameWaiting.length) frameWaiting.pop()();
+  });
+}
+
+export function onPortalFrameReady(cb) {
+  if (frameTemplate) cb(); else frameWaiting.push(cb);
+}
+
+/** Remplit le groupe d'arche d'un portail avec le modèle, s'il est chargé. */
+function fillArch(archGroup) {
+  if (!frameTemplate || !archGroup) return false;
+  for (const child of [...archGroup.children]) archGroup.remove(child);
+  const cloned = frameTemplate.clone(true);
+  archGroup.add(cloned);
+  return true;
+}
+
+/** Repose l'arche modélisée sur un portail déjà construit (appelé à l'arrivée
+ *  du .glb, quand le Hub a été bâti avant la fin du chargement). */
+export function applyPortalFrame(portal) {
+  if (!portal || !portal.userData) return;
+  fillArch(portal.userData.archGroup);
+}
 
 /**
  * Construit un portail 3D complet avec son arche, son intérieur (lumière/peinture),
@@ -30,26 +126,37 @@ export function createPortalMesh(spec) {
     metalness: 0.15,
   });
 
-  const pillarL = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.42, 4.2, 8), archMat);
-  pillarL.position.set(-1.6, 2.1, 0);
-  pillarL.castShadow = true;
+  /* L'arche vit dans son propre groupe : c'est ce qui permet de la remplacer
+     d'un bloc quand le modèle arrive après la construction du Hub. */
+  const archGroup = new THREE.Group();
+  group.add(archGroup);
+  group.userData.archGroup = archGroup;
 
-  const pillarR = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.42, 4.2, 8), archMat);
-  pillarR.position.set(1.6, 2.1, 0);
-  pillarR.castShadow = true;
+  if (!fillArch(archGroup)) {
+    /* Repli en primitives, tant que le .glb n'est pas chargé. Conservé tel quel :
+       c'est ce que voit un joueur qui entre dans le Hub au tout premier
+       chargement, avant que le modèle n'arrive. */
+    const pillarL = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.42, 4.2, 8), archMat);
+    pillarL.position.set(-1.6, 2.1, 0);
+    pillarL.castShadow = true;
 
-  const lintel = new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.6, 0.9), archMat);
-  lintel.position.set(0, 4.1, 0);
-  lintel.castShadow = true;
+    const pillarR = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.42, 4.2, 8), archMat);
+    pillarR.position.set(1.6, 2.1, 0);
+    pillarR.castShadow = true;
 
-  // KeyStone au sommet
-  const keystone = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.85, 1.05), archMat);
-  keystone.position.set(0, 4.25, 0);
+    const lintel = new THREE.Mesh(new THREE.BoxGeometry(3.9, 0.6, 0.9), archMat);
+    lintel.position.set(0, 4.1, 0);
+    lintel.castShadow = true;
 
-  group.add(pillarL, pillarR, lintel, keystone);
+    // KeyStone au sommet
+    const keystone = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.85, 1.05), archMat);
+    keystone.position.set(0, 4.25, 0);
+
+    archGroup.add(pillarL, pillarR, lintel, keystone);
+  }
 
   // --- 2. Intérieur du Portail (Nappe d'énergie / Lumière / Peinture) ---
-  const portalGeo = new THREE.PlaneGeometry(2.7, 3.6);
+  const portalGeo = getArchPortalGeometry();
 
   // Matériau intérieur dynamique
   const playerColor = new THREE.Color(cultColor);
@@ -70,7 +177,7 @@ export function createPortalMesh(spec) {
   const wallFor = (st) => (st === 'won' ? paintWallMat : paintWallIdleMat) || portalMat;
 
   const portalMesh = new THREE.Mesh(portalGeo, wallFor(state));
-  portalMesh.position.set(0, 2.1, 0);
+  portalMesh.position.set(0, 0, 0);
   group.add(portalMesh);
   group.userData.portalMesh = portalMesh;
   group.userData.portalMat = portalMat;

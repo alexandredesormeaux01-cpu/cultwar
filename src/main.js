@@ -21,20 +21,23 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { gltfLoader, makeGLTFLoader } from './gltf.js';
 import { renderSpiritPortrait, getSpiritPortrait } from './spirit-portrait.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { openProgression, setPlayHandler, setHubHandler, getGlobalStats, formatBelievers, getSpiritsCount, addSpirits, getCountryPortalState, recordPortalVictory } from './progression.js';
-import { createPortalMesh, createCentralAltarMesh, createGreatPlanetPortalMesh, updatePortalsSystem, setPortalState } from './portals.js';
+import { openProgression, setPlayHandler, getGlobalStats, formatBelievers, getSpiritsCount, addSpirits, getCountryPortalState } from './progression.js';
+import { createPortalMesh, createCentralAltarMesh, createGreatPlanetPortalMesh, updatePortalsSystem, setPortalState,
+  loadPortalFrame, onPortalFrameReady, applyPortalFrame } from './portals.js';
 import {
   BIOMES, getBiomeForIso, randomBiomeKey, buildBiomeScenery, toonMaterial, patchToonOutline, attachCartoonOutline,
   loadGrass, onGrassReady, buildBiomeGrass,
   loadTrees, onTreesReady, buildBiomeTrees,
   loadNature, onNatureReady, buildBiomeNature,
 } from './biomes.js';
+import { GROUND_NOISE_GLSL } from './groundNoise.js';
 import {
   generateIsland, buildIslandMeshes, buildVoid, updateVoid, setVoidDim, disposeVoid,
   makeTilePlacer, resolveIsland, randomPoint as islandRandomPoint, isSolid,
   HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, tileAt,
+  buildRampStairs,
   buildPaintSurface, flatTiles,
-  reserveSanctuary,
+  reserveSanctuary, loadTileVariant, setGroundMaterial,
 } from './hexmap.js';
 import { initNative } from './cap.js';
 import { getSkillMods } from './skills.js';
@@ -67,9 +70,9 @@ import {
 import { createAgent, resetAgent, createFaction, createTeam } from './sim/state.js';
 import { leaderSpeed as _leaderSpeed } from './sim/leader.js';
 import { effects } from './sim/effects.js';
-import { aiThink as _aiThink, paintMixAround as _paintMixAround } from './sim/ai.js';
+import { aiThink as _aiThink, paintMixAround as _paintMixAround, brainOf, statsOf } from './sim/ai.js';
 import { stepLeaders as _stepLeaders, stepLeaderRepulsion as _stepLeaderRepulsion, playerDir } from './sim/leader-tick.js';
-import { initGamepad, pollGamepad } from './gamepad.js';
+import { initGamepad, pollGamepad, setPadFocus } from './gamepad.js';
 import { stepCrowd as _stepCrowd } from './sim/crowd-tick.js';
 import {
   EVENT_TIMES, EVENT_SPIN_DUR, EVENT_REVEAL_DUR,
@@ -80,7 +83,9 @@ import {
   pickCard, buildCardSchedule, applyCard, bannerTone,
 } from './sim/cards.js';
 import { createNetClient } from './net/client.js';
-import { createRng } from './sim/rng.js';
+import { createRng, isoSeed } from './sim/rng.js';
+import { updateHeroCutout } from './heroCutout.js';
+import { createLobbyStage } from './lobbyStage.js';
 import { drawOrb, drawGlow } from './orb-texture.js';
 import {
   projectiles, clearProjectiles, pickTarget, fireAttack, stepProjectiles,
@@ -100,6 +105,32 @@ function withSeededRandom(seed, fn) {
   Math.random = () => rng.next();
   try { return fn(); } finally { Math.random = real; }
 }
+
+/* Graine de la carte courante, ou null si elle est tirée au sort.
+   Une partie doit surprendre, un hub NON : c'est le décor permanent d'un pays,
+   on y ancre des visuels de quête, et un joueur qui revient doit retrouver sa
+   colline et son rocher au même endroit. La graine du hub est donc dérivée du
+   code pays, ce qui la rend stable sans avoir à stocker quoi que ce soit. */
+let currentMapSeed = null;
+
+/**
+ * Sème un semis de décor sur son PROPRE flux aléatoire.
+ *
+ * Ces semis tournent deux fois selon le moment : dans buildMap si le modèle est
+ * déjà chargé, dans le rappel onXxxReady sinon. Sur le flux commun, les deux
+ * chemins ne consomment pas le même nombre de tirages avant d'y arriver — la
+ * première visite d'un hub et la suivante, où l'asset est en cache, ne
+ * donneraient pas le même décor. En dérivant une graine par semis, le résultat
+ * ne dépend plus de l'ordre d'arrivée des modèles.
+ * Hors hub (currentMapSeed nul), rien ne change : le vrai hasard reprend.
+ */
+function seededScatter(tag, fn) {
+  if (currentMapSeed === null) return fn();
+  return withSeededRandom((currentMapSeed ^ tag) >>> 0, fn);
+}
+const SCATTER_GRASS = 0x9e3779b9;
+const SCATTER_TREES = 0x85ebca6b;
+const SCATTER_NATURE = 0xc2b2ae35;
 
 initNative();
 
@@ -506,7 +537,18 @@ function disposeMap() {
   mapObjects = [];
 }
 
-function buildMap(biomeKey = 'temperate') {
+/**
+ * Bâtit la carte. `seed` non nul = carte REPRODUCTIBLE : même graine, même île,
+ * même décor, à la tuile près. C'est ce qui permet au hub d'un pays d'être un
+ * lieu, et non un tirage différent à chaque chargement.
+ */
+function buildMap(biomeKey = 'temperate', seed = null) {
+  currentMapSeed = seed;
+  if (seed === null) return buildMapInner(biomeKey);
+  return withSeededRandom(seed, () => buildMapInner(biomeKey));
+}
+
+function buildMapInner(biomeKey) {
   // Retire l'île précédente (menu / partie d'avant) — sinon les trous restent
   // « remplis » par la croûte solide d'en dessous.
   disposeMap();
@@ -536,6 +578,9 @@ function buildMap(biomeKey = 'temperate') {
   sun.target.position.set(0, 0, 0);
   sun.target.updateMatrixWorld();
 
+  // Matière du sol du biome (sable, herbe, neige…) — uniformes seuls, pas de
+  // recompilation de shader, donc pas de saccade au changement de carte.
+  setGroundMaterial(biomeKey);
   // L'île : croûte hexagonale teintée + roche suspendue dessous
   mapObjects.push(...buildIslandMeshes(scene, island));
   // Le vide : dégradé d'abîme, éclats en suspension, poussière lumineuse
@@ -595,9 +640,16 @@ function buildMap(biomeKey = 'temperate') {
   pendingHouses = scenery.houses;
   // Herbes et arbres : modèles externes, sans effet s'ils ne sont pas encore
   // chargés (voir onGrassReady / onTreesReady)
-  mapObjects.push(...buildBiomeGrass(scene, biomeKey, MAP_R, placer));
-  mapObjects.push(...buildBiomeTrees(scene, biomeKey, MAP_R, placer));
-  mapObjects.push(...buildBiomeNature(scene, biomeKey, MAP_R, placer));
+  mapObjects.push(...seededScatter(SCATTER_GRASS,
+    () => buildBiomeGrass(scene, biomeKey, MAP_R, placer)));
+  mapObjects.push(...seededScatter(SCATTER_TREES,
+    () => buildBiomeTrees(scene, biomeKey, MAP_R, placer)));
+  mapObjects.push(...seededScatter(SCATTER_NATURE,
+    () => buildBiomeNature(scene, biomeKey, MAP_R, placer)));
+  /* Volées de marches sur les rampes. Comme l'herbe et les arbres, le modèle peut
+     arriver après la carte : sans effet s'il n'est pas encore chargé, reposé par
+     onNatureReady ci-dessous. */
+  mapObjects.push(...buildRampStairs(scene, island, biomeKey));
 }
 
 /* ============================== Meshes des agents ============================== */
@@ -994,6 +1046,10 @@ function refreshLeaderMeshIfLoaded(key) {
       f.grp = newGrp;
     }
   }
+  /* Le salon montre les mêmes modèles : un personnage arrivé après l'ouverture
+     du salon y resterait en repli (le moine, ou le chibi) jusqu'à ce que
+     quelqu'un change quelque chose. On rebâtit la rangée. */
+  if (lobbyStage && lobbyStage.active) lobbyStage.rebuild(net.getSlots());
 }
 
 /* ============================== État du jeu ============================== */
@@ -2884,6 +2940,10 @@ function shatterStatue(a, wasOwner) {
 
 function activateAltar(a, f) {
   const wasOwner = a.owner;
+  /* Mémoire du dépossédé : c'est ce qui permet à une IA de distinguer
+     « prendre un sanctuaire » de « REPRENDRE le mien ». Les deux ne valent pas
+     la même chose — le second efface le gain de celui qui l'avait pris. */
+  if (wasOwner >= 0 && wasOwner !== f.i) a.lastOwner = wasOwner;
   a.owner = f.i;
   a.filled = 0;
   /* Chaque prise renchérit la suivante — pour tout le monde, y compris celui
@@ -3981,10 +4041,31 @@ const paintMat = new THREE.MeshBasicMaterial({
 /* Le rendu « gel liquide » de la peinture est branché ici plutôt que collé à un
    seul matériau : le mur de peinture des portails du Hub réutilise exactement
    le même shader, pour que ce soit visiblement la MÊME matière qu'au sol. */
-function applyPaintShader(paintMat) {
+function applyPaintShader(paintMat, isTerrainPaint = false) {
 paintMat.onBeforeCompile = (shader) => {
   paintMat.userData.shader = shader;
   shader.uniforms.uTime = monkTimeU;
+
+  if (isTerrainPaint) {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+attribute vec2 tileCenter;
+${GROUND_NOISE_GLSL}
+`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+vec3 gWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+float distToTile = length(gWorld.xz - tileCenter);
+float gFade = 1.0 - smoothstep(2.70, 3.15, distToTile);
+transformed.y += gLift(gWorld.xz) * gFade;
+`
+      );
+  }
+
   shader.fragmentShader = shader.fragmentShader
     .replace('#include <common>', `#include <common>
 uniform float uTime;
@@ -4090,11 +4171,11 @@ vec3 paintVoronoi(vec2 uv, float time) {
       #endif
     `);
 };
-paintMat.customProgramCacheKey = () => 'paint-water-gel-v19';
+paintMat.customProgramCacheKey = () => 'paint-water-gel-v20' + (isTerrainPaint ? '-terrain' : '');
 paintMat.needsUpdate = true;
 return paintMat;
 }
-applyPaintShader(paintMat);
+applyPaintShader(paintMat, true);
 
 /* Mur de peinture d'un portail conquis : même shader que la nappe au sol, mais
    alimenté par un aplat plein de la couleur du culte au lieu du canevas de
@@ -4123,6 +4204,73 @@ function makePortalPaintMaterial(cultColor) {
     side: THREE.DoubleSide,
   });
   return applyPaintShader(mat);
+}
+
+/** Aperçu de peinture pour le socle vedette du salon.
+ *  On PEINT le motif à la bonne échelle dans le canevas (pas via texture.repeat
+ *  + shader uv×55) : sinon le grain reste microscopique, et un HMR laissait
+ *  l'ancien matériau collé au siège. */
+function makeLobbyPaintMaterial(hex) {
+  const css = `#${((hex >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
+  const N = 256;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = N;
+  const c = cv.getContext('2d');
+  c.clearRect(0, 0, N, N);
+
+  /* Disque plein qui touche les bords : le mesh est circulaire, le canevas doit
+     l'être aussi — un aplat carré laissait un carré au centre du socle. */
+  const cx = N * 0.5, cy = N * 0.5, R = N * 0.49;
+  c.fillStyle = css;
+  c.beginPath();
+  c.arc(cx, cy, R, 0, Math.PI * 2);
+  c.fill();
+
+  /* Grosses « cellules » de gel : 5–6 taches plus claires, lisibles de loin.
+     C'est l'équivalent visuel des nervures Voronoï du shader, à l'échelle du
+     socle plutôt qu'à celle d'une nappe de match. */
+  const rgb = css.slice(1);
+  const r = parseInt(rgb.slice(0, 2), 16);
+  const g = parseInt(rgb.slice(2, 4), 16);
+  const b = parseInt(rgb.slice(4, 6), 16);
+  const lift = (a) => `rgba(${Math.min(255, r + 55)},${Math.min(255, g + 45)},${Math.min(255, b + 40)},${a})`;
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + 0.4;
+    const d = R * (0.22 + (i % 3) * 0.12);
+    const x = cx + Math.cos(a) * d;
+    const y = cy + Math.sin(a) * d;
+    const rad = R * (0.28 + (i % 2) * 0.08);
+    const grad = c.createRadialGradient(x, y, 0, x, y, rad);
+    grad.addColorStop(0, lift(0.55));
+    grad.addColorStop(0.55, lift(0.22));
+    grad.addColorStop(1, lift(0));
+    c.fillStyle = grad;
+    c.beginPath();
+    c.arc(x, y, rad, 0, Math.PI * 2);
+    c.fill();
+  }
+  /* Liseré brillant au bord — même lecture que le rim du shader gel. */
+  c.strokeStyle = lift(0.65);
+  c.lineWidth = N * 0.03;
+  c.beginPath();
+  c.arc(cx, cy, R * 0.92, 0, Math.PI * 2);
+  c.stroke();
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = paintTex.colorSpace;
+  tex.flipY = true;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+
+  return new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
 }
 /* ---- Nappe de peinture ----
    C'était un simple quad posé à y = 0.04. Depuis que les tuiles ont des
@@ -4611,7 +4759,10 @@ function doBoost(f) {
     soundEngine.playSFX('boost');
   } else {
     if ((f.boostCd || 0) > 0) return;
-    f.boostCd = BOOST_CD;
+    /* `boostCdMul` : capacité du niveau de difficulté (voir AI_STATS). Un bot
+       facile attend nettement plus longtemps entre deux sprints, ce qui se voit
+       à la course sans rien changer à sa façon de jouer. */
+    f.boostCd = BOOST_CD * (f.boostCdMul ?? 1);
   }
   f.boostT = BOOST_DUR;
 }
@@ -4842,6 +4993,10 @@ addEventListener('keydown', e => {
   /* Touches déjà prises : Espace (boost), E et F (pouvoirs), WASD et flèches
      (déplacement, voir playerDir). Le filet prend KeyQ — code physique, donc la
      touche voisine du déplacement aussi bien en QWERTY qu'en AZERTY. */
+  if ((e.code === 'KeyP' || e.code === 'Escape') && state === 'play') {
+    e.preventDefault();
+    togglePauseModal();
+  }
   if (e.code === 'KeyQ' && !keys.KeyQ && state === 'play') {
     playerAttack();
   }
@@ -4904,7 +5059,22 @@ initGamepad({
   input,
   getState: () => state,
   isTouchActive: () => joyId !== null,
-  onBoost: () => { audioInit(); if (state === 'play') doBoost(factions[0]); },
+  /* `overworld` autant que `play` : le Hub a son propre élan (relançable sans
+     limite), et la barre d'espace l'autorise déjà là-bas. Ne tester que 'play'
+     rendait l'élan inaccessible à la manette dans tout le Hub — quel que soit le
+     bouton pressé, puisque tous passent par ce même crochet. */
+  onBoost: () => {
+    audioInit();
+    if (state === 'play' || state === 'overworld') doBoost(factions[0]);
+  },
+  /* Le Hub valide portails et autel en lisant keys.KeyE : on passe par la même
+     porte plutôt que d'appeler les branches d'ouverture d'écran une à une,
+     sinon chaque nouveau déclencheur du Hub devrait être recâblé ici aussi. */
+  onInteract: () => { audioInit(); keys.KeyE = true; },
+  onPause: () => {
+    audioInit();
+    togglePauseModal();
+  },
   onAttack: () => {
     if (state !== 'play') return false;
     audioInit();
@@ -4914,6 +5084,10 @@ initGamepad({
       setTimeout(() => netBtnEl.classList.remove('swinging'), 160);
     }
     return fired;
+  },
+  onCycleCam: () => {
+    audioInit();
+    cycleCamDist();
   },
 });
 
@@ -4955,37 +5129,168 @@ if (netBtnEl) {
    qui fait converger le bot vers un objectif au lieu de papillonner. */
 const _botCarry = new Int32Array(9);
 
+/* ---- Cortèges de TOUTES les factions, calculés une fois par image ----
+   Un bot a besoin de savoir ce que portent ses rivaux : c'est ce qui lui dit
+   lequel est sur le point de rafler un sanctuaire. Compter agent par agent
+   pour chaque bot ferait autant de balayages de la foule qu'il y a de bots ;
+   un seul suffit, et le résultat sert à tout le monde. */
+const _carryByFaction = [];
+let _carryStamp = -1;
+function carryOf(fi) {
+  if (_carryStamp !== elapsed) {
+    _carryStamp = elapsed;
+    for (let i = 0; i < factions.length; i++) {
+      if (!_carryByFaction[i]) _carryByFaction[i] = new Int32Array(9);
+      else _carryByFaction[i].fill(0);
+    }
+    for (const ag of agents) {
+      if (!ag || ag.dead) continue;
+      const owner = ag.followerOf ?? -1;
+      if (owner < 0 || !_carryByFaction[owner]) continue;
+      const v = variantOf(ag.id);
+      if (v >= ELEM_FIRST) _carryByFaction[owner][v]++;
+    }
+  }
+  return _carryByFaction[fi] || _botCarry;
+}
+
+/** Distance d'un leader à un point, sans racine quand on ne compare que des rangs. */
+function leaderDist(f, x, z) {
+  return Math.hypot(f.leader.x - x, f.leader.z - z);
+}
+
+/**
+ * Menace pesant sur un sanctuaire : le rival le plus avancé vers sa prise.
+ *
+ * Sert deux décisions opposées — défendre une statue à soi, ou couper l'herbe
+ * sous le pied d'un rival sur le point d'en prendre une. C'est la lecture qui
+ * sépare un bot qui joue sa partie dans son coin d'un bot qui joue CONTRE les
+ * autres, et elle ne s'ouvre qu'aux niveaux qui savent s'en servir.
+ *
+ * @returns {{f: object, d: number, ready: boolean}|null}
+ */
+function altarThreat(al, exceptFaction) {
+  let worst = null, worstD = Infinity, worstReady = false;
+  for (const o of factions) {
+    if (!o || !o.alive || o === exceptFaction || !o.leader) continue;
+    if (o.i === 0 && !o.alive) continue;
+    const need = al.need - al.filled;
+    const ready = carryOf(o.i)[al.variant] >= need;
+    const d = leaderDist(o, al.x, al.z);
+    /* Un porteur prêt compte double : il lui suffit d'arriver. */
+    const rank = ready ? d : d + 60;
+    if (rank < worstD) { worstD = rank; worst = o; worstReady = ready; }
+  }
+  return worst ? { f: worst, d: leaderDist(worst, al.x, al.z), ready: worstReady } : null;
+}
+
 function botAltarGoal(f) {
   if (!f || !altars.length) return null;
 
-  _botCarry.fill(0);
-  for (const ag of agents) {
-    if (!ag || ag.dead || (ag.followerOf ?? -1) !== f.i) continue;
-    const v = variantOf(ag.id);
-    if (v >= ELEM_FIRST) _botCarry[v]++;
-  }
+  const B = brainOf(f.aiDifficulty || currentDifficulty);
+  _botCarry.set(carryOf(f.i));
 
   /* a) Un sanctuaire à portée de bourse : on livre. */
   let goAltar = null, goD = Infinity;
   for (const al of altars) {
     if (al.owner === f.i) continue;
     if (_botCarry[al.variant] < al.need - al.filled) continue;
-    const d = Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
+    const d = leaderDist(f, al.x, al.z);
     if (d < goD) { goD = d; goAltar = al; }
   }
   if (goAltar) return { mode: 'altar', pt: { x: goAltar.x, z: goAltar.z } };
 
-  /* b) Sinon : quel élément me rapproche le plus d'une prise ? On pondère le
-        manque par la distance, sinon le bot traverse la carte pour un autel à
-        peine moins cher que celui qu'il a sous le nez. */
-  let wantVar = -1, bestCost = Infinity;
+  /* a') Défense. Une statue à soi qu'un rival chargé vient reprendre se défend
+        en se plantant dessus : à portée, on lui tire dessus et il lâche ses
+        esprits. On n'y va que si la course est jouable — courir en vain, c'est
+        perdre la statue ET le temps. */
+  for (const al of altars) {
+    if (al.owner !== f.i) continue;
+    const th = altarThreat(al, f);
+    if (!th || !th.ready) continue;
+    if (leaderDist(f, al.x, al.z) > th.d + 8) continue;
+    return { mode: 'altar', pt: { x: al.x, z: al.z } };
+  }
+
+  /* a'') Interception. Un rival chargé de ce qu'il faut, tout près d'un
+        sanctuaire, est la cible la plus rentable de la carte : un tir le met à
+        terre et lui fait lâcher un esprit qu'on ramasse au passage. */
+  {
+    let mark = null, markCost = Infinity;
+    for (const al of altars) {
+      const th = altarThreat(al, f);
+      if (!th || !th.ready || th.d > 26) continue;
+      const myD = leaderDist(f, th.f.leader.x, th.f.leader.z);
+      if (myD > 22) continue;
+      const cost = myD + th.d * 0.5;
+      if (cost < markCost) { markCost = cost; mark = th.f; }
+    }
+    if (mark) return { mode: 'hunt', pt: { x: mark.leader.x, z: mark.leader.z } };
+  }
+
+  /* a''') Agression d'opportunité. Un rival chargé qui passe à portée est un
+        esprit gratuit : on le met à terre, il le lâche, on le ramasse. C'est
+        l'astuce centrale du jeu, jouée à tous les niveaux — un bot qui ne s'en
+        prend jamais au joueur n'est pas un adversaire. */
+  {
+    let prey = null, preyCost = Infinity;
+    for (const o of factions) {
+      if (!o || !o.alive || o === f || !o.leader) continue;
+      if ((o.downT || 0) > 0) continue;         // déjà à terre : rien à en tirer
+      const load = carryOf(o.i).reduce((a, b) => a + b, 0);
+      if (load <= 0) continue;                  // rien à lui faire lâcher
+      const d = leaderDist(f, o.leader.x, o.leader.z);
+      if (d > 18) continue;
+      const cost = d - load * 4;                // plus il porte, plus ça vaut le détour
+      if (cost < preyCost) { preyCost = cost; prey = o; }
+    }
+    if (prey) return { mode: 'hunt', pt: { x: prey.leader.x, z: prey.leader.z } };
+  }
+
+  /* b) LE PLAN. Quel sanctuaire viser, et donc quel élément chasser ?
+        Tous les niveaux calculent le même coût de base — manque à combler,
+        distance, valeur de reprise. C'est la PROFONDEUR qui change :
+
+        · horizon = 1 (facile) : il retient le meilleur coût immédiat, point.
+        · horizon > 1 : il garde les meilleurs candidats et les départage sur
+          ce qu'un coup d'avance apporte — la menace pesant dessus, et donc
+          l'intérêt d'aller plutôt vers un sanctuaire moins disputé.
+
+        Aucun de ces choix n'est mauvais ; le plus profond est simplement
+        mieux informé. */
+  const plans = [];
   for (const al of altars) {
     if (al.owner === f.i) continue;
     const manque = (al.need - al.filled) - _botCarry[al.variant];
     if (manque <= 0) continue;
-    const d = Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
-    const cost = manque * 12 + d;
-    if (cost < bestCost) { bestCost = cost; wantVar = al.variant; }
+    let cost = manque * 12 + leaderDist(f, al.x, al.z);
+    /* Prendre un sanctuaire à un rival vaut double : ça lui en retire un et ça
+       m'en donne un. Reprendre celui qu'il m'a pris vaut encore plus — c'est
+       une remise à zéro de son gain, et les niveaux profonds le voient. */
+    if (al.owner >= 0) {
+      cost -= 14;
+      if (al.lastOwner === f.i) cost -= 20 * B.recaptureBias;
+    }
+    plans.push({ al, cost });
+  }
+
+  let wantVar = -1;
+  if (plans.length) {
+    plans.sort((p, q) => p.cost - q.cost);
+    const pool = plans.slice(0, Math.max(1, B.horizon));
+    if (pool.length > 1) {
+      /* Coup d'avance : un sanctuaire qu'un rival chargé va rafler avant moi
+         est un plan mort. Mieux vaut en viser un plus simple maintenant que
+         d'arriver deuxième sur le plus tentant. */
+      for (const p of pool) {
+        const th = altarThreat(p.al, f);
+        if (!th || !th.ready) continue;
+        const myD = leaderDist(f, p.al.x, p.al.z);
+        if (th.d < myD) p.cost += (myD - th.d) * 1.6 * B.contestAversion;
+      }
+      pool.sort((p, q) => p.cost - q.cost);
+    }
+    wantVar = pool[0].al.variant;
   }
 
   /* c) Cap sur l'esprit voulu. À défaut, n'importe quel esprit libre fera
@@ -5009,7 +5314,9 @@ function botAltarGoal(f) {
     const dx = ag.x - f.leader.x, dz = ag.z - f.leader.z;
     const d = Math.hypot(dx, dz) || 1e-3;
 
-    /* Fuyard : si sa vitesse pointe à l'opposé de nous, la poursuite s'allonge. */
+    /* Fuyard : si sa vitesse pointe à l'opposé de nous, la poursuite s'allonge.
+       Lu par tous les niveaux — courir dans le dos d'un fuyard n'est pas une
+       stratégie plus faible, c'est une perte sèche. */
     const flee = (ag.vx || 0) * (dx / d) + (ag.vz || 0) * (dz / d);
     let cost = d + Math.max(0, flee) * 2.2;
 
@@ -5020,18 +5327,43 @@ function botAltarGoal(f) {
       if (od < d) cost += (d - od) * 1.4;
     }
 
-    const wanted = v === wantVar;
-    if (!wanted) cost += 26;                      // utile, mais pas prioritaire
-    if ((ag.followerOf ?? -1) >= 0) cost += 10;   // vol possible, mais plus dur
+    /* Adéquation au PLAN. C'est ici que se lit la profondeur de réflexion :
+       tous préfèrent l'élément du sanctuaire visé, mais un bot profond s'y
+       tient — il refuse les esprits qui ne le rapprochent pas de sa prise —
+       là où un bot court prend volontiers ce qui passe. Deux jeux également
+       valables ; le second converge simplement moins vite. */
+    if (v !== wantVar) cost += 12 + 22 * B.spiritPlan;
+
+    /* Voler un esprit à un rival : le mettre à terre d'un tir le lui fait
+       lâcher. Bon coup à tout niveau, un peu plus cher qu'un esprit libre. */
+    const heldBy = ag.followerOf ?? -1;
+    if (heldBy >= 0) cost += 6;
     /* Un esprit à terre ne fuit plus : c'est une prise offerte, et elle
-       expire. Un bot qui l'ignorerait pour courir après un fuyard jouerait
-       nettement moins bien qu'un joueur. */
+       expire. L'ignorer pour courir après un fuyard serait une faute. */
     if (ag.downT > 0) cost -= 40;
 
     if (cost < bestScore) { bestScore = cost; best = ag; }
   }
 
+  // Anticipation : viser où l'esprit SERA, à tous les niveaux.
   if (best) return { mode: 'hunt', pt: aimAhead(f, best), spirit: best };
+
+  /* c') Plus un esprit libre : les maisons en produisent. Rester planté devant
+        une porte est le geste que fait un joueur qui connaît le jeu — et c'est
+        aussi une prise de risque, à découvert et à portée de tir. Tourner en
+        rond près d'un autel (branche d) serait du temps perdu. */
+  if (houses.length) {
+    let hBest = null, hCost = Infinity;
+    for (const h of houses) {
+      if (!h || !h.alive) continue;
+      /* Une maison déjà tenue par un rival demande de faire redescendre sa
+         jauge avant de la faire monter : nettement plus long. */
+      const contested = (h.siegeCult >= 0 && h.siegeCult !== f.team) ? 22 : 0;
+      const cost = leaderDist(f, h.x, h.z) + contested;
+      if (cost < hCost) { hCost = cost; hBest = h; }
+    }
+    if (hBest) return { mode: 'altar', pt: { x: hBest.x, z: hBest.z } };
+  }
 
   /* d) Aucun esprit disponible : plutôt que de rendre la main à l'ancienne IA
         (cristaux/expansion, notions mortes) qui laissait le bot errer, on se
@@ -5212,8 +5544,14 @@ const PORTAL_IDLE_PAINT = '#8c93a3';
 /** Nombre de villageois qui peuplent le Hub. */
 const HUB_VILLAGERS = 16;
 
-/** Libellé de la touche d'interaction, selon la plateforme. */
-const ACTION_HINT = IS_MOBILE ? 'Avancez pour entrer' : 'Avancez, ou E, pour entrer';
+/** Libellé de la touche d'interaction, selon le périphérique EFFECTIVEMENT
+ *  branché. Évalué à chaque affichage et non une fois au chargement : une
+ *  manette peut être connectée à tout moment, et l'invite doit alors parler de
+ *  A plutôt que de la touche E que le joueur n'a pas sous les doigts. */
+function actionHint() {
+  if (document.body.classList.contains('has-gamepad')) return 'Avancez, ou (X), pour entrer';
+  return IS_MOBILE ? 'Avancez pour entrer' : 'Avancez, ou E, pour entrer';
+}
 
 /** Portails de niveau indexés par id (hors autel / grand portail). */
 let overworldZonePortals = [];
@@ -5274,12 +5612,12 @@ function findSolidSpot(dx, dz, radius, clearance = 0) {
   return { x: 0, z: 0 };
 }
 
-/** Repositionne un esprit sauvage sur une tuile solide, à l'écart du centre. */
-function respawnWildSpirit(mesh) {
+/** Repositionne un esprit élémentaire sauvage sur une tuile solide de l'île. */
+function respawnWildSpirit(spirit) {
   const ang = Math.random() * Math.PI * 2;
-  const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 8 + Math.random() * 14);
-  mesh.position.set(p.x, (groundY(p.x, p.z) || 0) + 1.2, p.z);
-  mesh.userData.baseY = mesh.position.y;
+  const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 7 + Math.random() * 15);
+  spirit.x = p.x;
+  spirit.z = p.z;
 }
 
 /** Affiche (ou masque) l'invite contextuelle du Hub. */
@@ -5330,7 +5668,11 @@ function openOverworldHub(ctx) {
 
   const iso = overworldCtx.world?.iso || 'FRA';
   const biomeKey = getBiomeForIso(iso);
-  buildMap(biomeKey);
+  /* Graine dérivée du pays : le hub du Japon est TOUJOURS le même hub, celui du
+     Pérou aussi, et ils diffèrent entre eux. Rien n'est stocké — le code pays
+     suffit à le reconstruire — mais c'est bien un lieu fixe, sur lequel on peut
+     poser des repères de quête à des coordonnées connues. */
+  buildMap(biomeKey, isoSeed(iso));
 
   const save = JSON.parse(localStorage.getItem('cultio_progress_v3') || '{}');
   const targetLeaderKey = overworldCtx?.playerLeader || save.playerLeader || playerLeaderKey || 'monk';
@@ -5434,37 +5776,37 @@ function openOverworldHub(ctx) {
     overworldZonePortals[i] = pMesh;
   }
 
-  // 4. Esprits sauvages récoltables
-  const spiritMat = new THREE.MeshStandardMaterial({
-    color: 0xffea77,
-    emissive: 0xffaa00,
-    emissiveIntensity: 0.8,
-    roughness: 0.2,
-  });
-  const sGeo = new THREE.SphereGeometry(0.35, 12, 8);
-  for (let i = 0; i < 5; i++) {
-    const sMesh = new THREE.Mesh(sGeo, spiritMat);
-    respawnWildSpirit(sMesh);
-    scene.add(sMesh);
-    mapObjects.push(sMesh);
-    overworldSpirits.push(sMesh);
-  }
-
-  // 5. Villageois pacifiques : les VRAIS modèles de la foule (paysan, paysanne,
-  //    chevalier), pris dans les InstancedMesh VAT déjà chargés — donc animés,
-  //    contourés et gratuits en draw calls. On leur réserve des ids dont la
-  //    variante est un villageois PNJ (cf. CROWD_VARIANT).
+  // 4. Villageois pacifiques & Esprits Élémentaires : réinitialiser toutes les instances
   for (const m of crowds) {
     for (let i = 0; i < m.userData.slots; i++) m.setMatrixAt(i, ZERO_M);
     if (m.instanceMatrix) m.instanceMatrix.needsUpdate = true;
   }
 
-  const HUB_VILLAGER_SLOTS = [0, 6, 12, 18, 24];   // places PNJ d'un cycle
-  let maxVillagerId = 0;
+  // 5. Esprits sauvages récoltables : les VRAIS modèles 3D d'Élémentaires animés (Feu, Eau, Air, Lumière, Terre, Éther)
+  overworldSpirits = [];
+  const HUB_SPIRIT_SLOTS = [1, 2, 3, 4, 5, 7]; // 6 esprits élémentaires (un de chaque type !)
+  let maxHubAgentId = 0;
+  for (let i = 0; i < HUB_SPIRIT_SLOTS.length; i++) {
+    const id = HUB_SPIRIT_SLOTS[i];
+    maxHubAgentId = Math.max(maxHubAgentId, id);
+    const sp = {
+      id,
+      x: 0,
+      z: 0,
+      face: Math.random() * Math.PI * 2,
+      variant: variantOf(id),
+    };
+    respawnWildSpirit(sp);
+    overworldSpirits.push(sp);
+    setAgentColor(id, WHITE); // texture d'origine du modèle d'élémentaire 3D
+  }
+
+  // 6. Villageois pacifiques (PNJ humains : paysans, paysannes, chevaliers)
+  const HUB_VILLAGER_SLOTS = [0, 6, 12, 18, 24]; // places PNJ d'un cycle
   for (let i = 0; i < HUB_VILLAGERS; i++) {
     const id = Math.floor(i / HUB_VILLAGER_SLOTS.length) * CROWD_CYCLE
       + HUB_VILLAGER_SLOTS[i % HUB_VILLAGER_SLOTS.length];
-    maxVillagerId = Math.max(maxVillagerId, id);
+    maxHubAgentId = Math.max(maxHubAgentId, id);
     const ang = Math.random() * Math.PI * 2;
     const p = findSolidSpot(Math.cos(ang), Math.sin(ang), 6 + Math.random() * 18);
     overworldVillagers.push({
@@ -5473,9 +5815,9 @@ function openOverworldHub(ctx) {
       speed: 1.3 + Math.random() * 1.1,
       pause: Math.random() * 4,
     });
-    setAgentColor(id, GRAY);   // untinted → texture d'origine du modèle
+    setAgentColor(id, GRAY); // untinted → texture d'origine du modèle
   }
-  trimCrowdCounts(maxVillagerId + 1);
+  trimCrowdCounts(maxHubAgentId + 1);
 
   const leader = factions[0].leader;
 
@@ -5712,16 +6054,77 @@ function updateOverworld(dt) {
   // Portails & Détections
   activeOverworldTrigger = updatePortalsSystem(overworldPortals, dt, elapsed, leader);
 
-  // Esprits sauvages récoltables au contact
+  // Esprits sauvages récoltables au contact (Fuite dynamique à l'approche du joueur)
   for (let i = 0; i < overworldSpirits.length; i++) {
     const s = overworldSpirits[i];
-    s.rotation.y += dt * 2;
-    s.position.y = (s.userData.baseY || 1.2) + Math.sin(elapsed * 3 + i) * 0.25;
+    const dx = s.x - leader.x;
+    const dz = s.z - leader.z;
+    const dist = Math.hypot(dx, dz);
 
-    const dist = Math.hypot(leader.x - s.position.x, leader.z - s.position.z);
+    let animSpeed = 0.6; // allure paisible au repos
+
+    // 1. Détection de proximité (zone de fuite de 6 mètres)
+    if (dist < 6.0 && dist > 0.05) {
+      const fleeNx = dx / dist;
+      const fleeNz = dz / dist;
+      
+      // S'oriente à l'opposé du joueur
+      const targetFace = Math.atan2(fleeNx, fleeNz);
+      let da = targetFace - s.face;
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      s.face += da * Math.min(1, dt * 10);
+
+      // Vitesse de fuite rapide (3.6 m/s)
+      const fleeSpeed = 3.6;
+      let nx = s.x + fleeNx * fleeSpeed * dt;
+      let nz = s.z + fleeNz * fleeSpeed * dt;
+
+      // Évite de tomber à l'eau : s'il approche d'un vide, contourne à 45°
+      if (!isSolid(island, nx, nz)) {
+        const altAngle1 = targetFace + Math.PI / 4;
+        const altAngle2 = targetFace - Math.PI / 4;
+        const nx1 = s.x + Math.sin(altAngle1) * fleeSpeed * dt;
+        const nz1 = s.z + Math.cos(altAngle1) * fleeSpeed * dt;
+        const nx2 = s.x + Math.sin(altAngle2) * fleeSpeed * dt;
+        const nz2 = s.z + Math.cos(altAngle2) * fleeSpeed * dt;
+
+        if (isSolid(island, nx1, nz1)) { nx = nx1; nz = nz1; }
+        else if (isSolid(island, nx2, nz2)) { nx = nx2; nz = nz2; }
+        else { nx = s.x; nz = s.z; }
+      }
+
+      s.x = nx;
+      s.z = nz;
+      animSpeed = 3.2; // Course vive de fuite
+    } else {
+      // Flânerie lente en lévitation au repos
+      s.face += dt * 0.8;
+    }
+
+    const hoverY = (groundY(s.x, s.z) || 0) + Math.sin(elapsed * 3.5 + i * 1.2) * 0.15;
+
+    const cm = crowdOf(s.id), sl = slotOf(s.id);
+    if (cm) {
+      tmpQ.setFromAxisAngle(UP_AXIS, s.face);
+      tmpS.set(1, 1, 1);
+      tmpP.set(s.x, hoverY, s.z);
+      tmpM.compose(tmpP, tmpQ, tmpS);
+      cm.setMatrixAt(sl, tmpM);
+      cm.instanceMatrix.needsUpdate = true;
+      if (cm.userData.anim) {
+        cm.userData.anim.setY(sl, animSpeed);
+        cm.userData.anim.needsUpdate = true;
+      }
+    }
+
+    // 2. Capture au contact (< 1.4 m)
     if (dist < 1.4) {
       addSpirits(1);
-      soundEngine.playSFX('boost');
+      soundEngine.playSFX('crystal', { volume: 0.85 });
+      const elemNames = ['Feu', 'Eau', 'Air', 'Lumière', 'Terre', 'Éther'];
+      const elemName = elemNames[(s.variant - 3) % 6] || 'Élémentaire';
+      banner(`✨ Esprit de ${elemName} capturé ! (+1 Esprit)`);
       updateOverworldHud();
       respawnWildSpirit(s);
     }
@@ -5730,9 +6133,13 @@ function updateOverworld(dt) {
   // Invite contextuelle : rien à l'écran tant qu'on n'est pas à portée.
   if (!activeOverworldTrigger) {
     setOverworldPrompt(null);
+    /* Appui dans le vide : on le consomme quand même. Sinon il reste armé et
+       déclencherait le prochain portail approché sans que le joueur ait rien
+       demandé — invisible au clavier, systématique au pad où A sert à ça. */
+    keys.KeyE = keys.KeyF = false;
   } else {
     if (activeOverworldTrigger.isAltar) {
-      setOverworldPrompt('🏛️ Autel des Compétences', ACTION_HINT);
+      setOverworldPrompt('🏛️ Autel des Compétences', actionHint());
       if (keys.KeyE || keys.KeyF) {
         keys.KeyE = keys.KeyF = false;
         audioInit();
@@ -5740,7 +6147,7 @@ function updateOverworld(dt) {
         openProgression({ view: 'skills' });
       }
     } else if (activeOverworldTrigger.isPlanetPortal) {
-      setOverworldPrompt('🌍 Grand Portail', ACTION_HINT + ' — Vue Planète');
+      setOverworldPrompt('🌍 Grand Portail', actionHint() + ' — Vue Planète');
       if (keys.KeyE || keys.KeyF) {
         keys.KeyE = keys.KeyF = false;
         audioInit();
@@ -5756,7 +6163,7 @@ function updateOverworld(dt) {
       } else if (pState === 'unlocked' || pState === 'won') {
         setOverworldPrompt(
           `${pState === 'won' ? '🎨' : '✨'} ${pName}${pState === 'won' ? ' — conquise' : ''}`,
-          ACTION_HINT,
+          actionHint(),
         );
         /* Franchir l'arche lance la partie : c'est le geste du concept — on
            entre dans le portail, on n'appuie pas sur un bouton devant. E reste
@@ -6050,6 +6457,21 @@ function resetGame() {
       f.netTarget = { x: spawnPos.x, z: spawnPos.z, dx: 0, dz: 0 };
     }
     f.aiDifficulty = seatDiff;
+    /* Capacités du niveau. C'est ici que la difficulté se ressent vraiment :
+       tous les bots jouent de bons coups, mais un facile sprinte moins souvent,
+       tire moins vite et court moins vite.
+
+       UNIQUEMENT sur les IA simulées ici. Surtout pas sur `isRemote`, qui
+       englobe les joueurs humains distants : on brimerait un adversaire en
+       chair et en os. Une IA distante est de toute façon simulée chez l'hôte,
+       qui lui applique déjà ces valeurs — sa position nous arrive toute
+       faite. */
+    if (isLocalBot) {
+      const S = statsOf(seatDiff);
+      f.boostCdMul = S.boostCd;
+      f.atkCdBase = S.atkCd;
+      f.spdMul = S.speed;
+    }
     f.seatIndex = seat?.seatIndex ?? i;
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
@@ -6131,28 +6553,21 @@ function endGame(forced) {
     btnRetry.textContent = 'Quitter la session';
     btnBack.classList.add('hidden');
   } else if (isCamp) {
+    /* Esprits de la partie : gagnés à la victoire, indépendamment des portails du
+       Hub. On passe par addSpirits plutôt que recordPortalVictory, dont l'index
+       de portail n'a plus de sens hors du Hub. */
     const spiritsEarned = Math.max(5, Math.round((mine ? mine.pct : 10) * 0.4));
-    if (victory) {
-      const campIso = conquest.world?.iso || 'FRA';
-      // On relève l'état AVANT enregistrement : c'est lui qu'on rejouera dans le
-      // Hub, pour ne pas re-verrouiller une zone déjà conquise lors d'un rejeu.
-      const wasFirstWin = getCountryPortalState(campIso, conquestPortalIdx) !== 'won';
-      const nextWasLocked = getCountryPortalState(campIso, conquestPortalIdx + 1) === 'locked';
-      recordPortalVictory(campIso, conquestPortalIdx, spiritsEarned);
-      // Consommée au retour dans le Hub pour jouer la séquence de conquête.
-      pendingHubVictory = {
-        portalIndex: conquestPortalIdx,
-        spirits: spiritsEarned,
-        replayPaint: wasFirstWin,
-        replayUnlock: nextWasLocked,
-      };
-    }
+    if (victory) addSpirits(spiritsEarned);
     $('endTitle').textContent = victory ? 'Zone Conquise !' : 'Défaite';
     $('endSub').textContent = victory
-      ? `Votre sanctuaire s'empare du portail ! (+${spiritsEarned} esprits)`
+      ? `La zone rejoint votre culte ! (+${spiritsEarned} esprits)`
       : `Le Culte « ${winnerName} » s'est imposé sur la zone.`;
-    btnRetry.textContent = 'Retour au Hub 3D';
-    btnBack.classList.add('hidden');
+    /* Victoire : un seul chemin, celui qui enregistre la prise sur la carte.
+       Défaite : « Réessayer » relance la zone sans rien concéder, et btn-end-back
+       (« Retour à la carte ») cède le territoire au rival — c'est le prix du
+       renoncement. Masquer ce bouton laisserait la défaite sans issue. */
+    btnRetry.textContent = victory ? 'Retour à la carte' : 'Réessayer';
+    btnBack.classList.toggle('hidden', victory);
   } else {
     $('endTitle').textContent = victory ? 'Victoire !' : 'Défaite';
     $('endSub').textContent = victory
@@ -7660,11 +8075,17 @@ function update(dt) {
   _leaderTickInput.x = input.x; _leaderTickInput.z = input.z;
   _leaderTickInput.keys = keys;
 
-  /* -- Multi : plus de connexion P2P = plus de match. -- */
+  /* -- Multi : plus de connexion P2P = plus de match. Sauf pendant une bascule
+        d'hôte, où le lien est censé revenir : la simulation locale continue
+        (les adversaires glissent vers leur dernière position connue) et on
+        laisse au réseau le temps d'élire son nouvel hôte. C'est lui qui coupe
+        court, via onLeft, s'il n'y a plus personne. -- */
   if (multiMode && !net.state.connected) {
-    banner('⚠ Connexion P2P perdue');
-    endGame();
-    return;
+    if (!net.state.migrating) {
+      banner('⚠ Connexion P2P perdue');
+      endGame();
+      return;
+    }
   }
 
   /* -- Multi : rafraîchir la cible réseau des adversaires AVANT leur tick, pour
@@ -7739,7 +8160,17 @@ function update(dt) {
           L'invité attend ce message : c'est la seule façon d'avoir un
           classement identique sur les deux écrans (chacun lisait sinon sa
           propre snapshot décalée de quelques centaines de ms). -- */
-    if (net.state.phase === 'over') { endGame(); return; }
+    if (net.state.phase === 'over') {
+      /* Hôte qui avait quitté la manche : il a joué par IA interposée jusqu'au
+         bout, on lui montre donc le podium comme aux autres. C'est aussi de là
+         qu'il ramènera tout le monde au salon — le seul bouton qui le fait. */
+      if (matchSpectate) {
+        matchSpectate = false;
+        $('multi-panel').classList.add('hidden');
+      }
+      endGame();
+      return;
+    }
   }
   // la texture de peinture n'est renvoyée au GPU que ~8 fois par seconde
   paintUploadT -= dt;
@@ -8022,29 +8453,41 @@ if (diffContainer) {
   });
 }
 
-/* Réglage vue caméra (Proche / Standard / Éloignée) — persistant, appliqué
-   dès la prochaine frame de partie via `camDistMul`. */
-const camDistPicker = $('cam-dist-picker');
-if (camDistPicker) {
-  const syncCamDistUI = () => {
-    camDistPicker.querySelectorAll('.cam-dist-btn').forEach((btn) => {
-      btn.classList.toggle('is-selected', btn.dataset.dist === currentCamDist);
-    });
-  };
-  syncCamDistUI();
-  camDistPicker.querySelectorAll('.cam-dist-btn').forEach((btn) => {
-    btn.addEventListener('pointerdown', () => {
-      const key = btn.dataset.dist;
-      if (!(key in CAM_DIST_MUL)) return;
-      audioInit();
-      soundEngine.playUIClick();
-      currentCamDist = key;
-      camDistMul = CAM_DIST_MUL[key];
-      localStorage.setItem(CAM_DIST_KEY, key);
-      syncCamDistUI();
-    });
+/* Réglage vue caméra (Proche / Standard / Éloignée) — menu + pause.
+   Persistant, appliqué dès la prochaine frame via `camDistMul`. */
+function syncCamDistUI() {
+  document.querySelectorAll('.cam-dist-picker .cam-dist-btn[data-dist]').forEach((btn) => {
+    btn.classList.toggle('is-selected', btn.dataset.dist === currentCamDist);
   });
 }
+function setCamDist(key) {
+  if (!(key in CAM_DIST_MUL)) return false;
+  currentCamDist = key;
+  camDistMul = CAM_DIST_MUL[key];
+  localStorage.setItem(CAM_DIST_KEY, key);
+  syncCamDistUI();
+  return true;
+}
+const CAM_DIST_ORDER = ['near', 'mid', 'far'];
+const CAM_DIST_LABEL = { near: 'Proche', mid: 'Standard', far: 'Éloignée' };
+/** Cycle Proche → Standard → Éloignée (manette R3). */
+function cycleCamDist() {
+  const i = Math.max(0, CAM_DIST_ORDER.indexOf(currentCamDist));
+  const next = CAM_DIST_ORDER[(i + 1) % CAM_DIST_ORDER.length];
+  setCamDist(next);
+  banner(`📷 Vue ${CAM_DIST_LABEL[next]}`);
+  return next;
+}
+syncCamDistUI();
+document.querySelectorAll('.cam-dist-picker').forEach((picker) => {
+  picker.querySelectorAll('.cam-dist-btn[data-dist]').forEach((btn) => {
+    btn.addEventListener('pointerdown', () => {
+      if (!setCamDist(btn.dataset.dist)) return;
+      audioInit();
+      soundEngine.playUIClick();
+    });
+  });
+});
 
 /* Qualité graphique (Perf. / Équilibré / Belle). DPR + ombres tout de suite ;
    changement d'antialias → reload (contrainte WebGL). */
@@ -8146,14 +8589,21 @@ function startGameInner() {
   const biomeKey = conquest
     ? getBiomeForIso(conquest.world.iso)
     : ((multiMode && BIOMES[net.getBiome()]) ? net.getBiome() : randomBiomeKey());
-  if (multiMode) withSeededRandom(netSeed, () => buildMap(biomeKey));
-  else buildMap(biomeKey);
+  /* La graine passe par buildMap plutôt que d'envelopper l'appel : les semis de
+     décor arrivant après coup (herbe, arbres, nature) sont ainsi semés eux aussi,
+     ce que l'enveloppe ne pouvait pas faire. Une partie solo reste tirée au sort. */
+  buildMap(biomeKey, multiMode ? netSeed : null);
   soundEngine.startBiomeAmbient(biomeKey);
   captureDayBase();          // teinte de brouillard du biome = référence plein jour
   applyDayCycle(0);          // la partie s'ouvre à l'aube
   // ^ 0x9e3779b9 : décale la séquence pour que la foule ne rejoue pas celle du décor
   if (multiMode) withSeededRandom((netSeed ^ 0x9e3779b9) >>> 0, () => resetGame());
   else resetGame();
+  /* Le salon confisque la caméra sur son calque : sans l'éteindre ici, la
+     partie démarre sur un monde invisible (HUD seul, fond uni). Le panneau
+     multi peut encore être ouvert une frame — on ne se fie pas à ça. */
+  setLobbyStageActive(false);
+  $('multi-panel')?.classList.add('hidden');
   $('start').classList.add('hidden');
   $('end').classList.add('hidden');
   $('hud').classList.remove('hidden');
@@ -8174,6 +8624,23 @@ async function startMultiGame(opts = {}) {
 
   // Enregistrer les callbacks AVANT connect pour ne rater aucun onAdd
   net.onSlotsUpdate((slots) => onLobby(slots));
+  net.onMatchLeft(onNetMatchLeft);
+  net.onMigrating(onNetMigrating);
+  net.onHostChanged(onNetHostChanged);
+  /* Expulsé : on rend la main au menu avec un message clair. Sans ce chemin,
+     l'exclu verrait juste sa connexion tomber et croirait à une panne. */
+  net.onKicked(() => {
+    multiMode = false;
+    matchSpectate = false;
+    state = 'menu';
+    $('hud').classList.add('hidden');
+    $('end').classList.add('hidden');
+    setLobbyStageActive(false);
+    $('multi-panel').classList.add('hidden');
+    $('start').classList.remove('hidden');
+    updateMainMenu();
+    banner('⛔ L\'hôte t\'a expulsé du salon');
+  });
   onStatus('Connexion P2P…');
 
   try {
@@ -8242,7 +8709,10 @@ async function startMultiGame(opts = {}) {
       startGame();
       banner('⚔ Nouveau match !');
     } else if (p === 'lobby' && (state === 'over' || state === 'play')) {
+      const aborted = net.state._abortReason === 'no-humans';
+      net.state._abortReason = null;
       goBackToMultiLobby();
+      if (aborted) banner('⏹ Partie arrêtée — plus aucun joueur');
     }
   });
 
@@ -8374,98 +8844,9 @@ if (import.meta.env.DEV) {
     },
   };
 
-  /* ---- Panneau de développement ----
-     Import DYNAMIQUE : `import.meta.env.DEV` est remplacé par `false` au build,
-     la branche entière disparaît et devpanel.js n'est jamais téléchargé. Un
-     import statique aurait été empaqueté dans le bundle livré même mort.
+  /* Panneau DEV retiré de l'UI : les raccourcis console (`__grade`, `__play`…)
+     restent disponibles en mode développement sans bandeau à l'écran. */
 
-     Le panneau ne connaît rien au jeu : on lui décrit des contrôles. Ajouter un
-     réglage se fait donc ici, en une ligne, sans toucher au module. */
-  import('./devpanel.js').then(({ createDevPanel }) => {
-    const G = window.__grade;
-    const slider = (key, label, min, max, step, get, set) =>
-      ({ key, label, min, max, step, get, set });
-
-    window.__devpanel = createDevPanel({
-      hotkey: 'F9',
-      groups: [
-        {
-          title: 'Rendu',
-          controls: [
-            {
-              key: 'tone', label: 'courbe', options: Object.keys(G.TONES),
-              get: () => G.toneName(), set: (v) => G.tone(v),
-            },
-            slider('exposure', 'exposition', 0.3, 2.2, 0.01,
-              () => G.exposure(), (v) => G.exposure(v)),
-          ],
-        },
-        {
-          title: 'Étalonnage',
-          controls: [
-            slider('saturation', 'saturation', 0, 2, 0.01,
-              () => GRADE.saturation, (v) => G.set({ saturation: v })),
-            slider('contrast', 'contraste', 0.5, 1.8, 0.01,
-              () => GRADE.contrast, (v) => G.set({ contrast: v })),
-            slider('hue', 'teinte °', -30, 30, 1,
-              () => GRADE.hue, (v) => G.set({ hue: v })),
-            slider('brightness', 'luminosité', 0.4, 1.8, 0.01,
-              () => GRADE.brightness, (v) => G.set({ brightness: v })),
-          ],
-        },
-        {
-          title: 'Lumières',
-          controls: [
-            slider('sun', 'soleil ×', 0, 2.5, 0.01,
-              () => TUNE.sun, (v) => G.lights({ sun: v })),
-            slider('hemi', 'ciel ×', 0, 2.5, 0.01,
-              () => TUNE.hemi, (v) => G.lights({ hemi: v })),
-            slider('charSun', 'soleil persos', 0, 3, 0.01,
-              () => charSun.intensity, (v) => G.lights({ charSun: v })),
-            slider('charHemi', 'ciel persos', 0, 3, 0.01,
-              () => charHemi.intensity, (v) => G.lights({ charHemi: v })),
-          ],
-        },
-        {
-          title: 'Brouillard',
-          controls: [
-            {
-              key: 'fogColor', label: 'couleur', color: true,
-              get: () => '#' + fogBase.getHexString(),
-              set: (v) => G.fog({ color: v }),
-            },
-            slider('fogNear', 'début', 0, 160, 1,
-              () => fogBaseNear, (v) => G.fog({ near: v })),
-            slider('fogFar', 'fin', 20, 400, 1,
-              () => fogBaseFar, (v) => G.fog({ far: v })),
-          ],
-        },
-      ],
-      actions: [
-        { label: '▶ partie', run: () => { conquest = null; startGame(); } },
-        { label: '⏩ +60 s', run: () => { elapsed += 60; } },
-        { label: '❓ carte', run: () => { removeHazardCard(); spawnHazardCard(); } },
-        { label: '🌑 nuit', run: () => cardCtx.blackout(18) },
-        {
-          label: '↺ réinitialiser', wide: true,
-          run: (refresh) => {
-            G.set({ saturation: 1.08, contrast: 1.04, hue: 0, brightness: 1 });
-            G.exposure(1); G.lights({ sun: 1, hemi: 1, charSun: 1.55, charHemi: 1 });
-            G.fog({ color: '#9fdcff', near: 70, far: 165 });
-            G.tone('neutral');
-            refresh();
-          },
-        },
-        {
-          label: '📋 copier les constantes', wide: true,
-          run: () => {
-            const txt = JSON.stringify(G.dump(), null, 2);
-            navigator.clipboard?.writeText(txt).catch(() => {});
-          },
-        },
-      ],
-    });
-  });
   // inspecte le canvas d'encre : histogramme grossier des pixels non vides
   window.__paintInfo = () => {
     const d = paintCtx.getImageData(0, 0, paintCv.width, paintCv.height).data;
@@ -8542,6 +8923,10 @@ function setMultiButtonsEnabled(on) {
 function showMultiGate() {
   $('multi-gate').classList.remove('hidden');
   $('multi-lobby').classList.add('hidden');
+  /* Sortir du salon éteint la scène : sinon les socles resteraient plantés au
+     milieu de la vallée du menu, et la caméra continuerait de les cadrer au
+     lieu de reprendre son orbite. */
+  setLobbyStageActive(false);
 }
 
 function showMultiLobby() {
@@ -8599,7 +8984,6 @@ function renderMeCard(slots) {
   if (meIdx >= 0 && LOBBY_LEADER_ORDER[lobbyCarouselIdx] !== me.leaderKey) {
     lobbyCarouselIdx = meIdx;
   }
-  renderLobbyCarouselCard();
 
   // Pastille couleur : swatch + fond
   const hex = '#' + ((me.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0');
@@ -8620,38 +9004,9 @@ function renderMeCard(slots) {
   }
 }
 
-/* Dessine la carte du perso courant dans le carrousel avec ses infos et
-   points d'orientation. Réutilisé à chaque changement de leader. */
-function renderLobbyCarouselCard() {
-  const k = LOBBY_LEADER_ORDER[lobbyCarouselIdx] || 'monk';
-  const info = LOBBY_LEADER_INFO[k];
-  const card = $('lobby-card-3d');
-  if (!card || !info) return;
-  card.style.setProperty('--card-bg', info.bg);
-  card.style.setProperty('--card-color', info.color);
-  card.style.background = info.bg;
-  card.innerHTML = `
-    <div class="lobby-card-archetype">‹ ${info.archetype} ›</div>
-    <div class="lobby-card-portrait" style="background-image:url('${LOBBY_PORTRAITS[k]}');"></div>
-    <div class="lobby-card-name">${info.name}</div>
-    <div class="lobby-card-perk">${info.perk}</div>
-    <div class="lobby-card-desc">${info.desc}</div>
-  `;
-
-  const dots = $('lobby-carousel-dots');
-  dots.replaceChildren();
-  LOBBY_LEADER_ORDER.forEach((_, i) => {
-    const d = document.createElement('button');
-    d.type = 'button';
-    d.className = 'dot' + (i === lobbyCarouselIdx ? ' sel' : '');
-    d.addEventListener('click', () => {
-      if (i === lobbyCarouselIdx) return;
-      lobbyCarouselIdx = i;
-      commitLobbyLeaderChoice();
-    });
-    dots.append(d);
-  });
-}
+/* Plus de carte de personnage à dessiner : le corps est en 3D au premier plan,
+   son nom et son atout s'affichent dans le panneau du joueur sélectionné
+   (applyLobbySelection), et le choix se fait sur la grille de portraits. */
 
 /* Sauvegarde le leader courant du carrousel + diffuse au réseau. */
 function commitLobbyLeaderChoice() {
@@ -8659,7 +9014,6 @@ function commitLobbyLeaderChoice() {
   if (!k) return;
   playerLeaderKey = k;
   persistSave({ playerLeader: k });
-  renderLobbyCarouselCard();
   net.setChoice({ leaderKey: k });
 }
 
@@ -8668,6 +9022,42 @@ function openLobbyPicker(kind) {
   const modal = $('lobby-picker-modal');
   const title = $('lobby-modal-title');
   const grid = $('lobby-modal-grid');
+
+  /* Le terrain ne dépend d'aucun siège : on le traite avant d'exiger le mien,
+     sinon un invité arrivé une frame trop tôt ne pourrait pas l'ouvrir. */
+  if (kind === 'biome') {
+    title.textContent = 'Terrain de la manche';
+    grid.className = 'lobby-modal-grid is-biomes';
+    grid.replaceChildren();
+    /* Une VRAIE grille, tous les terrains visibles d'un coup. La bande
+       défilante du quai en cachait la moitié : on ne choisit pas ce qu'on ne
+       voit pas, et rien n'indiquait qu'il fallait faire défiler. */
+    const canEdit = net.isHost() && net.state.phase === 'lobby';
+    const pick = net.getBiomePick();
+    for (const key of ['', ...net.getBiomeKeys()]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'lobby-biome-tile' + (key === pick ? ' is-selected' : '');
+      b.disabled = !canEdit;
+      b.innerHTML = `<span class="lobby-biome-ico">${LOBBY_BIOME_ICONS[key] || '🌍'}</span>`
+        + `<span class="lobby-biome-name">${lobbyBiomeLabel(key)}</span>`;
+      if (canEdit) {
+        b.addEventListener('click', () => { net.setBiomePick(key); closeLobbyPicker(); });
+      }
+      grid.append(b);
+    }
+    if (!canEdit) {
+      const note = document.createElement('p');
+      note.className = 'lobby-modal-note';
+      note.textContent = net.isHost()
+        ? 'Le terrain est figé tant que la manche n\'est pas terminée.'
+        : 'Seul l\'hôte choisit le terrain.';
+      grid.append(note);
+    }
+    modal.classList.remove('hidden');
+    return;
+  }
+
   const mySid = net.state.sessionId;
   const me = net.getSlots().find(s => s.sessionId === mySid);
   if (!me) return;
@@ -8726,66 +9116,10 @@ function closeLobbyPicker() {
   $('lobby-picker-modal').classList.add('hidden');
 }
 
-/* Vue de gestion d'un bot (hôte uniquement) : grand portrait, sélecteur de
-   difficulté et bouton pour retirer l'IA. Ouvert en tapant sur son avatar. */
-function openLobbyBotDetail(botId) {
-  const bot = net.getSlots().find(s => s.id === botId);
-  if (!bot) return;
-  const key = (bot.leaderKey && LOBBY_AVATARS[bot.leaderKey]) ? bot.leaderKey : 'monk';
-  const hex = '#' + ((bot.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0');
-  const modal = $('lobby-picker-modal');
-  const title = $('lobby-modal-title');
-  const grid = $('lobby-modal-grid');
-  title.textContent = bot.name || 'IA';
-  grid.className = 'lobby-modal-grid is-detail';
-  grid.replaceChildren();
-
-  const portrait = document.createElement('div');
-  portrait.className = 'lobby-bot-portrait';
-  portrait.style.borderColor = hex;
-  portrait.style.boxShadow = `0 0 18px ${hex}55`;
-  portrait.style.backgroundImage = `url('${LOBBY_PORTRAITS[key] || LOBBY_AVATARS[key]}')`;
-  grid.append(portrait);
-
-  const sub = document.createElement('div');
-  sub.className = 'lobby-bot-sub';
-  sub.textContent = LOBBY_LEADER_NAMES[key] || key;
-  grid.append(sub);
-
-  const diffLabel = document.createElement('div');
-  diffLabel.className = 'lobby-bot-section-label';
-  diffLabel.textContent = 'Difficulté';
-  grid.append(diffLabel);
-
-  const diffRow = document.createElement('div');
-  diffRow.className = 'lobby-bot-diff-row';
-  for (const d of DIFF_CYCLE) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'lobby-bot-diff' + (bot.difficulty === d ? ' is-selected' : '');
-    b.textContent = DIFF_LABEL[d];
-    b.addEventListener('click', () => {
-      net.setBotDiff(botId, d);
-      // Rafraîchit l'état sélectionné dans le modal ouvert
-      diffRow.querySelectorAll('button').forEach(x => x.classList.remove('is-selected'));
-      b.classList.add('is-selected');
-    });
-    diffRow.append(b);
-  }
-  grid.append(diffRow);
-
-  const remove = document.createElement('button');
-  remove.type = 'button';
-  remove.className = 'lobby-bot-remove';
-  remove.textContent = '✕  Retirer cette IA';
-  remove.addEventListener('click', () => {
-    net.removeBot(botId);
-    closeLobbyPicker();
-  });
-  grid.append(remove);
-
-  modal.classList.remove('hidden');
-}
+/* La gestion des IA n'a plus de fenêtre à elle : elle vit dans la fiche du
+   quai (applyLobbySelection). Une modale masquait la rangée entière — donc le
+   personnage qu'on est justement en train de régler. Le modal restant ne sert
+   plus qu'aux grilles de couleur et de symbole. */
 
 /* Utilitaire : fusionner quelques champs dans le save local sans écraser le reste. */
 function persistSave(patch) {
@@ -8795,6 +9129,320 @@ function persistSave(patch) {
     localStorage.setItem('cultio_progress_v3', JSON.stringify(save));
   } catch (_) {}
 }
+
+/* Vignettes de terrain du salon. Le libellé vient de BIOMES pour rester en phase
+   avec le jeu ; seule l'icône est propre au salon. '' = laisser au hasard. */
+const LOBBY_BIOME_ICONS = {
+  '': '🎲', temperate: '🌳', desert: '🏜️', nordic: '❄️',
+  tropical: '🌴', savanna: '🦁', volcanic: '🌋',
+};
+function lobbyBiomeLabel(key) {
+  return key ? (BIOMES[key]?.name || key) : 'Aléatoire';
+}
+
+/**
+ * Dessine le sélecteur de terrain. Sur PC la grille vit dans le quai ; sur
+ * mobile le bouton ouvre la même liste en fenêtre. L'hôte clique, les invités
+ * ne font que lire : on rend quand même les vignettes (grisées) pour qu'ils
+ * voient la liste complète et ce que l'hôte a retenu.
+ */
+function renderLobbyBiomes() {
+  const btn = $('lobby-biome-card');
+  const grid = $('lobby-biome-grid');
+  const panel = $('lobby-biome-panel');
+  if (!btn) return;
+  /* Le terrain ne se change que dans un salon au repos. Un hôte qui a quitté la
+     manche est de retour ici alors que la partie tourne encore : le choix est
+     déjà figé. Les invités lisent aussi — savoir sur quel terrain on part fait
+     partie de l'attente. */
+  const canEdit = net.isHost() && net.state.phase === 'lobby';
+  const pick = net.getBiomePick();
+  const label = lobbyBiomeLabel(pick);
+  const ico = LOBBY_BIOME_ICONS[pick] || '🌍';
+  for (const el of document.querySelectorAll('.lobby-biome-cur')) {
+    el.textContent = label;
+  }
+  const icoEl = $('lobby-biome-ico');
+  if (icoEl) icoEl.textContent = ico;
+  btn.classList.toggle('is-readonly', !canEdit);
+  panel?.classList.toggle('is-readonly', !canEdit);
+
+  if (grid) {
+    grid.replaceChildren();
+    for (const key of ['', ...net.getBiomeKeys()]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'lobby-biome-tile' + (key === pick ? ' is-selected' : '');
+      b.disabled = !canEdit;
+      b.setAttribute('role', 'option');
+      b.setAttribute('aria-selected', key === pick ? 'true' : 'false');
+      b.innerHTML = `<span class="lobby-biome-ico">${LOBBY_BIOME_ICONS[key] || '🌍'}</span>`
+        + `<span class="lobby-biome-name">${lobbyBiomeLabel(key)}</span>`;
+      if (canEdit) {
+        b.addEventListener('click', () => net.setBiomePick(key));
+      }
+      grid.append(b);
+    }
+  }
+}
+
+/* ---------------------------- Salon en 3D ----------------------------
+   Les joueurs se tiennent sur des socles dans la scène du jeu, et leurs noms
+   sont des étiquettes HTML ancrées dessous. Voir lobbyStage.js pour le
+   pourquoi de ce découpage. */
+let lobbyStage = null;
+/** Incrémenter pour forcer la recréation du salon après un changement de
+ *  matériaux / géométrie — le singleton gardait sinon l'ancienne peinture. */
+const LOBBY_STAGE_VER = 5;
+let lobbyStageVer = -1;
+function getLobbyStage() {
+  if (lobbyStage && lobbyStageVer !== LOBBY_STAGE_VER) {
+    lobbyStage.dispose();
+    lobbyStage = null;
+  }
+  if (!lobbyStage) {
+    lobbyStageVer = LOBBY_STAGE_VER;
+    lobbyStage = createLobbyStage({
+      THREE, scene, makeLeaderGroup, disposeGroup,
+      makePaintMaterial: makeLobbyPaintMaterial,
+      /* Au-dessus du centre de l'île du menu : le décor du jeu sert de fond,
+         ce qui évite d'entretenir une seconde ambiance rien que pour le
+         salon. La hauteur dégage les socles du relief des tuiles. */
+      origin: new THREE.Vector3(0, 6, 0),
+    });
+  }
+  return lobbyStage;
+}
+
+/**
+ * Portion d'écran que le panneau du salon ne recouvre pas.
+ *
+ * On mesure le panneau plutôt que de coder en dur « à gauche sur grand écran,
+ * en bas sur petit » : sa taille dépend du contenu (nombre d'IA, présence du
+ * sélecteur de terrain, langue), et une règle figée finit toujours par placer
+ * les personnages derrière lui. On prend la plus grande des quatre bandes
+ * libres autour de lui.
+ */
+function lobbyFreeRect() {
+  const W = innerWidth, H = innerHeight;
+  if ($('multi-lobby')?.classList.contains('hidden') !== false) {
+    return { x: 0, y: 0, w: W, h: H };
+  }
+  /* Le salon est un CADRE : bandeau en haut, quai en bas, scène au milieu. On
+     mesure donc ces deux bords plutôt que de chercher la plus grande bande
+     autour d'un panneau — celui-ci occupe désormais tout l'écran, et une
+     recherche de bande ne trouverait plus rien.
+
+     La hauteur des deux dépend du contenu (nombre d'IA, fiche ouverte ou non,
+     longueur des libellés) : les mesurer à chaque image est le seul moyen de
+     garder les personnages à leur place quand la fiche s'ouvre. */
+  const top = $('lobby-hint')?.getBoundingClientRect().bottom
+    ?? document.querySelector('.lobby-topbar')?.getBoundingClientRect().bottom
+    ?? 0;
+  const dock = document.querySelector('#multi-lobby .lobby-dock');
+  const bottom = dock ? dock.getBoundingClientRect().top : H;
+
+  const pad = 8;
+  const y = Math.max(0, top + pad);
+  const h = Math.max(0, bottom - pad - y);
+  /* Quai si haut qu'il ne reste rien : mieux vaut une rangée partiellement
+     masquée qu'un cadrage calculé sur une zone de zéro pixel, qui enverrait la
+     caméra à l'infini. */
+  if (h < 90) return { x: 0, y: 0, w: W, h: H };
+  return { x: 0, y, w: W, h };
+}
+
+/* Siège mis en avant dans le salon. Un seul à la fois : la fiche du quai ne
+   parle que de lui. */
+let selectedLobbySlot = null;
+
+/**
+ * Choisit le joueur en vedette. Il y en a TOUJOURS un : le trou central du
+ * fond est fait pour lui, le laisser vide donnerait une rangée bancale.
+ */
+function selectLobbySlot(id) {
+  if (!id) return;
+  selectedLobbySlot = id;
+  if (lobbyStage) lobbyStage.setSelected(id, net.getSlots());
+  applyLobbySelection();
+}
+
+/** Fait défiler la vedette d'un cran. `dir` = -1 gauche, +1 droite. */
+function stepLobbySelection(dir) {
+  if (!lobbyStage) return;
+  const next = lobbyStage.neighbour(selectedLobbySlot, dir);
+  if (next) selectLobbySlot(next);
+}
+
+/**
+ * Affiche le joueur en vedette et ce qu'on peut y régler.
+ *
+ * Un seul panneau pour tous les cas — moi, une IA, un invité — plutôt que trois
+ * blocs qui s'allument tour à tour. Les droits décident du contenu :
+ * · mon siège    → personnage, nom, couleur, symbole ;
+ * · une IA       → personnage, difficulté, retrait (hôte seulement) ;
+ * · un invité    → expulsion (hôte seulement) ;
+ * · sinon        → lecture seule, ce qui reste utile pour savoir qui est là.
+ */
+function applyLobbySelection() {
+  const id = selectedLobbySlot;
+  const slots = net.getSlots();
+  const slot = id ? slots.find(s => s.id === id) : null;
+
+  const pickName = $('lobby-pick-name');
+  const pickSub = $('lobby-pick-sub');
+  const box = $('lobby-sel');
+  const meBar = $('lobby-me-card');
+  if (!box || !pickName) return;
+
+  if (!slot) {
+    pickName.textContent = '—';
+    pickSub.textContent = '';
+    box.classList.add('hidden'); box.replaceChildren();
+    meBar.classList.add('hidden');
+    return;
+  }
+
+  const hex = `#${((slot.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
+  const isMe = net.isMe(slot.sessionId) && slot.kind === 'human';
+  const isBot = slot.kind === 'bot';
+  const host = net.isHost();
+  const leaderKey = (slot.leaderKey && LOBBY_AVATARS[slot.leaderKey]) ? slot.leaderKey : 'monk';
+  const info = LOBBY_LEADER_INFO[leaderKey];
+
+  pickName.textContent = slot.name || 'Joueur';
+  pickName.style.color = hex;
+  /* Sous-titre : tout ce qu'on lisait autrefois sur les étiquettes flottantes —
+     rôle, hôte, IA, « En jeu » — regroupé sur une ligne. */
+  const bits = [isBot ? 'IA' : 'Joueur'];
+  if (slot.isHost) bits.push('hôte');
+  if (isMe) bits.push('toi');
+  if (slot.inMatch) bits.push('en jeu');
+  if (info) bits.push(info.name);
+  pickSub.textContent = bits.join(' · ');
+
+  box.classList.remove('hidden');
+  box.replaceChildren();
+  box.style.setProperty('--slot-color', hex);
+
+  /* Choix du personnage : le mien toujours, celui d'une IA si je suis l'hôte.
+     C'est le même geste dans les deux cas, donc le même bloc. */
+  const canSetLeader = isMe || (host && isBot);
+  if (canSetLeader) {
+    const charLab = document.createElement('div');
+    charLab.className = 'lobby-sec-label';
+    charLab.textContent = 'Personnage';
+    box.append(charLab);
+    const chars = document.createElement('div');
+    chars.className = 'lobby-sel-chars';
+    for (const k of LOBBY_LEADER_ORDER) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'lobby-bot-char' + (k === leaderKey ? ' is-selected' : '');
+      b.title = LOBBY_LEADER_NAMES[k] || k;
+      b.style.backgroundImage = `url('${LOBBY_AVATARS[k]}')`;
+      b.dataset.leaderKey = k;
+      b.addEventListener('click', () => {
+        if (isMe) {
+          lobbyCarouselIdx = Math.max(0, LOBBY_LEADER_ORDER.indexOf(k));
+          commitLobbyLeaderChoice();
+        } else {
+          net.setBotLeader(id, k);
+        }
+        /* Le changement fait revenir un slotsUpdate qui redessine tout ; on
+           replace ensuite le curseur pad sur le personnage qu'on vient de
+           choisir, sinon il repartirait du début à chaque essai. */
+        const back = [...$('lobby-sel').querySelectorAll('[data-leader-key]')]
+          .find(el => el.dataset.leaderKey === k);
+        if (back) setPadFocus(back);
+      });
+      chars.append(b);
+    }
+    box.append(chars);
+  }
+
+  if (info) {
+    const perk = document.createElement('div');
+    perk.className = 'lobby-sel-perk';
+    perk.textContent = info.perk;
+    box.append(perk);
+  }
+
+  // Difficulté : propre aux IA, et seul l'hôte en décide.
+  if (host && isBot) {
+    const diffLab = document.createElement('div');
+    diffLab.className = 'lobby-sec-label';
+    diffLab.textContent = 'Difficulté';
+    box.append(diffLab);
+    const diffs = document.createElement('div');
+    diffs.className = 'lobby-sel-diffs';
+    for (const d of DIFF_CYCLE) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'lobby-bot-diff' + (slot.difficulty === d ? ' is-selected' : '');
+      b.textContent = DIFF_LABEL[d];
+      b.addEventListener('click', () => net.setBotDiff(id, d));
+      diffs.append(b);
+    }
+    box.append(diffs);
+  }
+
+  /* Sortie : retirer une IA, ou expulser un invité. On demande confirmation
+     pour l'expulsion seulement — remettre une IA coûte un clic, refaire venir
+     un joueur suppose qu'il ait encore envie de revenir. */
+  if (host && isBot) {
+    const rm = document.createElement('button');
+    rm.type = 'button';
+    rm.className = 'lobby-sel-remove';
+    rm.textContent = '✕  Retirer cette IA';
+    rm.addEventListener('click', () => { selectedLobbySlot = null; net.removeBot(id); });
+    box.append(rm);
+  } else if (host && !isMe && slot.kind === 'human') {
+    const kick = document.createElement('button');
+    kick.type = 'button';
+    kick.className = 'lobby-sel-remove';
+    kick.textContent = '⛔  Expulser ce joueur';
+    kick.addEventListener('click', () => {
+      if (!confirm(`Expulser ${slot.name || 'ce joueur'} du salon ?`)) return;
+      selectedLobbySlot = null;
+      net.kickPlayer(slot.id);
+    });
+    box.append(kick);
+  }
+
+  // Nom, couleur et symbole n'ont de sens que sur mon propre siège.
+  meBar.classList.toggle('hidden', !isMe);
+}
+
+/** Bascule l'affichage 3D du salon. */
+function setLobbyStageActive(on) {
+  const st = on ? getLobbyStage() : lobbyStage;
+  /* La caméra doit repasser sur le monde en sortant : le salon la confisque
+     sur son propre calque, et l'oublier laisserait un écran noir en partie.
+     On réactive aussi LAYER_CHARS : setActive remet la caméra sur le seul
+     calque 0, ce qui masquerait Leaders et foule jusqu'au prochain enable. */
+  if (st) st.setActive(on, camera);
+  if (!on) {
+    camera.layers.set(LAYER_WORLD);
+    camera.layers.enable(LAYER_CHARS);
+  }
+  /* Sur le PANNEAU, pas sur le salon : c'est lui qui porte le fond opaque de
+     .overlay. Sans cette bascule, les personnages seraient rendus derrière un
+     voile plein et resteraient invisibles. */
+  $('multi-panel')?.classList.toggle('has-stage', !!on);
+}
+
+/**
+ * Repose les étiquettes sous les personnages, une fois par image.
+ *
+ * On projette à chaque image plutôt que de placer une fois pour toutes : la
+ * caméra dérive lentement, et une étiquette figée décrocherait de son
+ * personnage au bout de quelques secondes.
+ */
+/* Les étiquettes flottantes sous les personnages ont été retirées : à cinq
+   joueurs elles se chevauchaient, masquaient les corps et recréaient les cadres
+   qu'on cherchait à supprimer. Nom et badges vivent dans le quai, sur le seul
+   joueur sélectionné. */
 
 function renderLobbySlots(slots) {
   const strip = $('lobby-strip-slots');
@@ -8811,73 +9459,53 @@ function renderLobbySlots(slots) {
   const n = ordered.length;
   $('lobby-players-count').textContent = `${n}/5`;
 
-  strip.replaceChildren();
-  for (const s of ordered) {
-    const key = (s.leaderKey && LOBBY_AVATARS[s.leaderKey]) ? s.leaderKey : 'monk';
-    const hex = `#${((s.cultColor >>> 0) & 0xffffff).toString(16).padStart(6, '0')}`;
+  /* Les corps. Uniquement si le salon est À L'ÉCRAN : cette fonction est aussi
+     appelée en pleine manche — quand un joueur quitte ou que l'hôte bascule —
+     et allumer la scène à ce moment planterait une rangée de socles au milieu
+     de la partie en cours. */
+  const onScreen = !$('multi-lobby').classList.contains('hidden');
+  setLobbyStageActive(onScreen);
 
-    const cell = document.createElement('div');
-    cell.className = 'lobby-strip-slot';
-    cell.style.setProperty('--slot-color', hex);
-
-    const av = document.createElement('button');
-    av.type = 'button';
-    av.className = 'lobby-strip-avatar' + (s.isHost ? ' is-host' : '');
-    av.style.backgroundImage = `url('${LOBBY_AVATARS[key]}')`;
-
-    // Pastille symbole de religion en bas à droite
-    const sym = document.createElement('div');
-    sym.className = 'lobby-strip-sym';
-    sym.style.backgroundColor = hex;
-    const symStr = s.cultSym || '';
-    if (symStr.startsWith('data:') || symStr.startsWith('http')) {
-      sym.style.backgroundImage = `url(${symStr})`;
-    } else {
-      sym.textContent = symStr || '✦';
-    }
-    av.append(sym);
-
-    // Pastille « IA » discrète pour distinguer bots et humains sans encombrer
-    if (s.kind === 'bot') {
-      const iaBadge = document.createElement('div');
-      iaBadge.className = 'lobby-strip-ia-badge';
-      iaBadge.textContent = 'IA';
-      av.append(iaBadge);
-    }
-
-    // Sur un tap : ouvrir la vue de gestion (hôte + bots uniquement)
-    if (host && s.kind === 'bot') {
-      av.classList.add('is-clickable');
-      av.title = 'Gérer cette IA';
-      av.addEventListener('click', () => openLobbyBotDetail(s.id));
-    }
-
-    cell.append(av);
-
-    const nm = document.createElement('div');
-    nm.className = 'lobby-strip-name';
-    nm.textContent = s.name || 'Joueur';
-    cell.append(nm);
-
-    strip.append(cell);
+  /* Il y a TOUJOURS une vedette : la mise en place réserve le centre du fond
+     pour elle. Au premier rendu, ou si le sélectionné a quitté le salon, on
+     retombe sur mon propre siège — c'est celui qu'on vient régler. */
+  if (!ordered.some(s => s.id === selectedLobbySlot)) {
+    const mine = ordered.find(s => s.kind === 'human' && net.isMe(s.sessionId));
+    selectedLobbySlot = (mine || ordered[0])?.id || null;
+  }
+  if (onScreen) {
+    getLobbyStage().setSelected(selectedLobbySlot, ordered);
+    getLobbyStage().sync(ordered);
   }
 
+  strip.replaceChildren();
   if (host && n < 5) {
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'lobby-strip-add';
     add.textContent = '+';
     add.title = 'Ajouter une IA';
-    add.addEventListener('click', () => net.addBot('normal'));
+    add.addEventListener('click', () => {
+      const id = net.addBot('normal');
+      if (!id) return;
+      /* La nouvelle IA passe en vedette : elle s'avance au premier plan et ses
+         réglages s'ouvrent, prêts à être touchés. C'est ce qu'on vient faire. */
+      selectLobbySlot(id);
+    });
     strip.append(add);
   }
 
+  applyLobbySelection();
   renderMeCard(ordered);
+  renderLobbyBiomes();
 
-  $('btn-lobby-start').disabled = n < 2;
-  $('btn-lobby-start').textContent = n < 2
-    ? 'Il faut au moins 2 joueurs'
-    : `Lancer la partie (${n}/5)`;
+  /* Manche en cours : on la laisse finir. Relancer maintenant éjecterait de
+     leur partie ceux qui jouent encore. */
+  const running = ordered.some(s => s.inMatch);
+  $('btn-lobby-start').disabled = n < 2 || running;
+  $('btn-lobby-start').textContent = running
+    ? 'Manche en cours…'
+    : (n < 2 ? 'Il faut au moins 2 joueurs' : `Lancer la partie (${n}/5)`);
 }
 
 $('btn-multi').addEventListener('click', () => {
@@ -8897,12 +9525,150 @@ async function leaveMultiToMenu() {
   setMultiButtonsEnabled(true);
 }
 
+/* Vrai quand le joueur local a quitté la manche mais qu'on continue à la
+   simuler. Ce n'est le cas QUE chez l'hôte : c'est lui qui fait tourner les IA
+   et diffuse toutes les positions, sa boucle de jeu doit donc survivre à son
+   propre départ. Un invité qui s'en va, lui, peut vraiment tout arrêter — son
+   culte est repris par l'hôte, plus rien ne dépend de sa machine. */
+let matchSpectate = false;
+
+/**
+ * Confie un culte à l'IA locale, en pleine partie.
+ *
+ * Ne fait quelque chose que chez l'hôte : `remote` reste vrai chez les invités,
+ * qui continuent de lire la position de ce culte dans les `tick` de l'hôte. Le
+ * canal ne change pas, seule la main qui tient le personnage change.
+ */
+function netBotTakeOver(sessionId) {
+  if (!multiMode || !net.isHost()) return null;
+  const f = factions.find(x => x.sessionId === sessionId);
+  if (!f || f.isBot) return null;
+  f.remote = false;
+  f.isBot = true;
+  f.netTarget = null;
+  f.target = null;
+  /* L'IA lit aggr/aiT ; ils sont posés à la création de TOUTES les factions,
+     y compris humaines, justement pour qu'une reprise n'ait rien à inventer. */
+  if (f.aggr === undefined) f.aggr = 0.35 + Math.random() * 0.65;
+  if (f.aiT === undefined) f.aiT = Math.random() * 0.3;
+  return f;
+}
+
+/** L'hôte a disparu : on patiente pendant que le réseau se réorganise. */
+function onNetMigrating({ isMe }) {
+  if (state !== 'play' && state !== 'menu') return;
+  banner(isMe
+    ? '⚠ Hôte perdu — tu reprends l\'hébergement…'
+    : '⚠ Hôte perdu — reconnexion au nouvel hôte…');
+}
+
+/**
+ * Un nouvel hôte tient le salon.
+ *
+ * Si c'est nous, il faut reprendre en main tout ce que l'ancien hôte simulait :
+ * les IA du salon et les cultes des partants, qui n'étaient chez nous que des
+ * factions `remote` nourries par ses messages. Sans cette reprise, elles
+ * resteraient plantées à leur dernière position reçue — plus personne ne les
+ * pilote.
+ */
+function onNetHostChanged({ isMe, deadSid }) {
+  /* Manche déjà coupée (plus d'humains) pendant la succession : rien à
+     reprendre, le salon a déjà été remis en place. */
+  if (net.state.phase !== 'play') {
+    renderLobbySlots(net.getSlots());
+    return;
+  }
+  /* Cas limite, mais fatal si on l'ignore : celui qui hérite du salon avait
+     lui-même quitté la manche, donc sa boucle de jeu est à l'arrêt. Hôte sans
+     simulation, personne ne piloterait plus les IA ni ne diffuserait rien. On
+     le remet donc en marche en hébergeur silencieux, comme un hôte qui quitte
+     la partie — la scène et les factions sont toujours en place. */
+  if (isMe && net.state.phase === 'play' && state !== 'play') {
+    state = 'play';
+    matchSpectate = true;
+    paused = false;
+  }
+  if (isMe && state === 'play') {
+    for (const f of factions) {
+      if (!f.sessionId || !f.remote) continue;
+      const slot = net.getSlots().find(s => s.id === f.sessionId);
+      // Les humains encore connectés continuent d'envoyer leur position.
+      if (slot && slot.kind === 'human' && !slot.gone) continue;
+      netBotTakeOver(f.sessionId);
+    }
+    if (deadSid) netBotTakeOver(deadSid);
+  }
+  banner(isMe ? '👑 Tu es le nouvel hôte' : '👑 Nouvel hôte — partie reprise');
+  renderLobbySlots(net.getSlots());
+}
+
+/** Un joueur a quitté la manche (volontairement ou lien coupé) : on prévient. */
+function onNetMatchLeft({ sid, reason, name, aborted }) {
+  if (sid === net.state.sessionId) return;   // notre propre départ : déjà traité
+  /* Manche coupée (plus d'humains) : pas de reprise IA, le retour salon suit. */
+  if (aborted) {
+    renderLobbySlots(net.getSlots());
+    return;
+  }
+  netBotTakeOver(sid);
+  if (state === 'play') {
+    banner(reason === 'disconnect'
+      ? `⚠ ${name || 'Un joueur'} s'est déconnecté — une IA reprend son culte`
+      : `🏳️ ${name || 'Un joueur'} a quitté — une IA reprend son culte`);
+  }
+  renderLobbySlots(net.getSlots());
+}
+
+/**
+ * Le joueur local quitte la manche en cours et retourne au salon.
+ *
+ * Chez l'hôte, on NE sort PAS de l'état 'play' : la boucle continue de tourner
+ * derrière le panneau du salon, sinon les IA se figeraient et les invités
+ * cesseraient de recevoir des positions. Le culte de l'hôte passe simplement
+ * sous contrôle de l'IA, comme celui de n'importe quel partant.
+ *
+ * Exception : s'il ne reste plus aucun humain en jeu, la manche est coupée et
+ * tout le monde revient au salon (voir abortMatchNoHumans).
+ */
+function leaveMultiMatchToLobby() {
+  net.leaveMatch();
+  /* Partie annulée faute de joueurs : leaveMatch a déjà basculé en lobby. */
+  if (net.state.phase === 'lobby') {
+    matchSpectate = false;
+    if (state === 'play' || state === 'over') goBackToMultiLobby();
+    banner('⏹ Partie arrêtée — plus aucun joueur');
+    return;
+  }
+  const host = net.isHost();
+  if (host) {
+    matchSpectate = true;
+    netBotTakeOver(net.state.sessionId);
+    paused = false;
+  } else {
+    matchSpectate = false;
+    state = 'menu';
+  }
+  soundEngine.stopBiomeAmbient();
+  $('hud').classList.add('hidden');
+  $('end').classList.add('hidden');
+  $('start').classList.add('hidden');
+  $('multi-panel').classList.remove('hidden');
+  showMultiLobby();
+  renderLobbySlots(net.getSlots());
+  setMultiStatus(null);
+  banner(host
+    ? '🏳️ Tu as quitté la manche — tu continues d\'héberger la partie'
+    : '🏳️ Tu as quitté la manche');
+}
+
 /* Retour au salon multi post-partie : on garde la session P2P, on remet l'UI
    dans l'état lobby. Utilisé quand l'hôte appelle net.returnToLobby() ou quand
    un invité reçoit phase:'lobby' de l'hôte. */
 function goBackToMultiLobby() {
   state = 'menu';
+  matchSpectate = false;
   multiMode = true;
+  soundEngine.stopBiomeAmbient();
   $('end').classList.add('hidden');
   $('hud').classList.add('hidden');
   $('start').classList.add('hidden');
@@ -8931,21 +9697,50 @@ async function exitMultiToMenu() {
 }
 
 $('btn-multi-back').addEventListener('click', leaveMultiToMenu);
-$('btn-lobby-leave').addEventListener('click', leaveMultiToMenu);
+
+/** Ouvre la confirmation avant de quitter le salon pour le menu d'accueil.
+ *  Manette : B / Carré (X) passent par le bouton ✕ du bandeau, qui appelle ici. */
+function openLeaveLobbyConfirm() {
+  if ($('multi-lobby')?.classList.contains('hidden')) return;
+  if (!$('confirm-leave-lobby')) return;
+  const running = net.getSlots().some(s => s.inMatch);
+  const host = net.isHost();
+  const title = $('leave-lobby-title');
+  const msg = $('leave-lobby-msg');
+  title.textContent = 'Quitter le salon ?';
+  if (host && running) {
+    msg.textContent = 'Une manche est en cours. Quitter maintenant y mettra fin pour tous les joueurs, puis tu retourneras au menu d\'accueil.';
+  } else if (host) {
+    msg.textContent = 'En tant qu\'hôte, quitter déconnectera les autres joueurs. Tu retourneras au menu d\'accueil.';
+  } else {
+    msg.textContent = 'Tu quitteras le salon et retourneras au menu d\'accueil.';
+  }
+  $('confirm-leave-lobby').classList.remove('hidden');
+}
+
+function closeLeaveLobbyConfirm() {
+  $('confirm-leave-lobby')?.classList.add('hidden');
+}
+
+$('btn-lobby-leave').addEventListener('click', openLeaveLobbyConfirm);
+$('btn-leave-lobby-cancel').addEventListener('click', closeLeaveLobbyConfirm);
+$('btn-leave-lobby-confirm').addEventListener('click', () => {
+  closeLeaveLobbyConfirm();
+  leaveMultiToMenu();
+});
 
 /* Le bouton « + Ajouter une IA » est désormais rendu inline dans la bande des
    joueurs (renderLobbySlots), pas dans un panneau d'actions séparé. */
 $('btn-lobby-start').addEventListener('click', () => net.requestStart());
 
-/* Navigation carrousel perso + pastilles ouvrant le modal de sélection. */
-$('lobby-nav-prev').addEventListener('click', () => {
-  lobbyCarouselIdx = (lobbyCarouselIdx - 1 + LOBBY_LEADER_ORDER.length) % LOBBY_LEADER_ORDER.length;
-  commitLobbyLeaderChoice();
-});
-$('lobby-nav-next').addEventListener('click', () => {
-  lobbyCarouselIdx = (lobbyCarouselIdx + 1) % LOBBY_LEADER_ORDER.length;
-  commitLobbyLeaderChoice();
-});
+/* Les flèches font défiler les JOUEURS, plus les personnages : le choix du
+   personnage se fait par la grille de portraits du panneau de réglages. C'est
+   la navigation attendue quand la rangée est un carrousel de corps. */
+$('lobby-slot-prev').addEventListener('click', () => stepLobbySelection(-1));
+$('lobby-slot-next').addEventListener('click', () => stepLobbySelection(1));
+/* Le terrain s'ouvre en fenêtre, comme la couleur et le symbole : même geste,
+   même grille, tout visible d'un coup. */
+$('lobby-biome-card').addEventListener('click', () => openLobbyPicker('biome'));
 $('lobby-pastille-color').addEventListener('click', () => openLobbyPicker('color'));
 $('lobby-pastille-sym').addEventListener('click', () => openLobbyPicker('sym'));
 $('lobby-modal-close').addEventListener('click', closeLobbyPicker);
@@ -9041,15 +9836,48 @@ $('retry').addEventListener('click', () => {
     exitMultiToMenu();
     return;
   }
-  if (overworldCtx) {
-    // Fin d'un match de campagne : on retourne au Hub d'exploration du pays.
-    $('end').classList.add('hidden');
-    openOverworldHub(overworldCtx);
+  if (conquest) {
+    if (lastVictory) {
+      // Zone conquise : on la rend à la carte, qui la repeint aux couleurs du culte.
+      const c = conquest; conquest = null;
+      $('end').classList.add('hidden');
+      c.onResult({ win: true, conversions: Math.round(stats.conv / DENSITY) });
+    } else {
+      // Défaite : on rejoue la zone. Rien n'est concédé tant qu'on réessaie.
+      $('end').classList.add('hidden');
+      startGame();
+    }
   } else {
     conquest = null;
     startGame();
   }
 });
+
+/**
+ * Renonce à la zone en cours : le rival le mieux placé l'emporte et prend le
+ * territoire, puis la carte du pays se rouvre.
+ *
+ * Partagé par l'écran de défaite et par l'abandon depuis la pause, pour que les
+ * deux sorties coûtent exactement la même chose. Le vainqueur est le culte
+ * adverse au meilleur score de peinture ; s'il n'y en a aucun, winnerColor reste
+ * nul et la zone garde simplement son propriétaire.
+ */
+function forfeitZoneToRivals() {
+  if (!conquest) return;
+  const c = conquest; conquest = null; overworldCtx = null;
+  $('end').classList.add('hidden');
+  $('hud').classList.add('hidden');
+  soundEngine.stopBiomeAmbient();
+  state = 'over';
+
+  let winnerF = null, maxScore = -1;
+  for (const f of factions) {
+    if (f.i === 0) continue;
+    const s = factionScore(f).total;
+    if (s > maxScore) { maxScore = s; winnerF = f; }
+  }
+  c.onResult({ win: false, winnerColor: winnerF ? winnerF.css : null });
+}
 
 /* Post-partie multi : l'hôte renvoie tout le monde dans le salon pour relancer
    une manche. Les invités écoutent phase:'lobby' (voir onPhaseChange plus bas). */
@@ -9060,20 +9888,7 @@ $('btn-end-lobby').addEventListener('click', () => {
 });
 
 $('btn-end-back').addEventListener('click', () => {
-  if (conquest) {
-    const c = conquest; conquest = null; overworldCtx = null;
-    $('end').classList.add('hidden');
-
-    // Vainqueur = culte adverse au meilleur score de peinture
-    let winnerF = null, maxScore = -1;
-    for (const f of factions) {
-      if (f.i === 0) continue;
-      const s = factionScore(f).total;
-      if (s > maxScore) { maxScore = s; winnerF = f; }
-    }
-    const winnerColor = winnerF ? winnerF.css : null;
-    c.onResult({ win: false, winnerColor: winnerColor });
-  }
+  forfeitZoneToRivals();
 });
 
 /* ------------------------------- Céder la victoire ------------------------------- */
@@ -9083,13 +9898,134 @@ $('btn-concede').addEventListener('click', () => {
   }
 });
 
+/* ------------------------------- Pause & Options ------------------------------- */
+function updateAudioToggleButtons() {
+  const musicBtn = $('btn-toggle-music');
+  if (musicBtn) {
+    const active = !soundEngine.musicMuted;
+    musicBtn.textContent = active ? '🔊 Activée' : '🔇 Désactivée';
+    musicBtn.classList.toggle('active', active);
+  }
+  const sfxBtn = $('btn-toggle-sfx');
+  if (sfxBtn) {
+    const active = !soundEngine.sfxMuted;
+    sfxBtn.textContent = active ? '🔊 Activés' : '🔇 Désactivés';
+    sfxBtn.classList.toggle('active', active);
+  }
+}
+
+function openPauseModal() {
+  /* matchSpectate : l'hôte est déjà sorti de la manche et la fait tourner en
+     fond derrière le salon. L'état est toujours 'play', mais il n'y a plus de
+     partie à mettre en pause — et la geler couperait celle des autres. */
+  if (state !== 'play' || matchSpectate) return;
+  /* En ligne, la pause n'arrête RIEN : les autres joueurs continuent, et si
+     l'hôte gelait sa boucle il gèlerait les IA et le flux de positions de tout
+     le monde. Le panneau reste utile — options, abandon — mais c'est un
+     simple calque posé sur une partie qui tourne toujours. */
+  paused = !multiMode;
+  updateAudioToggleButtons();
+  syncCamDistUI();
+  /* Trois sorties possibles, trois libellés : le bouton doit dire ce qu'il
+     coûte AVANT le clic, pas après. */
+  const camp = !!conquest;
+  const quitBtn = $('btn-pause-quit');
+  const warn = $('pause-warn');
+  if (multiMode) {
+    quitBtn.textContent = '🏳️ Quitter la manche';
+    warn.textContent = net.isHost()
+      ? 'Ton culte passera à l\'IA. Tu restes l\'hôte : la partie des autres continue sur ta machine.'
+      : 'Ton culte passera à l\'IA et la partie continuera sans toi.';
+    warn.classList.remove('hidden');
+  } else if (camp) {
+    quitBtn.textContent = '🏳️ Abandonner & retour à la carte';
+    warn.textContent = 'L\'abandon compte comme une défaite : la zone passe à un culte rival.';
+    warn.classList.remove('hidden');
+  } else {
+    quitBtn.textContent = '🚪 Quitter vers le menu';
+    warn.classList.add('hidden');
+  }
+  // Rejouer la carte n'a aucun sens en ligne : la manche est commune.
+  $('btn-pause-restart').classList.toggle('hidden', multiMode);
+  $('pause-modal').classList.remove('hidden');
+}
+
+function closePauseModal() {
+  paused = false;
+  $('pause-modal').classList.add('hidden');
+}
+
+function togglePauseModal() {
+  if ($('pause-modal').classList.contains('hidden')) {
+    openPauseModal();
+  } else {
+    closePauseModal();
+  }
+}
+
+$('btn-pause')?.addEventListener('click', () => {
+  togglePauseModal();
+});
+
+$('btn-pause-resume')?.addEventListener('click', () => {
+  closePauseModal();
+});
+
+$('btn-pause-restart')?.addEventListener('click', () => {
+  closePauseModal();
+  startGame();
+});
+
+$('btn-pause-quit')?.addEventListener('click', () => {
+  /* En campagne, quitter en cours de partie n'est pas neutre : c'est un abandon.
+     La zone est perdue au profit du rival le mieux placé, exactement comme si on
+     avait pressé « Retour à la carte » sur l'écran de défaite. Sans ce coût, la
+     pause offrirait une porte de sortie gratuite à toute partie mal engagée.
+     Hors campagne, il n'y a pas de territoire en jeu : on rentre au menu. */
+  /* En ligne, on ne coupe jamais la session : on sort de la manche et on
+     remonte au salon, où l'on suit les autres au statut « En jeu ». */
+  if (multiMode) {
+    if (!confirm('Quitter la manche ?\n\nTon culte sera repris par une IA et la partie continuera sans toi.')) return;
+    closePauseModal();
+    leaveMultiMatchToLobby();
+    return;
+  }
+  if (conquest) {
+    const zone = conquest.region?.name || 'cette zone';
+    if (!confirm(`Abandonner la partie ?\n\n${zone} sera perdue au profit d'un culte rival.`)) return;
+    closePauseModal();
+    forfeitZoneToRivals();
+    return;
+  }
+  closePauseModal();
+  soundEngine.stopBiomeAmbient();
+  state = 'menu';
+  $('hud').classList.add('hidden');
+  $('end').classList.add('hidden');
+  $('start').classList.remove('hidden');
+  updateMainMenu();
+});
+
+$('btn-toggle-music')?.addEventListener('click', () => {
+  soundEngine.toggleMusic();
+  updateAudioToggleButtons();
+});
+
+$('btn-toggle-sfx')?.addEventListener('click', () => {
+  soundEngine.toggleSFX();
+  updateAudioToggleButtons();
+});
+
 updateMainMenu();
 audioInit();
 
-// Entrer dans un pays : on atterrit directement dans le Hub Overworld 3D.
-setHubHandler((ctx) => {
-  openOverworldHub(ctx);
-});
+/* Entrer dans un pays ouvre la CARTE DES PROVINCES : le globe, ses pays et leurs
+   territoires à conquérir restent le cœur du jeu. Le Hub Overworld 3D était une
+   tentative de remplacer cette carte par un lieu à parcourir ; on y renonce.
+   Le handler n'est donc plus branché, et progression.js reprend son flux
+   d'origine (globe → carte du pays → province → partie).
+   Le code du Hub (openOverworldHub, state 'overworld') reste en place, inerte :
+   il ne s'atteint que par ce crochet. */
 
 // Zone choisie (en franchissant un portail) : la partie démarre pour de bon.
 setPlayHandler((ctx) => {
@@ -9120,6 +10056,20 @@ function frame(now) {
   last = now;
   pollGamepad(dt);
   monkTimeU.value = now / 1000;
+  /* Filet unique : le salon peut être masqué par une dizaine de chemins
+     (lancement, abandon, retour au menu, rematch…). Plutôt que d'éteindre la
+     scène à chacun — et d'en oublier un, laissant des socles flotter au-dessus
+     de la carte de jeu —, on la raccroche ici à la visibilité du panneau.
+     Important : on regarde aussi le PANNEAU et l'état de jeu. Au lancement
+     multi, seul `multi-panel` reçoit `hidden` — `multi-lobby` reste sans la
+     classe, et l'ancien test laissait la caméra coincée sur le calque salon. */
+  if (lobbyStage && lobbyStage.active) {
+    const panelHidden = $('multi-panel')?.classList.contains('hidden');
+    const lobbyHidden = $('multi-lobby')?.classList.contains('hidden');
+    if (panelHidden || lobbyHidden || state === 'play' || state === 'overworld') {
+      setLobbyStageActive(false);
+    }
+  }
   if (state === 'play') {
     // ralenti dramatique (kill de Leader) : le temps s'étire un court instant
     if (slowmoT > 0) { slowmoT -= dt; dt *= 0.3; }
@@ -9133,6 +10083,14 @@ function frame(now) {
     }
   } else if (state === 'overworld') {
     updateOverworld(dt);
+  } else if (lobbyStage && lobbyStage.active) {
+    /* Salon 3D : la caméra quitte l'orbite du menu pour cadrer les personnages,
+       posés devant leur propre rideau (voir lobbyStage.js). La vallée du menu
+       reste rendue derrière, mais le décor la masque — c'est lui qui garantit
+       le contraste, quel que soit le biome affiché. */
+    applyDayCycle(0.42);
+    lobbyStage.update(dt);
+    lobbyStage.applyCamera(camera, lobbyFreeRect(), innerWidth, innerHeight);
   } else {
     // Vue d'attente du menu : magnifique orbite cinématographique au-dessus de la vallée
     applyDayCycle(0.42);
@@ -9142,27 +10100,52 @@ function frame(now) {
     camera.position.set(Math.sin(menuOrbit) * radius, camY, Math.cos(menuOrbit) * radius);
     camera.lookAt(0, 1.2, 0);
   }
+  /* Découpe du décor devant le joueur. Juste avant le rendu et après TOUT
+     déplacement de caméra : la zone est calculée en espace écran, une caméra
+     bougée après coup la laisserait décalée d'une image — ce qui se voit comme
+     un tremblement du trou autour du personnage.
+     Hors partie (menu, joueur au sol), on passe null : la découpe s'éteint et
+     le décor redevient plein. */
+  const f0 = factions[0];
+  const heroPos = (state === 'play' || state === 'overworld') && f0 && f0.leader
+    ? f0.leader : null;
+  updateHeroCutout(camera, heroPos, camera.aspect);
   renderer.render(scene, camera);
 }
 
 /* Démarrage : vallée tempérée en fond de menu, boucle lancée direct */
 loadGrass('assets/models/grass.glb');
 loadTrees('assets/models/trees.glb');
+/* Dalle sculptée. Sans elle l'île se bâtit avec la dalle procédurale, donc pas
+   de rendez-vous à tenir ici — au pire la première carte du menu est encore en
+   procédural et la suivante prend le modèle. */
+loadTileVariant('assets/models/tiles/hex_rock_01.glb');
 // la carte du menu est bâtie avant l'arrivée des modèles : on les y pose après coup
 /* Les modèles d'herbe et d'arbres arrivent parfois après la construction de la
    carte : on les repose alors sur les tuiles de l'île courante. */
 onGrassReady(() => {
   if (!island) return;
-  mapObjects.push(...buildBiomeGrass(scene, currentBiomeKey, MAP_R, makeTilePlacer(island)));
+  mapObjects.push(...seededScatter(SCATTER_GRASS,
+    () => buildBiomeGrass(scene, currentBiomeKey, MAP_R, makeTilePlacer(island))));
 });
 onTreesReady(() => {
   if (!island) return;
-  mapObjects.push(...buildBiomeTrees(scene, currentBiomeKey, MAP_R, makeTilePlacer(island)));
+  mapObjects.push(...seededScatter(SCATTER_TREES,
+    () => buildBiomeTrees(scene, currentBiomeKey, MAP_R, makeTilePlacer(island))));
+});
+/* Arche modélisée des portails de niveau. Comme les modèles de décor, elle peut
+   arriver après la construction du Hub : on repose alors l'arche sur les portails
+   déjà en place, sans reconstruire la scène. */
+loadPortalFrame();
+onPortalFrameReady(() => {
+  for (const p of overworldZonePortals) if (p) applyPortalFrame(p);
 });
 loadNature();
 onNatureReady(() => {
   if (!island) return;
-  mapObjects.push(...buildBiomeNature(scene, currentBiomeKey, MAP_R, makeTilePlacer(island)));
+  mapObjects.push(...seededScatter(SCATTER_NATURE,
+    () => buildBiomeNature(scene, currentBiomeKey, MAP_R, makeTilePlacer(island))));
+  mapObjects.push(...buildRampStairs(scene, island, currentBiomeKey));
 });
 buildMap('temperate');
 captureDayBase();

@@ -4,6 +4,28 @@
    Le rendu (particules, secousse caméra) peut continuer à utiliser
    Math.random librement — il n'affecte pas l'état partagé. */
 
+/**
+ * Graine stable d'un code pays ISO (FNV-1a 32 bits).
+ *
+ * C'est ce qui fait qu'un hub est un LIEU et non un tirage : le hub du Japon
+ * est toujours le même, celui du Pérou aussi, et rien n'est stocké — le code
+ * pays suffit à le reconstruire. Tout ce qui doit se poser au même endroit
+ * d'une session à l'autre (repères de quête, mise en scène) doit dériver
+ * d'ici, et pas de sa propre recette : deux recettes qui divergent, ce sont
+ * des marqueurs de quête qui atterrissent à côté du décor qu'ils désignent.
+ *
+ * Ne JAMAIS changer la formule sans mesurer : elle redessine tous les hubs.
+ */
+export function isoSeed(iso) {
+  let h = 0x811c9dc5;
+  const s = String(iso || 'FRA').toUpperCase();
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
 export function createRng(seed = 1) {
   let s = (seed >>> 0) || 1;
   const rng = {

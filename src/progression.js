@@ -12,6 +12,7 @@ import {
   addXp, ensureLevelState, aiSpendSkillPoints, aiExpansionPower, xpToNext, POINTS_PER_LEVEL,
 } from './skills.js';
 import { soundEngine } from './soundEngine.js';
+import { registerPadSurface, unregisterPadSurface } from './gamepad.js';
 
 function playUIClick() {
   soundEngine.playUIClick();
@@ -809,10 +810,80 @@ function createGlobe(canvas, opts) {
     return res;
   }
 
+  /* ISO du pays visé par le curseur manette, ou null.
+     Conditionné à la présence d'une manette : au doigt ou à la souris, on
+     désigne directement le pays qu'on touche, et afficher en permanence un
+     « curseur » que le joueur n'a pas déplacé serait un repère parasite. */
+  function padSelectedIso() {
+    if (!document.body.classList.contains('has-gamepad')) return null;
+    return padWorld ? padWorld.iso : null;
+  }
+
+  /** Étiquette du pays sélectionné : pastille nom + accessibilité. */
+  function drawPadLabel(anchor) {
+    if (!padWorld) return;
+    const save = loadSave();
+    const enterable = padWorld.iso === save.startIso || canEnterCountry(save, padWorld.iso);
+    const name = padWorld.name || padWorld.iso;
+    /* Le statut est affiché ici, et pas seulement suggéré par la couleur du
+       contour : c'est la réponse à « pourquoi A ne fait rien sur ce pays ? ». */
+    const sub = enterable ? '✓ Accessible' : '✕ Hors de portée';
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const fName = `bold ${Math.round(15 * dpr)}px system-ui, sans-serif`;
+    const fSub = `600 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
+    ctx.font = fName;
+    const wName = ctx.measureText(name).width;
+    ctx.font = fSub;
+    const wSub = ctx.measureText(sub).width;
+
+    const padX = 12 * dpr, padY = 8 * dpr, gap = 3 * dpr;
+    const boxW = Math.max(wName, wSub) + padX * 2;
+    const boxH = 15 * dpr + gap + 11 * dpr + padY * 2;
+    /* Posée AU-DESSUS du pays, décalée du bord haut de sa silhouette : centrée
+       dessus, elle masquerait la forme qu'on cherche justement à montrer. */
+    let bx = anchor.x - boxW / 2;
+    let by = anchor.top - boxH - 14 * dpr;
+    // Recadrage dans le canvas : près d'un pôle, la pastille sortait de l'écran.
+    bx = Math.max(6 * dpr, Math.min(bx, W - boxW - 6 * dpr));
+    if (by < 6 * dpr) by = anchor.y + 16 * dpr;
+
+    // Trait de rattachement, pour lever toute ambiguïté sur le pays désigné
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 1.6 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(bx + boxW / 2, by + boxH);
+    ctx.lineTo(anchor.x, anchor.y);
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(9, 13, 22, 0.90)';
+    ctx.strokeStyle = enterable ? '#fbbf24' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, boxW, boxH, 10 * dpr);
+    else ctx.rect(bx, by, boxW, boxH);   // navigateur sans roundRect
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = fName;
+    ctx.fillText(name, bx + boxW / 2, by + padY + 8 * dpr);
+    ctx.fillStyle = enterable ? '#fbbf24' : '#94a3b8';
+    ctx.font = fSub;
+    ctx.fillText(sub, bx + boxW / 2, by + padY + 15 * dpr + gap + 6 * dpr);
+    ctx.restore();
+  }
+
   function render() {
     const save = loadSave();
     ctx.clearRect(0, 0, W, H);
-    
+    /* Renseignée pendant le tracé des terres, consommée après la levée du clip
+       de la sphère (voir plus bas) : on a besoin des coordonnées écran du pays,
+       qui ne sont connues qu'au moment où on le dessine. */
+    let selLabel = null;
+
     // Toggle de style : passer à false pour retrouver le rendu original immédiatement
     const CARTOON_STYLE = true;
 
@@ -913,6 +984,11 @@ function createGlobe(canvas, opts) {
         const accessible = accSet;
         const hlPolys = [];
         const fogPolys = [];
+        /* Pays sous le curseur manette. Le contour dore ne suffit pas a le
+           reperer : il marque TOUS les pays jouables, et en debut de campagne
+           il n'y en a qu'un — impossible de savoir sur lequel on est pose. */
+        const selPolys = [];
+        const selIso = padSelectedIso();
 
         for (const poly of polys) {
           let fillStyle = poly.col.color;
@@ -953,6 +1029,7 @@ function createGlobe(canvas, opts) {
 
           if (isAccessible) hlPolys.push(poly);
           if (!discovered) fogPolys.push(poly);
+          if (selIso && poly.countryId === selIso) selPolys.push(poly);
         }
 
         // Voile Trame toon sur les terres inexplorées
@@ -991,8 +1068,77 @@ function createGlobe(canvas, opts) {
           }
           ctx.restore();
         }
+
+        /* --- Curseur manette : le pays SÉLECTIONNÉ ---
+           Dessiné après la surbrillance dorée pour passer par-dessus, et dans un
+           registre franchement différent (blanc, épais, éclairci) : le doré dit
+           « jouable », le blanc dit « c'est ici que tu es ». Deux informations
+           distinctes, donc deux traitements distincts — les confondre était tout
+           le problème. */
+        if (selPolys.length) {
+          const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
+          ctx.save();
+          ctx.lineJoin = 'round';
+          ctx.lineCap = 'round';
+
+          // Éclaircissement du remplissage : la forme entière se détache
+          ctx.globalAlpha = 0.30 + pulse * 0.12;
+          ctx.fillStyle = '#ffffff';
+          for (const poly of selPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath();
+              ctx.fill();
+            }
+          }
+
+          // Halo large puis trait net : lisible même sur un pays minuscule
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+          ctx.lineWidth = (7.5 + pulse * 3.0) * dpr;
+          for (const poly of selPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath();
+              ctx.stroke();
+            }
+          }
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2.6 * dpr;
+          for (const poly of selPolys) {
+            for (const ring of poly.rings) {
+              ctx.beginPath();
+              ring.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+              ctx.closePath();
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+
+          /* Ancre de l'étiquette : le plus grand anneau visible du pays. Le
+             centre géométrique de TOUS les anneaux tomberait dans l'océan pour
+             un pays à archipel (Grèce, Indonésie). */
+          let bigRing = null, bigLen = -1;
+          for (const poly of selPolys) {
+            for (const ring of poly.rings) {
+              if (ring.length > bigLen) { bigLen = ring.length; bigRing = ring; }
+            }
+          }
+          if (bigRing) {
+            let sx = 0, sy = 0, minY = Infinity;
+            for (const p of bigRing) { sx += p.x; sy += p.y; if (p.y < minY) minY = p.y; }
+            selLabel = { x: sx / bigRing.length, y: sy / bigRing.length, top: minY };
+          }
+        }
       }
       ctx.restore(); // fin du clip de la sphère
+
+      /* Étiquette du pays sélectionné — HORS du clip de la sphère, sinon elle
+         serait tronquée dès que le pays approche du bord du globe, c'est-à-dire
+         précisément quand on a le plus besoin de la lire. */
+      if (selLabel) drawPadLabel(selLabel);
 
       // 7. Contour à l'encre noir épais autour du globe complet (Globe Ink Outline)
       ctx.save();
@@ -1365,6 +1511,91 @@ function createGlobe(canvas, opts) {
     targetZoom = Math.min(Math.max(wantZoom, ZOOM_MIN), ZOOM_MAX);
   }
 
+  /* ---------- Navigation à la manette ----------
+     Le globe se joue au doigt : on fait tourner la sphère puis on tape le pays.
+     Impossible à transposer au pad — viser une forme dessinée demanderait un
+     curseur libre, donc de la précision analogique sur une cible de quelques
+     pixels, ce qui est exactement ce qu'une manette fait mal.
+
+     On saute donc l'étape du pointage : le pad passe de pays ACCESSIBLE en pays
+     accessible, et chaque saut recadre le globe. La navigation se fait sur la
+     position à l'écran plutôt que sur la latitude / longitude, sinon « à
+     droite » n'aurait aucun sens dès que la sphère est inclinée. */
+  let padWorld = null;
+
+  function accessibleWorlds() {
+    const save = loadSave();
+    return WORLDS.filter(w => w.iso === save.startIso || canEnterCountry(save, w.iso));
+  }
+
+  function padStep(dir) {
+    const pool = accessibleWorlds();
+    if (!pool.length) return;
+    if (!padWorld || !pool.includes(padWorld)) {
+      padWorld = pool[0];
+      focusWorld(padWorld); scheduleLoop();
+      return;
+    }
+    /* On réutilise la projection de rendu : un pays derrière le globe n'a pas
+       de position utilisable, on le classe donc par distance angulaire. */
+    const from = project(padWorld.lat, padWorld.lon);
+    const [vx, vy] = { 1: [0, -1], 2: [0, 1], 3: [-1, 0], 4: [1, 0] }[dir];
+    let best = null, bestScore = Infinity;
+    for (const w of pool) {
+      if (w === padWorld) continue;
+      const p = project(w.lat, w.lon);
+      const ox = p.x - from.x, oy = p.y - from.y;
+      const along = ox * vx + oy * vy;
+      if (along <= 2) continue;
+      const off = Math.abs(ox * -vy + oy * vx);
+      /* Le facteur latéral est volontairement fort : sur une sphère, deux pays
+         « vers la droite » peuvent être très éloignés en hauteur, et sans ça la
+         sélection sauterait d'un continent à l'autre. */
+      /* project() rend z < 0 pour la face cachée de la sphère : ces pays gardent
+         des coordonnées écran plausibles mais miroir, d'où la forte pénalité
+         plutôt qu'un rejet — s'ils sont les seuls candidats, on y va quand même. */
+      const score = along + off * 3.0 + (p.z < 0 ? 4000 : 0);
+      if (score < bestScore) { bestScore = score; best = w; }
+    }
+    /* Aucun autre candidat — cas courant en début de campagne, où un seul pays
+       est jouable : on recadre sur la sélection courante. Sans ça, un joueur qui
+       a fait tourner le globe au stick perdait de vue l'unique pays accessible,
+       sans aucun moyen d'y revenir. */
+    if (!best) { focusWorld(padWorld); scheduleLoop(); return; }
+    padWorld = best;
+    focusWorld(padWorld);
+    scheduleLoop();
+  }
+
+  function padPick() {
+    if (!padWorld) { padStep(4); return; }
+    opts.onPick(padWorld);
+  }
+
+  function padZoom(k) {
+    targetZoom = null;
+    setZoom(zoom * (k > 0 ? 1.25 : 0.8));
+    scheduleLoop();
+  }
+
+  /* Rotation libre au stick, en plus du saut de pays au D-pad.
+     Les deux sont indispensables et ne se remplacent pas : en début de campagne
+     un SEUL pays est accessible (canEnterCountry n'ouvre un voisin qu'une fois
+     un pays entièrement conquis). Le saut de sélection n'avait alors aucune
+     autre cible et le globe restait figé — impossible d'aller regarder le
+     reste du monde, alors qu'au doigt on le fait tourner librement.
+     Mêmes signes que le glissement à la souris, sinon le globe part à l'envers. */
+  function padPan(dx, dy, dt) {
+    targetY = null; targetX = null;
+    velY = 0; velX = 0;
+    /* Vitesse réduite à fort zoom : à l'écran, un même angle balaie d'autant
+       plus de pixels que la sphère est grosse. */
+    const speed = 1.5 / Math.max(1, Math.sqrt(zoom));
+    rotY -= dx * speed * dt;
+    rotX = clampTilt(rotX + dy * speed * dt);
+    scheduleLoop();
+  }
+
   resize();
   const onResize = () => { resize(); scheduleLoop(); };
   addEventListener('resize', onResize);
@@ -1423,9 +1654,26 @@ function createGlobe(canvas, opts) {
 
   scheduleLoop();
   schedulePulse();
+  /* Navigation manette publiée à gamepad.js. L'inscription se fait ici, dans la
+     fabrique, et non sur les cinq sites qui montent un globe : un écran ajouté
+     plus tard hériterait sinon d'un globe muet au pad. */
+  const padNav = {
+    el: canvas,
+    label: 'Pays',
+    pickLabel: 'Entrer',
+    panLabel: 'Tourner',
+    step: padStep,
+    pick: padPick,
+    zoom: padZoom,
+    pan: padPan,
+  };
+  registerPadSurface('globe', padNav);
+
   return {
-    focusWorld(w) { focusWorld(w); scheduleLoop(); },
+    focusWorld(w) { padWorld = w || padWorld; focusWorld(w); scheduleLoop(); },
+    padNav,
     stop() {
+      unregisterPadSurface('globe', padNav);
       cancelAnimationFrame(raf); loopRunning = false;
       clearInterval(pulseTimer); pulseTimer = 0;
       removeEventListener('resize', onResize);
@@ -2479,10 +2727,65 @@ function createCountryMap(canvas, world, regions, onSelect) {
   canvas.addEventListener('touchstart', onTouchStart);
   canvas.addEventListener('touchmove', onTouchMove, { passive: false });
   canvas.addEventListener('touchend', onTouchEnd);
+  /* ---------- Navigation à la manette ----------
+     Les zones sont des polygones peints dans le canvas : rien à focaliser. On
+     parcourt donc leurs centroïdes déjà calculés au rendu, dans la direction
+     demandée. Le survol met à jour `selectedId`, exactement comme un clic — la
+     carte se surligne toute seule et le joueur voit où il en est. */
+  function padStep(dir) {
+    if (!screenPolys.length) return;
+    const cur = screenPolys.find(sp => sp.region.id === selectedId);
+    if (!cur) {
+      selectedId = screenPolys[0].region.id;
+      render();
+      return;
+    }
+    const [vx, vy] = { 1: [0, -1], 2: [0, 1], 3: [-1, 0], 4: [1, 0] }[dir];
+    let best = null, bestScore = Infinity;
+    for (const sp of screenPolys) {
+      if (sp === cur) continue;
+      const ox = sp.centroid.x - cur.centroid.x, oy = sp.centroid.y - cur.centroid.y;
+      const along = ox * vx + oy * vy;
+      if (along <= 2) continue;
+      const off = Math.abs(ox * -vy + oy * vx);
+      const score = along + off * 2.4;
+      if (score < bestScore) { bestScore = score; best = sp; }
+    }
+    if (!best) return;
+    selectedId = best.region.id;
+    render();
+    playUIClick();
+  }
+
+  function padPick() {
+    const cur = screenPolys.find(sp => sp.region.id === selectedId);
+    if (!cur) { padStep(4); return; }
+    playUIClick();
+    onSelect(cur.region);
+  }
+
+  /* Déplacement libre de la vue au stick : la carte d'un pays peut être zoomée
+     au-delà du cadre, et sans ça les zones sorties de l'écran seraient
+     sélectionnables sans être visibles. */
+  function padPan(dx, dy, dt) {
+    panX -= dx * 900 * dpr * dt;
+    panY -= dy * 900 * dpr * dt;
+    clampPan();
+    render();
+  }
+
+  const padNav = {
+    el: canvas, label: 'Zone', pickLabel: 'Choisir', panLabel: 'Déplacer',
+    step: padStep, pick: padPick, pan: padPan,
+  };
+  registerPadSurface('countrymap', padNav);
+
   render();
   return {
     repaint() { selectedId = null; render(); },
+    padNav,
     stop() {
+      unregisterPadSurface('countrymap', padNav);
       removeEventListener('resize', onResizeEvt);
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);
@@ -3304,6 +3607,13 @@ export async function openProgression(opts = {}) {
   CULTS.forEach((c) => {
     const sw = document.createElement('div');
     sw.className = 'swatch';
+    /* role + tabindex : sans eux, ces pastilles ne sont que des div cliquables.
+       Elles restaient donc invisibles a la navigation manette, qui ne parcourt
+       que des elements interactifs declares — la couleur divine etait tout
+       simplement impossible a choisir au pad. Profite aussi aux lecteurs d'ecran. */
+    sw.setAttribute('role', 'button');
+    sw.tabIndex = 0;
+    sw.setAttribute('aria-label', `Couleur ${c.name || c.color}`);
     sw.style.background = c.color;
     sw.addEventListener('pointerdown', () => {
       selectedCreatorColor = c.color;
@@ -3319,6 +3629,9 @@ export async function openProgression(opts = {}) {
   defaultSymbols.forEach((sym) => {
     const btn = document.createElement('div');
     btn.className = 'symbol-btn';
+    btn.setAttribute('role', 'button');   // meme raison que les pastilles de couleur
+    btn.tabIndex = 0;
+    btn.setAttribute('aria-label', `Symbole ${sym}`);
     btn.textContent = sym;
     btn.addEventListener('pointerdown', () => {
       selectedCreatorSymbol = sym;

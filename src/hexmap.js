@@ -3,7 +3,8 @@
    ---------------------------------------------------------------------------
    Chaque carte est une île suspendue dans le vide, bâtie de tuiles hexagonales
    épaisses (« flat-top ») posées sur une grille axiale. Ciel / props = un biome ;
-   le SOL est une couleur unie par tuile + léger dégradé radial (look mobile).
+   le SOL part d'une teinte par tuile, à laquelle un grain procédural lu en
+   coordonnées monde ajoute plaques, strates et matière (voir applyGroundDetail).
 
    Règles de génération (contrat de jeu) :
      • Chaque tuile a un NIVEAU entier ; sa surface est à y = level × STEP_H.
@@ -24,7 +25,10 @@
 =========================================================================== */
 
 import * as THREE from 'three';
-import { BIOMES, toonMaterial, attachCartoonOutline } from './biomes.js';
+import { BIOMES, toonMaterial, attachCartoonOutline, getNatureAsset } from './biomes.js';
+import { IS_MOBILE } from './device.js';
+import { GROUND_NOISE_GLSL, LIFT_FADE_IN, LIFT_FADE_OUT, applyGroundFollow } from './groundNoise.js';
+import { makeGLTFLoader } from './gltf.js';
 
 /* ============================== Géométrie de la grille ============================== */
 
@@ -299,6 +303,37 @@ export function generateIsland(opts = {}) {
        sentier, aussi nettement qu'une place de village. */
     if (t.ramp) c.lerp(new THREE.Color(B.pathColor || 0xa87a4a), 0.42);
     t.tint = c;
+  }
+
+  /* --- 7. Biais de matière de la tuile. -------------------------------------
+     La tuile ne CHOISIT pas sa matière : la découpe entre matières est un
+     champ continu, calculé dans le shader en coordonnées monde. Une tuile qui
+     porterait un identifiant serait uniforme dès que ses voisines lui
+     ressemblent — c'est-à-dire presque partout — et on retomberait sur
+     l'aplat par tuile. Le champ, lui, varie À L'INTÉRIEUR d'une tuile : c'est
+     ce qui donne des tuiles composées, deux tiers d'une matière et un tiers
+     d'une autre, avec une découpe qui continue chez la voisine.
+
+     Ce que la tuile apporte, c'est un BIAIS : de quel côté elle penche.
+
+     AMPLITUDE : il doit rester PETIT devant le champ. Le lissage du biais est
+     centré sur les tuiles ; un biais fort redessine donc des régions
+     hexagonales et ramène exactement le défaut qu'on corrige. Mesuré : à 0,66
+     d'amplitude les plaques épousaient les hexagones, à 0,22 le champ garde la
+     main sur la forme.
+
+     Le relief le pilote : une hauteur est balayée par le vent, donc plus sèche
+     et plus grossière que le fond d'une cuvette — le sol raconte alors quelque
+     chose de la carte au lieu de la décorer. Une part de bruit lent s'y ajoute
+     pour que deux plateaux de même altitude ne soient pas jumeaux. */
+  for (const t of tiles) {
+    const n = noise(t.x * 0.033 + 900, t.z * 0.033 + 900);
+    let b = (t.level / MAX_LEVEL) * 0.12 + (n - 0.5) * 0.10;
+    /* Les repères de jeu tirent vers la matière la plus neutre : une place ou
+       un sanctuaire doit rester lisible comme tel, pas se fondre dans l'herbe
+       sèche. */
+    if (t.role === ROLE.PLAZA || t.role === ROLE.SANCTUARY) b -= 0.14;
+    t.matBias = b;
   }
 
   return { tiles, byKey, radius, seed, jumps, biomeKey };
@@ -934,10 +969,40 @@ function makeCrust() {
     return new THREE.Color(sh, sh, sh);
   }
 
-  const topC = push(0, 0, 0, topCol(0, 0));
-  const topV = corner.map(([x, z]) => push(x, 0, z, topCol(x, z)));
+  /* Dessus subdivisé.
+     Un éventail de 6 triangles (centre + 6 coins) suffisait tant que la surface
+     était plate. Pour lui donner du volume il faut des sommets à déplacer : on
+     découpe chaque secteur en une grille barycentrique de TOP_SUB² triangles.
+     96 triangles par tuile, ~21 k pour une île entière — négligeable, et c'est
+     ce qui permet au relief du shader d'exister vraiment.
+
+     Les sommets sont dupliqués le long des arêtes entre secteurs. Sans
+     conséquence : le déplacement ne dépend que de la position monde, donc deux
+     sommets confondus reçoivent exactement la même hauteur et restent soudés. */
+  const TOP_SUB = 8;
   /* Enroulement CCW vu depuis +Y pour que Face avant = dessus marchable. */
-  for (let i = 0; i < 6; i++) indices.push(topC, topV[(i + 1) % 6], topV[i]);
+  for (let i = 0; i < 6; i++) {
+    const [ax, az] = corner[i];
+    const [bx, bz] = corner[(i + 1) % 6];
+    // grille du secteur : p(u,v) = centre + u·(A−centre)/N + v·(B−centre)/N
+    const grid = [];
+    for (let u = 0; u <= TOP_SUB; u++) {
+      grid[u] = [];
+      for (let v = 0; v + u <= TOP_SUB; v++) {
+        const x = (ax * u + bx * v) / TOP_SUB;
+        const z = (az * u + bz * v) / TOP_SUB;
+        grid[u][v] = push(x, 0, z, topCol(x, z));
+      }
+    }
+    for (let u = 0; u < TOP_SUB; u++) {
+      for (let v = 0; u + v < TOP_SUB; v++) {
+        indices.push(grid[u][v], grid[u][v + 1], grid[u + 1][v]);
+        if (u + v + 1 < TOP_SUB) {
+          indices.push(grid[u + 1][v], grid[u][v + 1], grid[u + 1][v + 1]);
+        }
+      }
+    }
+  }
 
   for (let i = 0; i < 6; i++) {
     const j = (i + 1) % 6;
@@ -977,10 +1042,568 @@ function getCrustGradient() {
   return _crustGradient;
 }
 
+/* Varyings du shader de sol. Le champ de hauteur lui-meme vit dans
+   groundNoise.js : il est partage avec le decor, qui doit se decaler
+   d'exactement la meme quantite. */
+const GROUND_VARYINGS = /* glsl */`
+  varying vec3 vGroundPos;
+  varying float vGroundUp;
+  varying float vGroundFade;
+  /* Position DANS la tuile (hexagone centré sur l'origine), et le BIAIS de
+     matière de la tuile puis de ses six voisines. Voir GROUND_WANG_GLSL. */
+  varying vec2 vTileLocal;
+  varying float vMatSelf;
+  varying vec3 vMatNbA;
+  varying vec3 vMatNbB;
+`;
+
+/* ---------------------------------------------------------------------------
+   Pavage à raccords — la matière traverse les tuiles
+   ---------------------------------------------------------------------------
+   Chaque tuile porte UNE matière (sable fin, sable grossier, herbe sèche…).
+   Près d'une arête, elle se fond vers celle de sa voisine : une plaque d'herbe
+   sèche s'étend donc sur plusieurs tuiles au lieu de s'arrêter net au bord, et
+   la grille hexagonale cesse d'être la limite du dessin.
+
+   LE PROBLÈME DES COINS, et pourquoi les poids ne sont pas par arête.
+   La méthode évidente — un poids par arête, croissant vers le bord — se casse
+   là où TROIS tuiles se touchent. Au coin, la tuile A voit ses voisines B et C
+   et rend ½B + ½C ; la tuile B, au même point, voit A et C et rend ½A + ½C.
+   Les deux ne s'accordent pas, et une étoile apparaît à chaque sommet.
+
+   D'où une PARTITION DE L'UNITÉ par distance aux CENTRES : le poids d'une
+   tuile en un point ne dépend que de la distance de ce point à son centre.
+   C'est une fonction de la position seule, donc toutes les tuiles qui couvrent
+   ce point calculent les mêmes poids — l'accord est garanti par construction,
+   aux arêtes comme aux coins, sans cas particulier.
+
+   Le rayon de support vaut 5.2 : assez pour englober les coins de la tuile
+   (à 4.1) et donc mélanger les trois matières qui s'y rencontrent, trop peu
+   pour atteindre une deuxième couronne (le point d'arête le plus proche d'une
+   tuile de coin est à 6.15). Il ne contribue donc JAMAIS plus de trois tuiles,
+   ce qui borne le mélange sans avoir à le tronquer.
+--------------------------------------------------------------------------- */
+const MAT_SUPPORT_R = 5.2;
+
+const GROUND_WANG_GLSL = /* glsl */`
+  /* Poids d'une tuile dont le centre est à d du point. Nul au-delà du
+     support, donc une tuile lointaine ne pèse rien et n'a pas à être connue. */
+  float gTileW(vec2 d) {
+    float t = max(0.0, 1.0 - dot(d, d) / ${(MAT_SUPPORT_R * MAT_SUPPORT_R).toFixed(2)});
+    return t * t;
+  }
+`;
+
+/* Allongement de la jupe, en shader plutôt que par l'échelle d'instance.
+   La dalle est modélisée entre y = -CRUST_H et y = 0 ; sous une tuile haute il
+   faut descendre sa base jusqu'au plancher commun. Le faire avec une échelle Y
+   d'instance était le plus court, mais ça étirait TOUT le maillage : le dessus
+   restait à y = 0 par construction, mais le moindre relief sculpté au-dessus ou
+   en dessous se serait retrouvé multiplié par la hauteur de la tuile (jusqu'à
+   ×4 sur un plateau). Impossible d'y modeler quoi que ce soit.
+   Ici seuls les sommets sous y = 0 bougent, donc le dessus et le haut du flanc
+   restent rigides et sculptables. aSkirt = (h + CRUST_H) / CRUST_H. */
+const SKIRT_ATTR_GLSL = /* glsl */`
+  #ifdef USE_INSTANCING
+    attribute float aSkirt;
+  #endif
+`;
+const MAT_ATTR_GLSL = /* glsl */`
+  #ifdef USE_INSTANCING
+    attribute float aMatSelf;   // biais de matière de la tuile
+    attribute vec3 aMatNbA;     // biais des voisines 0,1,2
+    attribute vec3 aMatNbB;     // biais des voisines 3,4,5
+  #endif
+`;
+const SKIRT_STRETCH_GLSL = /* glsl */`
+  #ifdef USE_INSTANCING
+    if (transformed.y < -1e-4) transformed.y *= aSkirt;
+  #endif
+`;
+
+
+/* ---------------------------------------------------------------------------
+   Texture de matière du sol (scripts/build-ground-textures.mjs)
+   ---------------------------------------------------------------------------
+   Le sol n'avait que du bruit à l'échelle du paysage (12 et 2,5 unités) : ça
+   vallonne, ça ne texture pas. La signature du MATÉRIAU — ride de sable, fibre
+   d'herbe, fracture de roche — arrive par cette texture-ci, une par biome.
+
+   Encodage (voir le script) : R,G = gradient de hauteur, B = albédo, A = cavité.
+   Ce n'est PAS une image de couleur, c'est de la donnée : elle se lit en
+   NoColorSpace. Un décodage sRGB tordrait le gradient et l'ombrage partirait
+   de travers, d'une manière difficile à attribuer.
+
+   Le pixel neutre est (0,128,0,255) : aucun trait, albédo au repos, aucune
+   marque. C'est la texture par défaut des biomes qui n'en ont pas encore —
+   elle traverse le shader sans rien changer, ce qui évite d'avoir deux
+   variantes de programme à maintenir. Attention, la valeur neutre n'est PAS
+   128 sur les trois canaux : le trait et le masque sont des couvertures, leur
+   repos est zéro. Un gris moyen y poserait un demi-trait et une demi-marque
+   sur toute la carte.
+--------------------------------------------------------------------------- */
+const GROUND_TEX_DIR = 'assets/ground/';
+const _groundTexCache = new Map();
+let _neutralGroundTex = null;
+
+function neutralGroundTex() {
+  if (_neutralGroundTex) return _neutralGroundTex;
+  const t = new THREE.DataTexture(new Uint8Array([0, 128, 0, 255]), 1, 1);
+  t.needsUpdate = true;
+  _neutralGroundTex = t;
+  return t;
+}
+
+function getGroundTexture(name) {
+  if (!name) return neutralGroundTex();
+  let t = _groundTexCache.get(name);
+  if (t) return t;
+  t = new THREE.TextureLoader().load(GROUND_TEX_DIR + name + '.webp');
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  /* Donnée, pas couleur : surtout pas de conversion sRGB (voir ci-dessus). */
+  t.colorSpace = THREE.NoColorSpace;
+  t.anisotropy = 4;
+  _groundTexCache.set(name, t);
+  return t;
+}
+
+/**
+ * Greffe le grain procédural sur un matériau toon à vertex colors.
+ * @param {THREE.Material} mat
+ * @param {boolean} cheap — sans perturbation de normale (tactile).
+ */
+function applyGroundDetail(mat, cheap) {
+  mat.customProgramCacheKey = () => 'ground-detail-' + (cheap ? 'cheap' : 'full');
+  /* Uniformes partagés avec le matériau : c'est par eux que le biome change de
+     matière sans recompiler le programme. onBeforeCompile est rejoué à chaque
+     recompilation, on garde donc les MÊMES objets uniforme d'un appel à
+     l'autre — sinon setGroundMaterial écrirait dans un objet orphelin. */
+  const u = mat.userData.groundUniforms || (mat.userData.groundUniforms = {
+    /* Trois matières au plus : c'est aussi le nombre maximum qui peut se
+       rencontrer en un point (au coin de trois tuiles), et la limite de
+       l'empaquetage à 2 bits par arête. Les emplacements inutilisés pointent
+       sur la texture neutre. */
+    uMatTex0: { value: neutralGroundTex() },
+    uMatTex1: { value: neutralGroundTex() },
+    uMatTex2: { value: neutralGroundTex() },
+    uMatCol0: { value: new THREE.Color(1, 1, 1) },
+    uMatCol1: { value: new THREE.Color(1, 1, 1) },
+    uMatCol2: { value: new THREE.Color(1, 1, 1) },
+    uMatMark0: { value: new THREE.Color(1, 1, 1) },
+    uMatMark1: { value: new THREE.Color(1, 1, 1) },
+    uMatMark2: { value: new THREE.Color(1, 1, 1) },
+    /* Taille, en unités monde, d'une répétition de la texture. 6.4 pour une
+       tuile large de 8.2 : la matière est nettement plus fine que la tuile,
+       donc la répétition ne s'aligne pas sur la grille hexagonale. */
+    uGroundTexScale: { value: 1 / 6.4 },
+    /* x = force de l'ombrage, y = force de l'albédo, z = force de la cavité.
+       Tout à zéro sur la texture neutre : un biome sans matière traverse le
+       shader sans rien payer d'autre qu'un échantillonnage. */
+    uGroundTexAmt: { value: new THREE.Vector3(0, 0, 0) },
+    uMatSharp: { value: 2.4 },
+    uMatWobble: { value: 2.6 },
+    uMatFieldFreq: { value: 0.045 },
+    uMatEdge: { value: 0.07 },
+  });
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, u);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${GROUND_VARYINGS}\n${SKIRT_ATTR_GLSL}\n${MAT_ATTR_GLSL}\n${GROUND_NOISE_GLSL}`)
+      /* Déplacement des sommets du dessus — le « léger volume » du sol.
+         Greffé sur begin_vertex, donc AVANT project_vertex qui calcule
+         gl_Position : déplacer plus tard n'aurait aucun effet à l'écran.
+
+         Désactivé sur tactile (`cheap`), et ce n'est pas qu'une économie : le
+         pourtour restant plat, le relief ne modifie aucune silhouette et ne se
+         voit QUE par la perturbation de normale — elle-même coupée sur mobile.
+         On y paierait donc des sommets pour un effet strictement invisible.
+
+         L'échelle d'instance est désormais l'identité — l'allongement de la
+         jupe passe par SKIRT_STRETCH_GLSL, appliqué juste au-dessus et qui ne
+         touche que les sommets sous y = 0. Le déplacement n'a donc plus à être
+         divisé par quoi que ce soit : il porte sur des sommets à échelle 1.
+         Reste l'extinction au bord, pour garder un pourtour rigoureusement
+         plat et l'emboîtement des tuiles voisines. */
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+      ${SKIRT_STRETCH_GLSL}
+      vGroundFade = 0.0;
+      ${cheap ? '#if 0' : '#if 1'}
+      if (normal.y > 0.5) {
+        #ifdef USE_INSTANCING
+          vec3 gWorld = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+        #else
+          vec3 gWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;
+        #endif
+        vGroundFade = 1.0 - smoothstep(${LIFT_FADE_IN.toFixed(2)}, ${LIFT_FADE_OUT.toFixed(2)}, length(transformed.xz));
+        transformed.y += gLift(gWorld.xz) * vGroundFade;
+      }
+      #endif
+      `)
+      /* La position monde doit passer par instanceMatrix : sans elle, les 200
+         tuiles liraient le bruit au même endroit et retomberaient identiques.
+         Relue ici, après déplacement : la teinte suit ainsi la géométrie. */
+      .replace('#include <fog_vertex>', `#include <fog_vertex>
+      #ifdef USE_INSTANCING
+        vGroundPos = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+      #else
+        vGroundPos = (modelMatrix * vec4(transformed, 1.0)).xyz;
+      #endif
+      vGroundUp = normal.y;
+      /* Coordonnée DANS la tuile, prise avant instanceMatrix : c'est elle qui
+         situe le fragment par rapport aux centres voisins. Les instances ne
+         subissent qu'une translation (rotation identité, échelle 1 depuis que
+         la jupe s'allonge en shader), donc le repère local est aligné sur le
+         monde et les décalages de voisines sont des constantes. */
+      vTileLocal = position.xz;
+      #ifdef USE_INSTANCING
+        vMatSelf = aMatSelf;
+        vMatNbA = aMatNbA;
+        vMatNbB = aMatNbB;
+      #else
+        vMatSelf = 0.0; vMatNbA = vec3(0.0); vMatNbB = vec3(0.0);
+      #endif
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+${GROUND_VARYINGS}
+${GROUND_NOISE_GLSL}
+${GROUND_WANG_GLSL}
+      uniform sampler2D uMatTex0;
+      uniform sampler2D uMatTex1;
+      uniform sampler2D uMatTex2;
+      uniform vec3 uMatCol0;
+      uniform vec3 uMatCol1;
+      uniform vec3 uMatCol2;
+      /* Couleur des MARQUES d'une matière — les touffes vertes sur du sable.
+         Sans ce second ton, une marque ne peut être que son fond en plus clair
+         ou plus sombre, et le sol reste monochrome quoi qu'on dessine. */
+      uniform vec3 uMatMark0;
+      uniform vec3 uMatMark1;
+      uniform vec3 uMatMark2;
+      uniform float uGroundTexScale;
+      uniform vec3 uGroundTexAmt;
+      /* Netteté du raccord : 1 = fondu large et doux, 4 = frontière franche.
+         C'est le seul réglage de « dessin » du pavage, celui qui décide si une
+         plaque d'herbe sèche a un bord net ou s'étale. */
+      uniform float uMatSharp;
+      /* Amplitude de la déformation de frontière, en unités monde. Au-delà de
+         l'apothème (3,55) une tuile peut cesser de porter sa propre matière au
+         centre : la matière ne se lirait plus comme attachée à la tuile. */
+      uniform float uMatWobble;
+      /* Fréquence du champ de matière, en 1/unités monde. 0.045 ≈ une région
+         tous les 22 unités, soit environ trois tuiles : assez grand pour que
+         la région se lise, assez petit pour qu'une tuile en voie deux. */
+      uniform float uMatFieldFreq;
+      /* Demi-largeur du fondu entre matières : 0.02 = lisière nette,
+         0.20 = dégradé large. */
+      uniform float uMatEdge;
+
+      /* Décalages des six centres voisins, en repère de tuile. Ce sont les
+         mêmes que NORMALS × 2 × apothème côté JS ; ils sont constants parce
+         que les instances ne subissent qu'une translation. */
+      const vec2 GNB0 = vec2( ${(NORMALS[0][0] * 2 * APOTHEM).toFixed(4)}, ${(NORMALS[0][1] * 2 * APOTHEM).toFixed(4)});
+      const vec2 GNB1 = vec2( ${(NORMALS[1][0] * 2 * APOTHEM).toFixed(4)}, ${(NORMALS[1][1] * 2 * APOTHEM).toFixed(4)});
+      const vec2 GNB2 = vec2( ${(NORMALS[2][0] * 2 * APOTHEM).toFixed(4)}, ${(NORMALS[2][1] * 2 * APOTHEM).toFixed(4)});
+      const vec2 GNB3 = vec2( ${(NORMALS[3][0] * 2 * APOTHEM).toFixed(4)}, ${(NORMALS[3][1] * 2 * APOTHEM).toFixed(4)});
+      const vec2 GNB4 = vec2( ${(NORMALS[4][0] * 2 * APOTHEM).toFixed(4)}, ${(NORMALS[4][1] * 2 * APOTHEM).toFixed(4)});
+      const vec2 GNB5 = vec2( ${(NORMALS[5][0] * 2 * APOTHEM).toFixed(4)}, ${(NORMALS[5][1] * 2 * APOTHEM).toFixed(4)});
+
+      /* Lecture d'une matière, en coordonnées MONDE.
+         Sur l'UV du modèle, les ~215 tuiles partagent une géométrie instanciée :
+         le motif se répéterait à l'identique sur chaque hexagone et la grille
+         sauterait aux yeux. En monde, la texture ignore le découpage.
+         Canaux (voir le script de cuisson) :
+           R = trait d'encre, 0 sur les aplats, 1 sur un contour
+           G = albédo, écart signé centré sur 0,5
+           B = masque de marque, 0 sur le fond, 1 sur une touffe
+         Aucune donnée dans l'alpha : le WebP efface le RGB sous les pixels
+         transparents, y compris en sans-perte. */
+      vec4 gTex(sampler2D t, vec2 w) { return texture2D(t, w * uGroundTexScale); }`);
+
+    /* Volontairement, AUCUNE perturbation de la normale d'éclairage.
+       Une version précédente inclinait la normale avec un gain de 34, en pensant
+       compenser une pente trop faible. Effet inverse : la normale devenait quasi
+       horizontale dès qu'il y avait la moindre pente, et le dégradé toon — 4 crans
+       seulement — renvoyait alors le MÊME cran sombre quelle que soit
+       l'orientation. On perdait exactement ce qui fait lire un volume : le côté
+       éclairé et le côté à l'ombre d'une même bosse. D'où des taches plates.
+
+       Un dégradé à 4 crans est un mauvais support pour un relief subtil : ou bien
+       rien ne bouge, ou bien une tache à bord dur apparaît. Le modelé est donc
+       porté par l'albédo, dans le bloc ci-dessous, où la réponse est continue et
+       ne peut pas saturer. */
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <color_fragment>',
+      `#include <color_fragment>
+      {
+        /* OMBRAGE DIRECTIONNEL (hillshade) — c'est lui qui fait voir le volume.
+
+           Une bosse ne se lit pas parce qu'elle est claire ou sombre, mais parce
+           qu'elle a un côté FACE au soleil et un côté à l'ombre. C'est ce couple
+           qui manquait : les versions précédentes n'assombrissaient les creux
+           qu'uniformément, ce que l'œil interprète comme une tache de peinture,
+           pas comme une forme. La méthode est celle des cartes en relief, et elle
+           fonctionne même vue de la verticale — justement le cas ici.
+
+           La direction doit rester alignée sur le soleil de la scène,
+           sun.position = (28, 40, 20) dans main.js. Les deux étant liés par le
+           rendu et non par le code, un changement là-bas doit être répercuté ici,
+           sans quoi les bosses paraîtront éclairées par la gauche et les ombres
+           portées des arbres tomberont vers la droite. */
+        /* Hors du bloc conditionnel ci-dessous : la matière de sol s'en sert
+           aussi, et elle, elle reste active sur tactile. */
+        const vec3 SUN_DIR = normalize(vec3(28.0, 40.0, 20.0));
+        float shade = 0.0;
+        /* Hauteur brute, en appui : elle creuse légèrement les cuvettes, à la
+           manière d'une occlusion ambiante. Dosée bien plus bas que l'ombrage
+           directionnel, dont elle n'est qu'un complément. */
+        float h = 0.0;
+        /* Coupé sur tactile en même temps que le déplacement des sommets : sans
+           relief, vGroundFade y vaut zéro et ces quatre évaluations de bruit —
+           huit octaves par pixel, sur une surface qui remplit l'écran —
+           coûteraient plein tarif pour un résultat identiquement nul. */
+        ${cheap ? '#if 0' : '#if 1'}
+        float e = 0.45;
+        float lx = gLift(vGroundPos.xz + vec2(e, 0.0)) - gLift(vGroundPos.xz - vec2(e, 0.0));
+        float lz = gLift(vGroundPos.xz + vec2(0.0, e)) - gLift(vGroundPos.xz - vec2(0.0, e));
+        // ×0.5/e : différence centrée → dérivée réelle de la surface
+        vec2 slope = vec2(lx, lz) * (0.5 / e) * vGroundFade;
+        vec3 nRel = normalize(vec3(-slope.x, 1.0, -slope.y));
+        // écart au sol plat : 0 sur une surface horizontale, ± selon l'exposition
+        shade = dot(nRel, SUN_DIR) - SUN_DIR.y;
+        h = gLiftNorm(vGroundPos.xz) * vGroundFade;
+        #endif
+
+        float plaque = gRamp(gFbm(vGroundPos.xz * 0.085));
+        float grain  = gNoise(vGroundPos.xz * 2.9);
+
+        /* MATIÈRE. Les deux termes ci-dessus travaillent à 12 et 2,5 unités,
+           c'est-à-dire à l'échelle du paysage : ils vallonnent la teinte, ils
+           ne donnent pas de matière. Celle-ci arrive ici.
+
+           On la fait entrer par le MÊME hillshade que le relief macro, et pas
+           par la normale d'éclairage : voir le bloc ci-dessus, le dégradé toon
+           à 4 crans transforme toute perturbation de normale en taches à bord
+           dur. Le gradient cuit dans R,G se projette donc sur le soleil et
+           module l'albédo, où la réponse est continue.
+
+           uGroundTexAmt vaut zéro sur la texture neutre : les biomes sans
+           matière passent ici sans que rien ne change. */
+        float texTone = 0.0;
+        vec3 matCol = vec3(1.0);
+        {
+          /* --- Poids des tuiles qui couvrent ce fragment ------------------
+             Partition de l'unité par distance aux centres : chaque poids ne
+             dépend que de la position, donc la tuile voisine calcule le même
+             et le raccord est exact — aux arêtes comme aux coins. */
+          /* DÉFORMATION DE LA FRONTIÈRE. Sans elle, le fondu est doux mais la
+             région reste découpée à l'hexagone : on voit encore la grille, en
+             flou. On déplace donc le point d'évaluation par un bruit lu en
+             coordonnées MONDE — et c'est précisément parce qu'il ne dépend que
+             du monde que l'accord tient : les deux tuiles voisines subissent
+             le même déplacement au même endroit, donc les mêmes poids.
+             Résultat : une plaque d'herbe sèche a un contour organique qui ne
+             suit plus aucune arête. */
+          vec2 wob = vec2(gFbm(vGroundPos.xz * 0.085 + 17.0),
+                          gFbm(vGroundPos.xz * 0.085 + 51.0)) - 0.5;
+          vec2 lp = vTileLocal + wob * uMatWobble;
+
+          float w[7];
+          w[0] = gTileW(lp);
+          w[1] = gTileW(lp - GNB0);
+          w[2] = gTileW(lp - GNB1);
+          w[3] = gTileW(lp - GNB2);
+          w[4] = gTileW(lp - GNB3);
+          w[5] = gTileW(lp - GNB4);
+          w[6] = gTileW(lp - GNB5);
+
+          /* Netteté : élever les poids à une puissance puis renormaliser
+             resserre le mélange autour du plus fort, sans jamais rompre
+             l'accord — la puissance est une fonction du poids seul, donc les
+             deux tuiles la subissent à l'identique. */
+          float tot = 0.0;
+          for (int i = 0; i < 7; i++) { w[i] = pow(w[i], uMatSharp); tot += w[i]; }
+          tot = max(tot, 1e-5);
+
+          /* --- Ce que la partition transporte : un BIAIS, pas une matière ---
+             Première version : chaque tuile portait UN identifiant de matière
+             et le fondu mordait sur le tiers extérieur. Conséquence, une tuile
+             entourée de voisines de même matière était rigoureusement
+             uniforme — c'est-à-dire, sur une carte où une matière domine, la
+             quasi-totalité de la carte. On retombait sur l'aplat par tuile.
+
+             Ce qu'il faut, c'est une tuile COMPOSÉE : deux tiers d'herbe, un
+             tiers de sable, et la découpe qui continue chez la voisine. Ça
+             suppose que la frontière soit une courbe libre, donc qu'elle ne
+             soit pas un attribut de tuile.
+
+             D'où : la partition mélange un biais continu (exactement comme
+             avant, mêmes poids, même garantie d'accord aux coins), et ce biais
+             DÉCALE un champ de bruit lu en monde. La frontière vient du bruit
+             — libre, traversante, différente à chaque tuile et à chaque arête,
+             donc jamais deux configurations identiques sur une carte — et le
+             biais décide seulement de quel côté une région penche. */
+          float bias = (vMatSelf * w[0]
+                      + vMatNbA.x * w[1] + vMatNbA.y * w[2] + vMatNbA.z * w[3]
+                      + vMatNbB.x * w[4] + vMatNbB.y * w[5] + vMatNbB.z * w[6]) / tot;
+
+          /* Le champ. gRamp étale le fbm : sans lui il ne s'écarte de 0,5 que
+             de ±0,12 et les seuils ci-dessous ne seraient jamais franchis
+             franchement — la carte n'aurait qu'une seule matière. */
+          float field = gRamp(gFbm(vGroundPos.xz * uMatFieldFreq)) + bias;
+
+          /* Trois matières par seuils fondus. La largeur du fondu est ce qui
+             décide si la frontière est une lisière nette ou un dégradé. */
+          float e0 = uMatEdge;
+          float toB = smoothstep(0.42 - e0, 0.42 + e0, field);
+          float toC = smoothstep(0.72 - e0, 0.72 + e0, field);
+          vec3 mw;
+          mw.x = 1.0 - toB;
+          mw.y = toB - toC;
+          mw.z = toC;
+
+          /* --- Lecture et mélange -----------------------------------------
+             On échantillonne les trois matières et on pondère, plutôt que de
+             brancher : un branchement sur une texture donne des dérivées
+             fausses au bord du branchement, donc du mipmap qui saute — ça se
+             voit comme une ligne scintillante le long des raccords. */
+          vec4 t0 = gTex(uMatTex0, vGroundPos.xz);
+          vec4 t1 = gTex(uMatTex1, vGroundPos.xz);
+          vec4 t2 = gTex(uMatTex2, vGroundPos.xz);
+
+          /* Chaque matière compose SA couleur avant le mélange : le masque de
+             marque de l'une ne doit pas teinter les marques d'une autre. */
+          matCol = mix(uMatCol0, uMatMark0, t0.b) * mw.x
+                 + mix(uMatCol1, uMatMark1, t1.b) * mw.y
+                 + mix(uMatCol2, uMatMark2, t2.b) * mw.z;
+
+          float ink = t0.r * mw.x + t1.r * mw.y + t2.r * mw.z;
+          float alb = (t0.g * mw.x + t1.g * mw.y + t2.g * mw.z) * 2.0 - 1.0;
+
+          /* Le trait ASSOMBRIT, il n'éclaire jamais : c'est de l'encre. Un
+             ombrage directionnel a été essayé ici — il donne du relief
+             photographique, pas un dessin, et il jurait avec les contours
+             noirs du reste de la scène. */
+          texTone = -ink * uGroundTexAmt.x
+                  + alb * uGroundTexAmt.y;
+        }
+
+        /* Modulations ADDITIVES, pas multiplicatives : des facteurs multipliés
+           cumulent leurs extrêmes et cramaient le sol à +46 %. Additionnées,
+           l'écart utile reste maîtrisé.
+           Centré sur 0,97 et non 1,0 : les palettes de sol sont déjà très
+           claires (la prairie part d'un vert vif), et une modulation centrée
+           sur 1 poussait les zones hautes jusqu'au délavé. */
+        float tone = 0.97
+                   + shade * 2.4
+                   + h * 0.09
+                   + (plaque - 0.5) * 0.12
+                   + (grain  - 0.5) * 0.05
+                   + texTone;
+
+        if (vGroundUp > 0.5) {
+          /* La teinte de matière MULTIPLIE la teinte de tuile au lieu de la
+             remplacer. C'est ce qui permet à l'herbe sèche d'être de l'herbe
+             sèche sans effacer la légende que porte instanceColor : altitude
+             (plus haut = plus clair), rampes teintées en sentier, rôles. Un
+             remplacement rendrait deux plateaux indiscernables et ferait
+             disparaître les montées. */
+          diffuseColor.rgb *= matCol;
+          diffuseColor.rgb *= tone;
+          /* Les plaques sèches tirent vers le chaud, les creux vers le froid :
+             une variation de teinte, pas seulement de valeur — sans ça le sol
+             reste monochrome, juste plus ou moins clair. */
+          diffuseColor.r *= mix(0.94, 1.09, plaque);
+          diffuseColor.g *= mix(1.02, 0.98, plaque);
+          diffuseColor.b *= mix(1.10, 0.90, plaque);
+        } else {
+          /* Flancs de falaise : striures verticales de strates. Elles donnent
+             sa hauteur au plateau, qui n'était qu'un bandeau uni. */
+          float strat = gRamp(gFbm(vec2((vGroundPos.x + vGroundPos.z) * 0.55,
+                                        vGroundPos.y * 1.9)));
+          float veins = gRamp(gNoise(vec2((vGroundPos.x - vGroundPos.z) * 1.7,
+                                          vGroundPos.y * 0.7)));
+          diffuseColor.rgb *= 1.0 + (strat - 0.5) * 0.34 + (veins - 0.5) * 0.12;
+        }
+      }
+      `,
+    );
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
 let _crustMat = null;
+let _crustDepthMat = null;
+const CRUST_V = 5;
+
+/* La passe d'ombres n'utilise PAS le matériau ci-dessous mais un MeshDepthMaterial
+   généré par three.js, qui ignore donc l'étirement de la jupe. Tant qu'il passait
+   par l'échelle d'instance, la matrice s'en chargeait pour les deux passes ; en
+   shader, il faut le refaire ici, sinon l'ombre d'un plateau s'arrête à 1,2 sous
+   son dessus au lieu de descendre au plancher, et la falaise cesse d'ombrer ce
+   qu'elle surplombe. Le relief du dessus reste hors de la passe d'ombre : son
+   amplitude est trop faible pour se voir dans une ombre portée. */
+function getCrustDepthMaterial() {
+  if (_crustDepthMat && _crustDepthMat.userData.crustV === CRUST_V) return _crustDepthMat;
+  if (_crustDepthMat) { _crustDepthMat.dispose(); _crustDepthMat = null; }
+  const mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+  mat.customProgramCacheKey = () => 'crust-depth-skirt';
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>\n${SKIRT_ATTR_GLSL}`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>\n${SKIRT_STRETCH_GLSL}`);
+  };
+  mat.userData.crustV = CRUST_V;
+  _crustDepthMat = mat;
+  return mat;
+}
+
+/**
+ * Installe la matière de sol du biome sur le matériau de croûte.
+ *
+ * Passe par des uniformes, pas par une recompilation : changer d'île ne doit
+ * pas coûter un nouveau programme GPU (une compilation de shader se voit,
+ * c'est une saccade au chargement).
+ *
+ * `amt` dose séparément les trois canaux cuits — ombrage, albédo, cavité. Ils
+ * ne se dosent pas ensemble : l'ombrage porte la forme, l'albédo la matière,
+ * la cavité l'usure. Une même valeur pour les trois donne un sol sale.
+ */
+export function setGroundMaterial(biomeKey) {
+  const B = BIOMES[biomeKey] || BIOMES.temperate;
+  const mat = getCrustMaterial();
+  const u = mat.userData.groundUniforms;
+  if (!u) return;
+  const g = B.groundMatter;
+  const mats = (g && g.mats) || [];
+  for (let i = 0; i < 3; i++) {
+    const m = mats[i];
+    /* Au-delà des matières déclarées, on retombe sur la PREMIÈRE et non sur la
+       texture neutre : une tuile dont l'identifiant dépasserait la liste
+       resterait ainsi dans la matière du biome, au lieu de devenir un aplat
+       nu au milieu du sable. */
+    const src = m || mats[0];
+    u['uMatTex' + i].value = getGroundTexture(src && src.tex);
+    u['uMatCol' + i].value.set(src && src.col !== undefined ? src.col : 0xffffff);
+    /* Sans couleur de marque déclarée, la marque prend celle du fond : la
+       matière reste alors monochrome, ce qui est le bon défaut pour du sable
+       ou de la roche nue. */
+    u['uMatMark' + i].value.set(src && src.mark !== undefined ? src.mark : (src && src.col !== undefined ? src.col : 0xffffff));
+  }
+  u.uGroundTexScale.value = 1 / ((g && g.size) || 6.4);
+  u.uMatSharp.value = (g && g.sharp) || 2.4;
+  u.uMatWobble.value = (g && g.wobble !== undefined) ? g.wobble : 2.6;
+  u.uMatFieldFreq.value = (g && g.fieldFreq) || 0.045;
+  u.uMatEdge.value = (g && g.edge !== undefined) ? g.edge : 0.07;
+  if (g && g.amt) u.uGroundTexAmt.value.set(g.amt[0], g.amt[1], g.amt[2]);
+  else u.uGroundTexAmt.value.set(0, 0, 0);
+}
 
 function getCrustMaterial() {
-  if (_crustMat && _crustMat.userData.crustV === 3) return _crustMat;
+  if (_crustMat && _crustMat.userData.crustV === CRUST_V) return _crustMat;
   if (_crustMat) { _crustMat.dispose(); _crustMat = null; }
   _crustMat = new THREE.MeshToonMaterial({
     gradientMap: getCrustGradient(),
@@ -988,8 +1611,58 @@ function getCrustMaterial() {
     color: 0xffffff,
     flatShading: false,
   });
-  _crustMat.userData.crustV = 3;
+  applyGroundDetail(_crustMat, IS_MOBILE);
+  _crustMat.userData.crustV = CRUST_V;
   return _crustMat;
+}
+
+/* ------------------------------------------------------------------------
+   Dalles sculptées (blender/hex_tile_variants.py)
+   ------------------------------------------------------------------------
+   makeCrust() reste la référence et le repli : si le modèle n'est pas là, ou
+   pas encore arrivé, l'île se construit quand même avec la dalle procédurale.
+   Le modèle doit rester interchangeable avec elle — même contour à HEX_R,
+   même dessus à y = 0, même anneau bas à -CRUST_H — c'est le script Blender
+   qui le vérifie à la génération.
+
+   Chargé une fois pour toutes au démarrage (main.js) et jamais libéré : la
+   géométrie est partagée par toutes les îles de la session.
+--------------------------------------------------------------------------- */
+let tileGeo = null;
+let liveCrust = null;
+
+export function loadTileVariant(url) {
+  makeGLTFLoader().load(url, (gltf) => {
+    let found = null;
+    gltf.scene.traverse((o) => { if (!found && o.isMesh) found = o; });
+    if (!found) { console.warn('[hexmap] dalle sans maillage :', url); return; }
+    const geo = found.geometry;
+    if (!geo.attributes.color) {
+      /* Sans teintes de sommet, la dalle sortirait d'un blanc uniforme : le
+         matériau est en vertexColors, et instanceColor MULTIPLIE cette
+         couleur. Mieux vaut garder la dalle procédurale. */
+      console.warn('[hexmap] dalle sans attribut color, ignorée :', url);
+      return;
+    }
+    tileGeo = geo;
+
+    /* La carte du menu est bâtie au démarrage, donc avant l'arrivée du modèle.
+       On échange la géométrie sous l'InstancedMesh en place plutôt que de
+       reconstruire : une reconstruction retirerait la graine du tirage courant
+       et redessinerait l'île sous les pieds du joueur. Matrices, teintes et
+       matières sont indexés par instance, ils survivent tels quels au
+       changement de géométrie — mais les attributs d'INSTANCE vivent sur la
+       géométrie et doivent déménager, tous, sinon le shader lit des zéros. */
+    if (liveCrust && liveCrust.geometry !== geo) {
+      for (const name of ['aSkirt', 'aMatSelf', 'aMatNbA', 'aMatNbB']) {
+        const a = liveCrust.geometry.getAttribute(name);
+        if (a) geo.setAttribute(name, a);
+      }
+      liveCrust.geometry = geo;
+      liveCrust.computeBoundingSphere();
+      if (liveCrust.boundingSphere) liveCrust.boundingSphere.radius += liveCrust.userData.maxDrop || 0;
+    }
+  }, undefined, (e) => console.warn('[hexmap] dalle non chargée :', url, e));
 }
 
 /** Clip CPU : seulement les arêtes t.clip (trous), pas toute la côte. */
@@ -1087,6 +1760,187 @@ function buildCoastOutline(scene, island) {
   return [mesh];
 }
 
+/* ============================== Escaliers des rampes ==============================
+   Une rampe n'était qu'une teinte. `ensureWalkable` et `openMoreRamps` posent
+   `t.ramp = true` sur une tuile dont le niveau a été réécrit pour tomber pile
+   entre deux plateaux, ce qui la rend franchissable des deux côtés — mais rien ne
+   le MONTRAIT, sinon un lerp vers la couleur de chemin. Le joueur devait deviner
+   où monter. On y pose donc de vraies volées de marches.
+
+   Purement visuel : la collision ne change pas d'un iota, la rampe était déjà
+   marchable. C'est la lecture qui manquait.
+
+   Pourquoi ne pas passer par buildBiomeNature : il sème avec un lacet ALÉATOIRE
+   et un décalage aléatoire dans la tuile. Une volée doit au contraire être calée
+   sur une arête précise et orientée dans le sens de la pente. On suit donc le
+   patron de buildCoastOutline, seul endroit du projet qui pose déjà par arête.
+================================================================================ */
+
+/* Gabarit d'une volée, en unités monde. Largeur nettement inférieure à l'arête
+   (HEX_R = 4,1) pour lire comme un escalier et non comme un talus. */
+const STAIR_W = 3.0;
+/* Avancée courte volontairement : 0,95 de montée sur 2,0 d'avancée donnait un
+   talus nervuré. À 1,35 la pente atteint ~35°, et les trois marches du modèle se
+   lisent comme des marches. */
+const STAIR_RUN = 1.35;
+/* Le PIED de la volée est enfoncé d'un cheveu. Le sol ondule (voir groundNoise.js)
+   et l'atténuation ne l'aplatit qu'au ras du bord : à mi-marche on peut être sur
+   une bosse de quelques centimètres. Mieux vaut mordre légèrement dans le terrain
+   que flotter au-dessus — une marche encastrée passe inaperçue, une marche en
+   l'air non. */
+const STAIR_SINK = 0.14;
+/* La volée est donc plus HAUTE que la marche qu'elle franchit, d'exactement cet
+   enfoncement : le pied descend de STAIR_SINK, la volée en regagne autant, et le
+   dessus de la dernière marche retombe pile sur la surface haute.
+
+   Ce calage n'est pas cosmétique. Sans compensation, enfoncer le pied enfonçait
+   TOUT l'escalier : mesuré à 0,91 pour une tuile haute à 0,95, soit un
+   décrochement franc au sommet. Et compenser DEUX fois faisait au contraire
+   ressortir la dernière marche au-dessus du plateau, où elle traînait un liseré
+   sur toute la profondeur de l'empiètement.
+
+   L'enfoncement peut être généreux (14 cm) précisément parce qu'il ne touche que
+   le pied : celui-ci retombe au milieu de la tuile basse, là où le relief du sol
+   n'est pas atténué et ondule de ±0,17 (voir groundNoise.js). Mieux vaut qu'il
+   morde dans le terrain que qu'il flotte au-dessus. Le sommet, lui, atterrit sur
+   le pourtour, que l'atténuation garde rigoureusement plat — il peut donc affleurer
+   au millimètre. */
+/* Le retrait d'un demi-centimètre n'est pas du bruit : sur la longueur du
+   chevauchement, le dessus de la dernière marche serait sinon EXACTEMENT
+   coplanaire avec la surface de la tuile, et deux faces coplanaires scintillent
+   dès que la caméra bouge. Sous la tuile, la marche disparaît proprement sous
+   elle ; l'écart est trois fois plus fin qu'un cheveu à l'échelle du jeu. */
+const STAIR_RISE = STEP_H + STAIR_SINK - 0.005;
+/* Recul de la volée depuis l'arête, vers la tuile BASSE. Centrée sur l'arête, elle
+   empiétait d'une demi-avancée dans la tuile haute et la traversait. On la décale
+   donc de presque toute cette demi-avancée ; il reste un léger chevauchement,
+   sans quoi une couture apparaîtrait entre la dernière marche et le plateau. */
+const STAIR_BACK = STAIR_RUN * 0.5 - 0.12;
+
+let stairGeoCache = null;   // [{ geo, matName }] pré-mis à l'échelle
+
+/** Géométries de volée prêtes à poser : clonées puis pré-étirées au gabarit.
+ *  Pré-étirer la GÉOMÉTRIE plutôt que l'instance permet une échelle d'instance
+ *  uniforme, donc un contour cartoon d'épaisseur constante — un scale d'instance
+ *  (2,7 ; 0,95 ; 1,5) étirerait le contour presque trois fois plus en largeur
+ *  qu'en hauteur. */
+function getStairGeos() {
+  if (stairGeoCache) return stairGeoCache;
+  const variants = getNatureAsset('stairsStone');
+  if (!variants || !variants.length) return null;
+  /* Le modèle sort de normalizeParts : hauteur 1, base à y = 0, centré en X/Z.
+     Il descend sur l'axe Z, le haut vers +Z (mesuré sur le fichier). */
+  stairGeoCache = variants[0].map((part) => ({
+    geo: part.geo.clone().scale(STAIR_W, STAIR_RISE, STAIR_RUN),
+    matName: part.matName || '',
+  }));
+  return stairGeoCache;
+}
+
+/**
+ * Pose une volée sur chaque arête de rampe où l'on change réellement de niveau.
+ *
+ * Seules les tuiles `ramp` sont concernées, et ce n'est pas un raccourci : les
+ * plateaux vivent sur les niveaux PAIRS (PLATEAU_STEP = 2), donc deux plateaux
+ * voisins diffèrent de 0 ou de 2 niveaux. Un écart de 1 — le seul qui se
+ * franchisse à pied — n'existe QUE sur une rampe.
+ *
+ * @returns {THREE.Object3D[]} meshes ajoutés (à retirer entre deux parties)
+ */
+export function buildRampStairs(scene, island, biomeKey) {
+  const parts = getStairGeos();
+  if (!parts || !island) return [];
+  const B = BIOMES[biomeKey] || BIOMES.temperate;
+
+  /* Passe 1 — recenser les arêtes à équiper, pour dimensionner l'InstancedMesh.
+     Une rampe dessert souvent deux plateaux : on garde ses deux volées, montée
+     ET descente, ce qui la fait lire comme un palier entre deux demi-volées. */
+  const edges = [];
+  for (const t of island.tiles) {
+    if (!t.ramp) continue;
+    /* Une seule volée par SENS. Une rampe touche souvent deux ou trois tuiles de
+       chaque plateau qu'elle relie : tout équiper faisait rayonner un éventail de
+       marches autour d'une même tuile. Une montée et une descente suffisent — et
+       c'est exactement la lecture voulue, un palier entre deux demi-volées. */
+    let down = null, up = null;
+    for (let i = 0; i < 6; i++) {
+      const [dq, dr] = DIRS[i];
+      const nb = island.byKey.get(key(t.q + dq, t.r + dr));
+      if (!nb) continue;
+      const dl = nb.level - t.level;
+      if (dl === -CLIMB && !down) down = { t, nb, i };
+      else if (dl === CLIMB && !up) up = { t, nb, i };
+    }
+    if (down) edges.push(down);
+    if (up) edges.push(up);
+  }
+  if (!edges.length) return [];
+
+  const created = [];
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3(1, 1, 1);
+  const p = new THREE.Vector3();
+  const UP = new THREE.Vector3(0, 1, 0);
+
+  /* Un InstancedMesh par partie du modèle (« stone », « grass »), toutes nourries
+     des MÊMES matrices : c'est ainsi que les parties d'un même objet restent
+     soudées, comme le fait déjà buildBiomeNature. */
+  const meshes = parts.map((part) => {
+    /* La palette Kenney est reteintée par biome : telle quelle, l'herbe du modèle
+       est un vert turquoise qui ne correspond à aucun sol du jeu. */
+    const grass = /grass|dirt|top/i.test(part.matName);
+    let color;
+    if (grass) {
+      /* Le dessus herbeux des marches, un cran plus sombre que le sol : à teinte
+         égale il capte la lumière comme une tuile et la volée disparaît. */
+      color = new THREE.Color(B.ground[1]).offsetHSL(0, 0, -0.07);
+    } else {
+      /* Pierre éclaircie vers le sommet de montagne du biome. mountainBase seul
+         donnait des marches presque noires, noyées sous le dessus vert. */
+      color = new THREE.Color(B.mountainBase || 0x6b7280)
+        .lerp(new THREE.Color(B.mountainTop || 0xf4f7fc), 0.45);
+    }
+    const inst = new THREE.InstancedMesh(part.geo, toonMaterial({ color }), edges.length);
+    inst.castShadow = true;
+    inst.receiveShadow = true;
+    inst.frustumCulled = false;
+    inst.matrixAutoUpdate = false;
+    /* sharedGeo, et non disposeGeo : le teardown de carte (main.js) libère toute
+       géométrie NON marquée partagée. La géométrie de volée vit en cache pour la
+       durée de l'application — elle ne dépend pas du biome, seule la teinte du
+       matériau en dépend — exactement comme crustGeo. */
+    inst.userData.sharedGeo = true;
+    return inst;
+  });
+
+  for (let e = 0; e < edges.length; e++) {
+    const { t, nb, i } = edges[e];
+    const [nx, nz] = NORMALS[i];
+    /* Sens du +Z local (côté haut du modèle) : vers le voisin s'il domine, vers
+       le centre de la tuile sinon. Une rotation de θ autour de Y envoie (0,0,1)
+       sur (sin θ, 0, cos θ), d'où l'atan2 dans cet ordre. */
+    const up = nb.level > t.level ? 1 : -1;
+    q.setFromAxisAngle(UP, Math.atan2(up * nx, up * nz));
+    // pied de la volée sur la surface BASSE des deux
+    const yLow = Math.min(t.h || 0, nb.h || 0) - STAIR_SINK;
+    /* Reculée du côté BAS : le haut du modèle est en +Z local, donc on décale à
+       l'opposé de ce sens pour dégager la tuile haute. */
+    const off = APOTHEM - up * STAIR_BACK;
+    p.set(t.x + nx * off, yLow, t.z + nz * off);
+    m.compose(p, q, s);
+    for (const inst of meshes) inst.setMatrixAt(e, m);
+  }
+
+  for (const inst of meshes) {
+    inst.instanceMatrix.needsUpdate = true;
+    scene.add(inst);
+    attachCartoonOutline(inst, 0.03);
+    created.push(inst);
+  }
+  return created;
+}
+
 /**
  * Construit les meshes de l'île. Retourne les objets à retirer entre parties.
  */
@@ -1101,29 +1955,69 @@ export function buildIslandMeshes(scene, island) {
   const created = [];
   const n = island.tiles.length;
   const crustMat = getCrustMaterial();
-  const crust = new THREE.InstancedMesh(crustGeo, crustMat, n);
+  /* La dalle sculptée si elle est arrivée, sinon la procédurale. Les deux sont
+     interchangeables par construction (voir loadTileVariant). */
+  const geo = tileGeo || crustGeo;
+  const crust = new THREE.InstancedMesh(geo, crustMat, n);
   crust.receiveShadow = true;
   crust.castShadow = true;
+  crust.customDepthMaterial = getCrustDepthMaterial();
   crust.userData.sharedGeo = true;
   crust.userData.sharedMat = true;
 
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(1, 1, 1), p = new THREE.Vector3();
   q.identity();
+  /* Facteur d'allongement de la jupe, un par instance. Voir SKIRT_STRETCH_GLSL :
+     la matrice d'instance reste à l'échelle 1 pour que le maillage soit rigide. */
+  const skirt = new Float32Array(n);
+  /* Biais de matière : le sien, puis celui des six voisines. Le shader les
+     mélange par la partition de l'unité pour obtenir un biais continu —
+     voir GROUND_WANG_GLSL. */
+  const matSelf = new Float32Array(n);
+  const matNbA = new Float32Array(n * 3);
+  const matNbB = new Float32Array(n * 3);
+  let maxDrop = 0;
   for (let i = 0; i < n; i++) {
     const t = island.tiles[i];
     const h = t.h || 0;
     /* La dalle est modélisée entre y = -CRUST_H et y = 0. On la remonte à sa
-       hauteur et on l'étire vers le bas pour que sa base retombe toujours au
-       même plancher : sans cet étirement, une tuile haute laisserait voir le
-       vide sous elle et l'île se lirait comme des plaques flottantes. */
+       hauteur, et la jupe s'allonge en shader pour que sa base retombe toujours
+       au même plancher : sans cet allongement, une tuile haute laisserait voir
+       le vide sous elle et l'île se lirait comme des plaques flottantes. */
     p.set(t.x, h, t.z);
-    s.set(1, (h + CRUST_H) / CRUST_H, 1);
     m.compose(p, q, s);
     crust.setMatrixAt(i, m);
     crust.setColorAt(i, t.tint);
+    skirt[i] = (h + CRUST_H) / CRUST_H;
+    if (h > maxDrop) maxDrop = h;
+
+    const self = t.matBias || 0;
+    matSelf[i] = self;
+    for (let e = 0; e < 6; e++) {
+      const [dq, dr] = DIRS[e];
+      const nb = island.byKey.get(key(t.q + dq, t.r + dr));
+      /* Pas de voisine : on se répète soi-même. Sans ça le mélange partirait
+         vers un biais nul au-dessus du vide, et tout le pourtour de l'île
+         porterait un liseré de matière étrangère. */
+      const v = nb ? (nb.matBias || 0) : self;
+      if (e < 3) matNbA[i * 3 + e] = v;
+      else matNbB[i * 3 + (e - 3)] = v;
+    }
   }
+  geo.setAttribute('aSkirt', new THREE.InstancedBufferAttribute(skirt, 1));
+  geo.setAttribute('aMatSelf', new THREE.InstancedBufferAttribute(matSelf, 1));
+  geo.setAttribute('aMatNbA', new THREE.InstancedBufferAttribute(matNbA, 3));
+  geo.setAttribute('aMatNbB', new THREE.InstancedBufferAttribute(matNbB, 3));
   crust.instanceMatrix.needsUpdate = true;
   if (crust.instanceColor) crust.instanceColor.needsUpdate = true;
+  /* L'allongement se produisant en shader, three.js croit le maillage haut de
+     CRUST_H seulement et calquerait dessus le volume englobant. Une tuile haute
+     descendrait alors hors de ce volume : culling et carte d'ombres la
+     couperaient. On rattrape le plus grand allongement de l'île. */
+  crust.userData.maxDrop = maxDrop;
+  crust.computeBoundingSphere();
+  if (crust.boundingSphere) crust.boundingSphere.radius += maxDrop;
+  liveCrust = crust;
   scene.add(crust);
   created.push(crust);
 
@@ -1349,19 +2243,56 @@ export function makeTilePlacer(island, rng = Math.random) {
      ramenait des arbres au milieu du dallage, exactement ce que la
      réservation cherche à empêcher. */
   const anywhere = island.tiles.filter((t) => t.role !== ROLE.SANCTUARY);
+  /* Amas en cours, un par type de prop : voir plus bas. */
+  const clumps = {};
 
-  return function place(kind) {
+  /**
+   * @param {string} kind — rôle de tuile visé (voir ROLE_FOR).
+   * @param {{clump?: number, spread?: number}} [opts]
+   *   clump : nombre d'instances à regrouper autour d'un même point avant de
+   *   repartir ailleurs. Un semis uniforme donne un gazon de moquette : c'est
+   *   l'alternance touffes serrées / sol nu qui fait lire un vrai terrain.
+   *   spread : rayon de l'amas en unités monde.
+   */
+  return function place(kind, opts) {
     const pool = pools[kind] && pools[kind].length ? pools[kind]
       : (anywhere.length ? anywhere : island.tiles);
-    const t = pool[(rng() * pool.length) | 0];
     /* Marge d'arête : un arbre à cheval sur le vide casserait l'illusion de
        tuiles solides. Les maisons se serrent encore plus vers le centre. */
     const margin = kind === 'house' ? 2.8 : 1.6;
-    const a = rng() * Math.PI * 2;
-    const rr = Math.sqrt(rng()) * (APOTHEM - margin);
+    const lim = APOTHEM - margin;
+    const clumpN = opts && opts.clump > 1 ? opts.clump : 0;
+
+    let t, cx, cz;
+    if (clumpN) {
+      let c = clumps[kind];
+      if (!c || c.left <= 0) {
+        const nt = pool[(rng() * pool.length) | 0];
+        const a = rng() * Math.PI * 2, rr = Math.sqrt(rng()) * lim * 0.75;
+        c = clumps[kind] = {
+          tile: nt, ox: Math.cos(a) * rr, oz: Math.sin(a) * rr,
+          left: clumpN,
+        };
+      }
+      c.left--;
+      t = c.tile;
+      const spread = opts.spread || 1.1;
+      const a = rng() * Math.PI * 2, rr = Math.sqrt(rng()) * spread;
+      cx = c.ox + Math.cos(a) * rr;
+      cz = c.oz + Math.sin(a) * rr;
+      /* L'amas ne doit pas déborder sur l'arête : on rentre le point plutôt
+         que de le rejeter, sinon les touffes de bord disparaissent et chaque
+         tuile finit auréolée de sol nu. */
+      const d = Math.hypot(cx, cz);
+      if (d > lim) { const k = lim / d; cx *= k; cz *= k; }
+    } else {
+      t = pool[(rng() * pool.length) | 0];
+      const a = rng() * Math.PI * 2, rr = Math.sqrt(rng()) * lim;
+      cx = Math.cos(a) * rr; cz = Math.sin(a) * rr;
+    }
     /* `y` est la surface de la tuile : tout prop posé par le placeur doit s'y
        asseoir, sinon il flotte au-dessus d'un plateau ou s'enfonce dedans. */
-    return { x: t.x + Math.cos(a) * rr, y: t.h || 0, z: t.z + Math.sin(a) * rr, tile: t };
+    return { x: t.x + cx, y: t.h || 0, z: t.z + cz, tile: t };
   };
 }
 
@@ -1427,11 +2358,11 @@ export function buildPaintSurface(island, opts = {}) {
   const shoulder = opts.shoulder ?? 0.16; // longueur de l'épaulement adouci
   const coastDrip = opts.coastDrip ?? CRUST_H;   // coulée sur la côte
 
-  const pos = [], uv = [], idx = [];
+  const pos = [], uv = [], tileCenter = [], idx = [];
   const uvOf = (x, z) => [x / span + 0.5, 0.5 - z / span];
-  const push = (x, y, z, u, v) => {
+  const push = (x, y, z, u, v, tX, tZ) => {
     const i = pos.length / 3;
-    pos.push(x, y, z); uv.push(u, v);
+    pos.push(x, y, z); uv.push(u, v); tileCenter.push(tX, tZ);
     return i;
   };
 
@@ -1444,19 +2375,37 @@ export function buildPaintSurface(island, opts = {}) {
     return [t.x + R * Math.cos(a), t.z + R * Math.sin(a)];
   };
 
+  const TOP_SUB = 8;
+
   for (const t of island.tiles) {
     const capY = (t.h || 0) + lift;
 
-    /* --- Cape --- */
-    const [cu, cv] = uvOf(t.x, t.z);
-    const c = push(t.x, capY, t.z, cu, cv);
-    const ring = [];
+    /* --- Cape subdivisée pour suivre le relief de gLift --- */
+    const corners = [];
+    for (let i = 0; i < 6; i++) corners.push(cornerAt(t, i));
+
     for (let i = 0; i < 6; i++) {
-      const [x, z] = cornerAt(t, i);
-      const [u, v] = uvOf(x, z);
-      ring.push(push(x, capY, z, u, v));
+      const [ax, az] = corners[i];
+      const [bx, bz] = corners[(i + 1) % 6];
+      const grid = [];
+      for (let u = 0; u <= TOP_SUB; u++) {
+        grid[u] = [];
+        for (let v = 0; v + u <= TOP_SUB; v++) {
+          const x = (ax * u + bx * v + t.x * (TOP_SUB - u - v)) / TOP_SUB;
+          const z = (az * u + bz * v + t.z * (TOP_SUB - u - v)) / TOP_SUB;
+          const [uUv, vUv] = uvOf(x, z);
+          grid[u][v] = push(x, capY, z, uUv, vUv, t.x, t.z);
+        }
+      }
+      for (let u = 0; u < TOP_SUB; u++) {
+        for (let v = 0; u + v < TOP_SUB; v++) {
+          idx.push(grid[u][v], grid[u][v + 1], grid[u + 1][v]);
+          if (u + v + 1 < TOP_SUB) {
+            idx.push(grid[u + 1][v], grid[u][v + 1], grid[u + 1][v + 1]);
+          }
+        }
+      }
     }
-    for (let i = 0; i < 6; i++) idx.push(c, ring[(i + 1) % 6], ring[i]);
 
     /* --- Jupes --- */
     for (let i = 0; i < 6; i++) {
@@ -1476,14 +2425,14 @@ export function buildPaintSurface(island, opts = {}) {
 
       /* Lèvre, puis épaulement sorti vers l'extérieur ET descendu d'autant :
          c'est ce quart de tour raccourci qui fait le bourrelet. */
-      const a0 = push(ax, capY, az, au, av);
-      const b0 = push(bx, capY, bz, bu, bv);
+      const a0 = push(ax, capY, az, au, av, t.x, t.z);
+      const b0 = push(bx, capY, bz, bu, bv, t.x, t.z);
       const sx = nx * shoulder, sz = nz * shoulder;
-      const a1 = push(ax + sx, capY - shoulder, az + sz, au, av);
-      const b1 = push(bx + sx, capY - shoulder, bz + sz, bu, bv);
+      const a1 = push(ax + sx, capY - shoulder, az + sz, au, av, t.x, t.z);
+      const b1 = push(bx + sx, capY - shoulder, bz + sz, bu, bv, t.x, t.z);
       /* Puis la chute, franchement verticale. */
-      const a2 = push(ax + sx, lowY, az + sz, au, av);
-      const b2 = push(bx + sx, lowY, bz + sz, bu, bv);
+      const a2 = push(ax + sx, lowY, az + sz, au, av, t.x, t.z);
+      const b2 = push(bx + sx, lowY, bz + sz, bu, bv, t.x, t.z);
 
       idx.push(a0, b0, b1, a0, b1, a1);
       idx.push(a1, b1, b2, a1, b2, a2);
@@ -1493,6 +2442,7 @@ export function buildPaintSurface(island, opts = {}) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
+  geo.setAttribute('tileCenter', new THREE.BufferAttribute(new Float32Array(tileCenter), 2));
   geo.setIndex(idx);
   geo.computeBoundingSphere();
   return geo;

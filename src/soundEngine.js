@@ -55,7 +55,12 @@ const MUSIC_XFADE = 2.2;
 
 class SoundEngine {
   constructor() {
-    this.isMuted = false;
+    const getBool = (key, def) => {
+      try { const v = localStorage.getItem(key); return v !== null ? v === 'true' : def; } catch (_) { return def; }
+    };
+    this.isMuted = getBool('cultio_audio_muted', false);
+    this.musicMuted = getBool('cultio_music_muted', false);
+    this.sfxMuted = getBool('cultio_sfx_muted', false);
     this._unlocked = false;
     this._pool = new Map();
     this._base = null;
@@ -63,6 +68,24 @@ class SoundEngine {
     this._musicWanted = false;
     this._pulseAmt = 0;     // 0 = base, 1 = pulse (courant)
     this._pulseTarget = 0;
+  }
+
+  toggleMusic(muted) {
+    this.musicMuted = typeof muted === 'boolean' ? muted : !this.musicMuted;
+    try { localStorage.setItem('cultio_music_muted', this.musicMuted ? 'true' : 'false'); } catch (_) {}
+    if (this.musicMuted) {
+      if (this._base) this._base.pause();
+      if (this._pulse) this._pulse.pause();
+    } else if (this._musicWanted && !this.isMuted) {
+      this._resumeLayers();
+    }
+    return this.musicMuted;
+  }
+
+  toggleSFX(muted) {
+    this.sfxMuted = typeof muted === 'boolean' ? muted : !this.sfxMuted;
+    try { localStorage.setItem('cultio_sfx_muted', this.sfxMuted ? 'true' : 'false'); } catch (_) {}
+    return this.sfxMuted;
   }
 
   init() {
@@ -258,7 +281,7 @@ class SoundEngine {
   }
 
   playSFX(name, { volume = SFX_VOL, rate = 1 } = {}) {
-    if (this.isMuted || !SFX[name]) return;
+    if (this.isMuted || this.sfxMuted || !SFX[name]) return;
     this.ensureContext();
     const a = this._acquire(name);
     if (!a) return;
@@ -382,7 +405,7 @@ class SoundEngine {
 
   /** Crossfade base ↔ pulse. À appeler dans la boucle de jeu. */
   updateMusic(dt) {
-    if (!this._musicWanted || this.isMuted) return;
+    if (!this._musicWanted || this.isMuted || this.musicMuted) return;
     if (this._pulseAmt === this._pulseTarget) {
       this._applyMix();
       return;
@@ -404,7 +427,7 @@ class SoundEngine {
   }
 
   _resumeLayers() {
-    if (!this._musicWanted || this.isMuted) return;
+    if (!this._musicWanted || this.isMuted || this.musicMuted) return;
     const k = this._pulseAmt;
     if (this._base && k < 0.999 && this._base.paused) {
       this._base.play().catch(() => {});

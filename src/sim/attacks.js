@@ -88,9 +88,14 @@ export function fireAttack(f, facing, ctx) {
   if (!f || !f.alive) return null;
   if ((f.atkCd || 0) > 0) return null;
   if ((f.downT || 0) > 0) return null;               // à terre : on ne tire pas
-  /* `atkCdMul` : posé par la carte « Main leste ». Un multiplicateur plutôt
-     qu'une constante remplacée — la cadence de base reste lisible ici. */
-  f.atkCd = ATTACK_CD * (f.atkCdMul ?? 1);
+  /* Deux multiplicateurs, et il faut les garder séparés :
+     · `atkCdMul`  temporaire, posé par la carte « Main leste », remis à 1 à
+                   l'expiration ;
+     · `atkCdBase` permanent, la cadence du niveau de difficulté d'un bot
+                   (voir AI_STATS).
+     Les confondre ferait effacer le second à la fin de la carte, et un bot
+     facile se retrouverait avec la cadence du joueur pour le reste du match. */
+  f.atkCd = ATTACK_CD * (f.atkCdMul ?? 1) * (f.atkCdBase ?? 1);
 
   /* Visée assistée : on se rapproche de la cible sans jamais l'épouser.
      Tirer dans le vide reste permis — sans ça le bouton semblerait cassé

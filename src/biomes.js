@@ -6,6 +6,19 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { makeGLTFLoader } from './gltf.js';
+import { applyGroundFollow } from './groundNoise.js';
+import { applyHeroCutout } from './heroCutout.js';
+
+/* Taille minimale, en unités monde, pour qu'un décor s'efface devant le joueur.
+   Seul ce qui peut RÉELLEMENT le cacher doit disparaître : un arbre (5,7 à 8,8),
+   un rocher (2,2 à 5,3), un cactus (2,4 à 4,6). En dessous — touffes d'herbe,
+   buissons, fleurs, cailloutis, dalles — le prop ne masque rien, et l'effacer
+   ne produit qu'un scintillement de trame qui suit le joueur et attire l'œil
+   bien plus que le décor qu'il prétend enlever.
+   Le seuil porte sur le HAUT de la fourchette d'échelle : c'est la taille des
+   plus grands exemplaires du semis, donc ceux qui gênent. */
+const HERO_HIDE_MIN_SCALE = 2.0;
+const hidesHero = (scale) => Array.isArray(scale) && (scale[1] || 0) >= HERO_HIDE_MIN_SCALE;
 
 /* Tactile : densités / outlines allégés (mode Belle plus fluide sur téléphone). */
 import { IS_MOBILE as _isCoarse } from './device.js';
@@ -793,22 +806,47 @@ export const BIOMES = {
     nature: [
       { key: 'tree', count: 44, scale: [5.7, 8.1] },
       { key: 'pine', count: 24, scale: [5.9, 8.8] },
-      { key: 'bush', count: 36, scale: [0.9, 1.5], kind: 'ground', shadow: false },
-      { key: 'bushFlowers', count: 20, scale: [0.9, 1.4], kind: 'ground', shadow: false },
-      { key: 'flowerGroup', count: 60, scale: [0.6, 1.0], kind: 'ground', shadow: false },
-      { key: 'flowerSingle', count: 50, scale: [0.5, 0.8], kind: 'ground', shadow: false },
-      { key: 'clover', count: 60, scale: [0.5, 0.9], kind: 'ground', shadow: false },
-      { key: 'grassTuft', count: 1368, scale: [0.7, 1.2], kind: 'grass', shadow: false },
-      { key: 'grassTall', count: 936, scale: [0.8, 1.3], kind: 'grass', shadow: false },
-      { key: 'mushroom', count: 16, scale: [0.5, 0.9], kind: 'ground', shadow: false },
+      { key: 'bush', count: 42, scale: [0.9, 1.5], kind: 'ground', shadow: false, clump: 3, spread: 1.3 },
+      { key: 'bushFlowers', count: 26, scale: [0.9, 1.4], kind: 'ground', shadow: false, clump: 2 },
+      { key: 'flowerGroup', count: 96, scale: [0.6, 1.0], kind: 'ground', shadow: false, clump: 4, spread: 1.6 },
+      { key: 'flowerSingle', count: 84, scale: [0.5, 0.8], kind: 'ground', shadow: false, clump: 4, spread: 1.6 },
+      { key: 'clover', count: 110, scale: [0.5, 0.9], kind: 'ground', shadow: false, clump: 4, spread: 1.6 },
+      /* Trois strates d'herbe : une nappe dense en amas, une couche haute plus
+         claire par-dessus, un semis clairsemé pour lier les plaques nues.
+         Le gros de la densité passe par grassTuft : à 155 triangles la touffe,
+         c'est trois fois moins cher que grassWispy pour un rendu équivalent en
+         nappe. Les couches chères restent des accents. */
+      { key: 'grassTuft', count: 2125, scale: [0.7, 1.2], kind: 'grass', shadow: false, clump: 4, spread: 1.6 },
+      /* Fond semé au hasard, sans amas : les paquets créent des trous, et une
+         tuile entièrement chauve se relit comme une pièce de maquette. */
+      { key: 'grassTuft', count: 1364, scale: [0.5, 0.9], kind: 'grass', shadow: false },
+      { key: 'grassTall', count: 950, scale: [0.8, 1.3], kind: 'grass', shadow: false, clump: 4, spread: 1.6 },
+      { key: 'grassWispy', count: 240, scale: [0.6, 1.0], kind: 'grass', shadow: false, tint: 0xa8d478, clump: 4 },
+      { key: 'mushroom', count: 22, scale: [0.5, 0.9], kind: 'ground', shadow: false, clump: 3, spread: 0.7 },
       { key: 'rock', count: 12, scale: [2.2, 4.2], kind: 'tree' },
-      { key: 'pebbleR', count: 40, scale: [0.5, 1.0], kind: 'ground', shadow: false },
+      /* Cailloutis : 72 à 124 triangles la pièce, la façon la moins chère de
+         meubler un sol. On en met partout, plus des poignées en amas. */
+      { key: 'pebbleR', count: 130, scale: [0.35, 0.85], kind: 'ground', shadow: false, clump: 5, spread: 0.9 },
+      { key: 'pebbleR', count: 242, scale: [0.25, 0.6], kind: 'ground', shadow: false, tint: 0xbdc2b4 },
+      { key: 'pebbleS', count: 120, scale: [0.3, 0.7], kind: 'ground', shadow: false, clump: 4, spread: 0.8, tint: 0xbfc4b8 },
+      { key: 'pebbleS', count: 220, scale: [0.2, 0.5], kind: 'ground', shadow: false, tint: 0xa89a86 },
+      /* Pierres plates affleurantes : elles cassent le vert continu, comme un
+         pré vraiment piétiné. On n'utilise que les galets RONDS du pack —
+         les variantes carrées sont des pavés en grille, elles se lisaient
+         comme un dallage posé au milieu de la prairie. */
+      { key: 'slabRound', count: 80, scale: [0.56, 1.12], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xa8a49a },
+      { key: 'slabRoundThin', count: 60, scale: [0.6, 1.25], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xb2a891 },
     ],
   },
   desert: {
     name: 'Désert',
     ground: [0xf6d87a, 0xefc45c, 0xffe59a],
     edge: 0xcfa45c,
+    /* Pas de groundMatter : le désert garde l'aplat toon des autres biomes.
+       La matière cuite (sable + terre craquelée) découpait chaque tuile en
+       plaques orangées très contrastées, un motif qui prenait le pas sur la
+       lecture de la carte au lieu de l'habiller. Le shader reste en place et
+       inerte — sans cette clé, uGroundTexAmt est à zéro. */
     sky: 0xffe3b3, fogNear: 65, fogFar: 155,
     fogColor: 0xebd49e, fogDensity: 0.0082,
     hemiSky: 0xffe9c4, hemiGround: 0x9a7648,
@@ -824,8 +862,18 @@ export const BIOMES = {
       { key: 'dead', count: 16, scale: [4.6, 6.6] },
       { key: 'palms', count: 9, scale: [4.2, 5.6], doubleSide: true },
       { key: 'rock', count: 20, scale: [2.2, 4.6], tint: 0xd9b078 },
-      { key: 'pebbleS', count: 55, scale: [0.5, 1.1], kind: 'ground', shadow: false, tint: 0xe8c88a },
-      { key: 'grassWispy', count: 792, scale: [0.6, 1.0], kind: 'grass', shadow: false, tint: 0xd8bd63 },
+      /* Le sable seul est le pire des sols plats : tout le relief vient des
+         cailloutis, des plaques de roche mise à nu et des touffes sèches. */
+      { key: 'pebbleS', count: 200, scale: [0.35, 0.9], kind: 'ground', shadow: false, tint: 0xe8c88a, clump: 4, spread: 1.6 },
+      { key: 'pebbleS', count: 352, scale: [0.2, 0.5], kind: 'ground', shadow: false, tint: 0xdcbc86 },
+      { key: 'pebbleR', count: 150, scale: [0.3, 0.75], kind: 'ground', shadow: false, tint: 0xd6ae74, clump: 5, spread: 1.0 },
+      { key: 'pebbleR', count: 264, scale: [0.22, 0.5], kind: 'ground', shadow: false, tint: 0xc99a68 },
+      { key: 'grassWispy', count: 780, scale: [0.6, 1.0], kind: 'grass', shadow: false, tint: 0xd8bd63, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 700, scale: [0.5, 0.9], kind: 'grass', shadow: false, tint: 0xc9a95c, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 704, scale: [0.4, 0.7], kind: 'grass', shadow: false, tint: 0xbf9e52 },
+      { key: 'bush', count: 20, scale: [0.7, 1.2], kind: 'ground', shadow: false, tint: 0xbfa963, clump: 2 },
+      { key: 'slabRoundThin', count: 95, scale: [0.62, 1.36], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xd9b47c },
+      { key: 'slabRound', count: 70, scale: [0.6, 1.2], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xc99a5e },
     ],
   },
   nordic: {
@@ -846,10 +894,19 @@ export const BIOMES = {
       { key: 'pineSnow', count: 52, scale: [5.7, 8.8] },
       { key: 'birchSnow', count: 22, scale: [5.3, 7.4] },
       { key: 'deadSnow', count: 12, scale: [4.2, 5.9] },
-      { key: 'bushSnow', count: 48, scale: [0.9, 1.5], kind: 'ground', shadow: false },
-      { key: 'rockSnow', count: 26, scale: [1.8, 4.2], kind: 'tree' },
-      { key: 'grassWispy', count: 576, scale: [0.5, 0.9], kind: 'grass', shadow: false, tint: 0xb8ccc0 },
-      { key: 'pebbleR', count: 36, scale: [0.5, 1.0], kind: 'ground', shadow: false, tint: 0xdde8f2 },
+      { key: 'bushSnow', count: 64, scale: [0.9, 1.5], kind: 'ground', shadow: false, clump: 3, spread: 1.3 },
+      { key: 'rockSnow', count: 30, scale: [1.8, 4.2], kind: 'tree' },
+      /* Toundra : la neige n'est jamais uniforme. Les touffes gelées et les
+         cailloux qui percent la croûte donnent l'échelle et la texture. */
+      { key: 'grassWispy', count: 600, scale: [0.5, 0.9], kind: 'grass', shadow: false, tint: 0xb8ccc0, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 875, scale: [0.45, 0.8], kind: 'grass', shadow: false, tint: 0xa8bfb2, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 748, scale: [0.35, 0.65], kind: 'grass', shadow: false, tint: 0x9db3a8 },
+      { key: 'pebbleR', count: 160, scale: [0.35, 0.85], kind: 'ground', shadow: false, tint: 0xdde8f2, clump: 5, spread: 1.0 },
+      { key: 'pebbleR', count: 264, scale: [0.22, 0.5], kind: 'ground', shadow: false, tint: 0xcbd8e5 },
+      { key: 'pebbleS', count: 120, scale: [0.3, 0.7], kind: 'ground', shadow: false, tint: 0xc0cedb, clump: 4, spread: 0.9 },
+      { key: 'pebbleS', count: 198, scale: [0.2, 0.45], kind: 'ground', shadow: false, tint: 0xaebccb },
+      { key: 'slabRound', count: 85, scale: [0.62, 1.24], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xcbdae7 },
+      { key: 'slabRoundThin', count: 60, scale: [0.6, 1.25], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xa9b8c7 },
     ],
   },
   tropical: {
@@ -869,18 +926,31 @@ export const BIOMES = {
     nature: [
       { key: 'palms', count: 16, scale: [4.6, 6.2], doubleSide: true },
       { key: 'tree', count: 26, scale: [5.9, 8.8] },
-      { key: 'fern', count: 70, scale: [0.9, 1.6], kind: 'ground', shadow: false },
-      { key: 'plantBig', count: 30, scale: [1.0, 1.8], kind: 'ground', shadow: false },
-      { key: 'plant', count: 44, scale: [0.8, 1.4], kind: 'ground', shadow: false },
-      { key: 'flowerPetal', count: 34, scale: [0.6, 1.0], kind: 'ground', shadow: false },
-      { key: 'grassTall', count: 1440, scale: [0.9, 1.5], kind: 'grass', shadow: false, tint: 0x59c46a },
+      { key: 'fern', count: 120, scale: [0.9, 1.6], kind: 'ground', shadow: false, clump: 5, spread: 1.2 },
+      { key: 'plantBig', count: 54, scale: [1.0, 1.8], kind: 'ground', shadow: false, clump: 3, spread: 1.1 },
+      { key: 'plant', count: 80, scale: [0.8, 1.4], kind: 'ground', shadow: false, clump: 4, spread: 1.1 },
+      { key: 'flowerPetal', count: 60, scale: [0.6, 1.0], kind: 'ground', shadow: false, clump: 5, spread: 0.9 },
+      { key: 'clover', count: 130, scale: [0.6, 1.0], kind: 'ground', shadow: false, clump: 4, spread: 1.6, tint: 0x86dd8a },
+      /* Sous-bois de jungle : deux hauteurs d'herbe, sinon le sol reste une
+         nappe verte plate sous la canopée. */
+      { key: 'grassTall', count: 1400, scale: [0.9, 1.5], kind: 'grass', shadow: false, tint: 0x59c46a, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 1438, scale: [0.7, 1.2], kind: 'grass', shadow: false, tint: 0x47b25c, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 1232, scale: [0.55, 0.95], kind: 'grass', shadow: false, tint: 0x3fa353 },
+      { key: 'mushroomRed', count: 26, scale: [0.5, 1.0], kind: 'ground', shadow: false, clump: 3, spread: 0.7 },
       { key: 'rock', count: 12, scale: [2.2, 3.9], tint: 0x9fbf8a },
+      { key: 'pebbleR', count: 110, scale: [0.35, 0.8], kind: 'ground', shadow: false, tint: 0x9cb98c, clump: 5, spread: 0.9 },
+      { key: 'pebbleS', count: 198, scale: [0.22, 0.55], kind: 'ground', shadow: false, tint: 0x8aa87c },
+      { key: 'slabRound', count: 75, scale: [0.56, 1.12], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0x8ba07a },
+      { key: 'slabRoundThin', count: 50, scale: [0.6, 1.2], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0x7a6a4a },
     ],
   },
   savanna: {
     name: 'Savane',
     ground: [0xecd06e, 0xd9bc52, 0xf4e28a],
     edge: 0xb59a4d,
+    /* Pas de groundMatter, comme le désert (voir plus haut). La savane s'en
+       distingue par sa palette de sol, plus verte et plus sourde, et par son
+       décor — pas par une matière peinte sur les tuiles. */
     sky: 0xffe8c9, fogNear: 70, fogFar: 165,
     fogColor: 0xebd9a4, fogDensity: 0.0076,
     hemiSky: 0xfff0d4, hemiGround: 0x8a7a42,
@@ -894,10 +964,19 @@ export const BIOMES = {
     nature: [
       { key: 'twisted', count: 28, scale: [5.3, 8.1] },
       { key: 'dead', count: 12, scale: [4.6, 6.3] },
-      { key: 'grassWispy', count: 1512, scale: [0.8, 1.4], kind: 'grass', shadow: false },
-      { key: 'bush', count: 22, scale: [0.9, 1.4], kind: 'ground', shadow: false, tint: 0xc9b45a },
+      /* Savane : hautes herbes en bouquets serrés, terre nue entre les touffes.
+         C'est ce contraste qui donne l'impression de vent et de sécheresse. */
+      { key: 'grassWispy', count: 1400, scale: [0.8, 1.4], kind: 'grass', shadow: false, clump: 4, spread: 1.6 },
+      { key: 'grassTall', count: 700, scale: [0.7, 1.2], kind: 'grass', shadow: false, tint: 0xd6c070, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 1125, scale: [0.5, 0.9], kind: 'grass', shadow: false, tint: 0xc2a64b, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 1056, scale: [0.4, 0.75], kind: 'grass', shadow: false, tint: 0xb59642 },
+      { key: 'bush', count: 32, scale: [0.9, 1.4], kind: 'ground', shadow: false, tint: 0xc9b45a, clump: 3, spread: 1.2 },
       { key: 'rock', count: 14, scale: [2.2, 4.2], tint: 0xc9a86a },
-      { key: 'pebbleS', count: 40, scale: [0.5, 1.0], kind: 'ground', shadow: false, tint: 0xd8bd80 },
+      { key: 'pebbleS', count: 160, scale: [0.35, 0.8], kind: 'ground', shadow: false, tint: 0xd8bd80, clump: 5, spread: 1.0 },
+      { key: 'pebbleS', count: 264, scale: [0.2, 0.5], kind: 'ground', shadow: false, tint: 0xc9ab6c },
+      { key: 'pebbleR', count: 120, scale: [0.3, 0.7], kind: 'ground', shadow: false, tint: 0xc4a465, clump: 5, spread: 0.9 },
+      { key: 'slabRound', count: 80, scale: [0.6, 1.25], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xc0954e },
+      { key: 'slabRoundThin', count: 60, scale: [0.62, 1.3], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0xa8834a },
     ],
   },
   volcanic: {
@@ -918,11 +997,20 @@ export const BIOMES = {
       { key: 'deadGrove', count: 14, scale: [5.3, 7.7], tint: 0x6a5148 },
       { key: 'dead', count: 20, scale: [4.2, 6.3], tint: 0x5a423a },
       { key: 'twisted', count: 14, scale: [4.9, 7.0], tint: 0x6a4a3a },
-      { key: 'rocks', count: 18, scale: [2.8, 5.3], tint: 0x7a5f52 },
-      { key: 'rock', count: 18, scale: [2.2, 4.2], tint: 0x64504a },
-      { key: 'grassWispy', count: 648, scale: [0.6, 1.1], kind: 'grass', shadow: false, tint: 0x7a6a5c },
-      { key: 'pebbleS', count: 46, scale: [0.5, 1.1], kind: 'ground', shadow: false, tint: 0x6a5850 },
-      { key: 'mushroomRed', count: 16, scale: [0.6, 1.1], kind: 'ground', shadow: false },
+      { key: 'rocks', count: 22, scale: [2.8, 5.3], tint: 0x7a5f52 },
+      { key: 'rock', count: 22, scale: [2.2, 4.2], tint: 0x64504a },
+      /* Terres de cendre : sol de scories. Beaucoup de caillasse, très peu de
+         végétation — mais assez de pierres plates pour que la cendre ne soit
+         jamais lisse. */
+      { key: 'grassWispy', count: 620, scale: [0.6, 1.1], kind: 'grass', shadow: false, tint: 0x7a6a5c, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 525, scale: [0.45, 0.85], kind: 'grass', shadow: false, tint: 0x6d6058, clump: 4, spread: 1.6 },
+      { key: 'grassTuft', count: 572, scale: [0.35, 0.7], kind: 'grass', shadow: false, tint: 0x5f544d },
+      { key: 'pebbleS', count: 220, scale: [0.35, 0.9], kind: 'ground', shadow: false, tint: 0x6a5850, clump: 4, spread: 1.6 },
+      { key: 'pebbleS', count: 396, scale: [0.2, 0.5], kind: 'ground', shadow: false, tint: 0x7d6a60 },
+      { key: 'pebbleR', count: 170, scale: [0.3, 0.8], kind: 'ground', shadow: false, tint: 0x5a4a44, clump: 5, spread: 1.0 },
+      { key: 'pebbleR', count: 286, scale: [0.2, 0.5], kind: 'ground', shadow: false, tint: 0x4e423c },
+      { key: 'mushroomRed', count: 24, scale: [0.6, 1.1], kind: 'ground', shadow: false, clump: 3, spread: 0.7 },
+      { key: 'slabRoundThin', count: 65, scale: [0.62, 1.30], kind: 'ground', shadow: false, flat: true, clump: 2, spread: 1.8, tint: 0x7a5f52 },
     ],
   },
 };
@@ -1113,6 +1201,22 @@ const NATURE_FILES = {
   cactus: 'Cactus_Flowers',
   pineSnow: 'Pine_Tree_with_Snow', birchSnow: 'Birch_Tree_with_Snow',
   deadSnow: 'Dead_Tree_with_Snow', bushSnow: 'Bush_Snow', rockSnow: 'Rock_Snow',
+  /* Liaisons du terrain (Kenney Nature Kit, CC0). Ces pièces ne sont PAS posées
+     par buildBiomeNature : elles doivent s'aligner sur une arête de tuile
+     précise, pas atterrir au hasard avec un lacet aléatoire. Elles sont posées
+     par buildRampStairs dans hexmap.js, qui lit l'asset via
+     getNatureAsset(). Elles sont enregistrées ici uniquement pour bénéficier du
+     chargement, du nettoyage d'attributs et de la normalisation existants.
+
+     Les volées font 1×1×1,05 dans le fichier : une marche qui monte exactement
+     une unité sur une unité d'avancée. C'est ce qui permet de les caler sur
+     STEP_H par une simple mise à l'échelle. */
+  stairsStone: 'cliff_steps_stone', stairsRock: 'cliff_steps_rock',
+  /* Galets plats : la litière du sol, ce qui affleure entre les touffes.
+     Le pack fournit aussi des variantes carrées (Rock_Path_Square_*) : ce sont
+     des pavés en grille régulière, essayées puis écartées — au milieu d'une
+     prairie elles se lisaient comme un dallage de place de village. */
+  slabRound: 'Rock_Path_Round_Small', slabRoundThin: 'Rock_Path_Round_Thin',
 };
 /* Fichiers « collection » : chaque mesh du .glb est un modèle indépendant
    (5 palmiers, 5 rochers…) à instancier séparément — PAS les parties d'un même
@@ -1123,6 +1227,15 @@ const NATURE_SPLIT = new Set(['palms', 'deadGrove', 'rocks']);
 const NATURE_SOLID = new Set([
   'rock', 'rocks', 'rockSnow', 'pebbleR', 'pebbleS', 'cactus',
   'mushroom', 'mushroomRed',
+  'slabRound', 'slabRoundThin',
+  'stairsStone', 'stairsRock',
+]);
+/** Modèles plus larges que hauts : à normaliser sur l'empreinte, pas la hauteur.
+ *  Une dalle de 1 × 0,08 ramenée à une hauteur de 1 deviendrait un plateau de
+ *  12 unités de large — l'échelle demandée par le biome ne veut plus rien dire. */
+const NATURE_FLAT = new Set([
+  'slabRound', 'slabRoundThin',
+  'pebbleR', 'pebbleS',
 ]);
 /** Épaisseur d'outline souhaitée en unités monde (compensée par le scale d'instance). */
 const OUTLINE_WORLD = 0.042;
@@ -1134,11 +1247,15 @@ function localOutlineThickness(scaleRange, world = OUTLINE_WORLD) {
 let natureAssets = null;      // { key: [variante][partie] → { geo, map, color, vc } }
 const natureWaiting = [];
 
-/* Ramène une liste de parties à : pieds au sol, centré en X/Z, hauteur 1. */
-function normalizeParts(parts) {
+/* Ramène une liste de parties à : pieds au sol, centré en X/Z, hauteur 1
+   (ou emprise au sol 1 pour les modèles plats — voir NATURE_FLAT). */
+function normalizeParts(parts, flat = false) {
   const box = new THREE.Box3();
   for (const p of parts) { p.geo.computeBoundingBox(); box.union(p.geo.boundingBox); }
-  const sc = 1 / Math.max(0.001, box.max.y - box.min.y);
+  const ref = flat
+    ? Math.max(box.max.x - box.min.x, box.max.z - box.min.z)
+    : box.max.y - box.min.y;
+  const sc = 1 / Math.max(0.001, ref);
   const cx = (box.min.x + box.max.x) * 0.5, cz = (box.min.z + box.max.z) * 0.5;
   for (const p of parts) {
     p.geo.translate(-cx, -box.min.y, -cz);
@@ -1178,6 +1295,11 @@ export function loadNature() {
           map: mat.map || null,
           color: mat.color ? mat.color.clone() : null,
           vc: !!geo.attributes.color,
+          /* Nom du matériau source. Les pièces Kenney découpent un même modèle en
+             primitives nommées (« stone », « grass » pour une volée de marches) :
+             c'est le seul moyen de les reteinter séparément, leur palette d'origine
+             — un vert turquoise — ne collant à aucun biome du jeu. */
+          matName: mat.name || '',
           /* Un mesh glTF multi-primitives (tronc + palmes) arrive en Group de
              plusieurs Mesh : le parent identifie le modèle d'origine. */
           node: child.parent && child.parent !== gltf.scene ? child.parent.uuid : child.uuid,
@@ -1192,15 +1314,27 @@ export function loadNature() {
           if (!groups.has(p.node)) groups.set(p.node, []);
           groups.get(p.node).push(p);
         }
-        acc[key] = [...groups.values()].map(normalizeParts);
+        acc[key] = [...groups.values()].map((g) => normalizeParts(g, NATURE_FLAT.has(key)));
       } else {
         /* Modèle simple : une seule variante, toutes parties normalisées
            ensemble pour que rien ne glisse. */
-        acc[key] = [normalizeParts(parts)];
+        acc[key] = [normalizeParts(parts, NATURE_FLAT.has(key))];
       }
       done();
     }, undefined, () => done());   // un fichier manquant ne bloque pas les autres
   }
+}
+
+/**
+ * Asset nature brut, pour les poseurs qui ont besoin d'un placement EXACT.
+ * buildBiomeNature convient au semis aléatoire ; une volée de marches ou un pavé
+ * de chemin doivent au contraire s'aligner sur une arête ou sur un tracé, avec
+ * leur propre matrice. Ces poseurs vivent dans hexmap.js (topologie des tuiles)
+ * et lisent l'asset par ici.
+ * @returns {Array<Array<{geo, map, color, vc, matName}>>|null} variantes → parties
+ */
+export function getNatureAsset(key) {
+  return natureAssets ? (natureAssets[key] || null) : null;
 }
 
 export function onNatureReady(cb) {
@@ -1209,7 +1343,10 @@ export function onNatureReady(cb) {
 
 /* Peuple la carte avec le décor nature du biome.
    Spec : { key, count, scale:[min,max], kind:'tree'|'grass'|'ground',
-            shadow:bool, tint:0xRRGGBB (multiplie la texture) } */
+            shadow:bool, tint:0xRRGGBB (multiplie la texture),
+            clump:n, spread:r (semis en amas — voir makeTilePlacer),
+            flat:true (dalle posée à plat : pas de contour, léger décalage en Y
+            pour ne pas z-fighter avec la tuile) } */
 export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
   const biome = BIOMES[biomeKey] || BIOMES.temperate;
   if (!natureAssets || !biome.nature) return [];
@@ -1253,18 +1390,25 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
            modèles sans texture comptent sur cette couleur (sinon : blanc). */
         const color = new THREE.Color(spec.tint !== undefined ? spec.tint : 0xffffff);
         if (part.color) color.multiply(part.color);
+        /* Le prop suit le relief du sol. Il est placé sur le plan LOGIQUE de la
+           tuile, qui reste plat : sans ce décalage un caillou posé sur une bosse
+           est à moitié enterré, et le même caillou dans un creux flotte. C'est
+           exactement ce qui interdisait de donner au sol une amplitude visible. */
+        const mat = applyGroundFollow(toonMaterial({
+          map: part.map,
+          color,
+          // couleurs par vertex si le modèle en porte (cactus, fleurs…)
+          ...(part.vc ? { vertexColors: true } : {}),
+          /* alphaTest seulement sur les cartes de feuillage, pas sur les
+             volumes texturés (rochers, troncs) — sinon pas d'outline cartoon */
+          ...(part.map && foliage ? { alphaTest: 0.35 } : {}),
+          side: foliage || spec.doubleSide ? THREE.DoubleSide : THREE.FrontSide,
+        }), spec.key);
+        /* S'efface quand il passe devant le joueur. */
+        applyHeroCutout(mat, 'nat-' + spec.key);
         const inst = new THREE.InstancedMesh(
           part.geo,
-          toonMaterial({
-            map: part.map,
-            color,
-            // couleurs par vertex si le modèle en porte (cactus, fleurs…)
-            ...(part.vc ? { vertexColors: true } : {}),
-            /* alphaTest seulement sur les cartes de feuillage, pas sur les
-               volumes texturés (rochers, troncs) — sinon pas d'outline cartoon */
-            ...(part.map && foliage ? { alphaTest: 0.35 } : {}),
-            side: foliage || spec.doubleSide ? THREE.DoubleSide : THREE.FrontSide,
-          }),
+          mat,
           count,
         );
         /* Ombres : gros volumes seulement. Herbe/fleurs = trop cher pour rien. */
@@ -1275,26 +1419,50 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
         inst.matrixAutoUpdate = false;
         return inst;
       });
+      /* Amas : on répartit le compte du spec sur des paquets, et chaque paquet
+         se pose au même endroit à un rayon près. Sans ça, l'herbe couvre le sol
+         de façon parfaitement homogène — d'où l'aspect moquette. */
+      const clumpOpts = spec.clump > 1
+        ? { clump: Math.max(2, Math.round(spec.clump)), spread: spec.spread || 1.1 }
+        : null;
+      /* Une dalle posée à plat partage exactement le plan de la tuile : sans
+         ce décalage, le z-buffer tranche au hasard et la plaque clignote. */
+      const yLift = spec.flat ? 0.02 : 0;
       for (let i = 0; i < count; i++) {
         const sc = spec.scale[0] + Math.random() * (spec.scale[1] - spec.scale[0]);
         if (placer) {
-          const pt = placer(kind);
-          p.set(pt.x, pt.y || 0, pt.z);
+          const pt = placer(kind, clumpOpts);
+          p.set(pt.x, (pt.y || 0) + yLift, pt.z);
         } else {
           const a = Math.random() * Math.PI * 2;
           const r = Math.sqrt(Math.random()) * (mapR - 2);
-          p.set(Math.cos(a) * r, 0, Math.sin(a) * r);
+          p.set(Math.cos(a) * r, yLift, Math.sin(a) * r);
         }
         q.setFromAxisAngle(UP, Math.random() * Math.PI * 2);
-        s.set(sc, sc * (0.9 + Math.random() * 0.25), sc);
+        /* Les dalles gardent leur épaisseur : les étirer en Y ferait des
+           marches là où on veut une plaque affleurante. */
+        s.set(sc, spec.flat ? sc : sc * (0.9 + Math.random() * 0.25), sc);
         m.compose(p, q, s);
         for (const inst of insts) inst.setMatrixAt(i, m);
       }
       for (const inst of insts) {
         scene.add(inst);
         // Contours feuillage : désactivés sur tactile (×2 draw calls alpha).
-        if (!(foliage && _isCoarse)) {
-          attachCartoonOutline(inst, outlineThick, 0x080a12, { foliage });
+        // Les dalles plates n'en prennent jamais : le hull BackSide d'un volume
+        // aplati sort du sol et se lit comme une flaque noire.
+        if (!spec.flat && !(foliage && _isCoarse)) {
+          const ol = attachCartoonOutline(inst, outlineThick, 0x080a12, { foliage });
+          /* Le contour est un mesh FRÈRE partageant les matrices d'instance, pas
+             un enfant : il ne suit donc pas automatiquement le décalage appliqué
+             au prop. Sans ça la silhouette noire reste à l'ancienne hauteur et
+             se décolle de l'objet. */
+          if (ol && ol.isInstancedMesh) {
+            applyGroundFollow(ol.material, 'ol-' + spec.key);
+            /* Le contour doit s'effacer AVEC son objet : sans ça un arbre
+               transparent laisse sa silhouette noire pleine devant le joueur,
+               ce qui le cache autant que l'arbre. */
+            applyHeroCutout(ol.material, 'nat-ol-' + spec.key);
+          }
         }
         created.push(inst);
       }
@@ -1317,7 +1485,7 @@ export function buildBiomeTrees(scene, biomeKey, mapR, placer = null) {
     if (!asset) continue;
     const inst = new THREE.InstancedMesh(
       asset.geo,
-      toonMaterial({ map: asset.map }),
+      applyGroundFollow(toonMaterial({ map: asset.map }), 'tree' + spec.i),
       spec.count,
     );
     inst.castShadow = true;
@@ -1340,7 +1508,9 @@ export function buildBiomeTrees(scene, biomeKey, mapR, placer = null) {
       inst.setMatrixAt(i, m);
     }
     scene.add(inst);
-    attachCartoonOutline(inst, localOutlineThickness(spec.scale || [1, 1]));
+    applyHeroCutout(inst.material, 'tree' + spec.i);
+    const olT = attachCartoonOutline(inst, localOutlineThickness(spec.scale || [1, 1]));
+    if (olT && olT.isInstancedMesh) applyHeroCutout(olT.material, 'tree-ol' + spec.i);
     created.push(inst);
   }
   return created;
@@ -1368,6 +1538,7 @@ export function buildBiomeGrass(scene, biomeKey, mapR, placer = null) {
       alphaTest: 0.35,
       side: THREE.DoubleSide,
     });
+    applyGroundFollow(mat, 'grass');
     const inst = new THREE.InstancedMesh(geo, mat, per);
     inst.castShadow = false;      // découpe alpha : l'ombre coûterait cher pour rien
     inst.receiveShadow = false;   // receive sur herbe = fillrate inutile
@@ -1388,13 +1559,15 @@ export function buildBiomeGrass(scene, biomeKey, mapR, placer = null) {
       inst.setMatrixAt(i, m);
     }
     scene.add(inst);
+    applyHeroCutout(mat, 'grass');
     if (!_isCoarse) {
-      attachCartoonOutline(
+      const olG = attachCartoonOutline(
         inst,
         localOutlineThickness(scale || [1, 1], OUTLINE_WORLD_FOLIAGE),
         0x080a12,
         { foliage: true },
       );
+      if (olG && olG.isInstancedMesh) applyHeroCutout(olG.material, 'grass-ol');
     }
     created.push(inst);
   }
@@ -1457,7 +1630,9 @@ export function buildBiomeScenery(scene, biomeKey, mapR, placer = null) {
       }
     }
     scene.add(inst);
-    attachCartoonOutline(inst, localOutlineThickness(prop.scale || [1, 1], 0.038));
+    applyHeroCutout(mat, 'prop');
+    const olP = attachCartoonOutline(inst, localOutlineThickness(prop.scale || [1, 1], 0.038));
+    if (olP && olP.isInstancedMesh) applyHeroCutout(olP.material, 'prop-ol');
     meshes.push(inst);
   }
   return { meshes, houses };

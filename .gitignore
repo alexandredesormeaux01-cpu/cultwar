@@ -19,3 +19,8 @@ android/.idea/
 
 # Brouillons locaux (scripts de patch jetables)
 scratch/
+
+# Matériaux téléchargés depuis la bibliothèque Blender : ~59 Mo de .blend 2K
+# tiers, retéléchargeables à la demande. Les SOURCES du projet (hex_tile*.blend
+# et les scripts .py appelés par `npm run tiles:build`) restent suivies.
+blender/assets/

@@ -52,6 +52,32 @@ button.big:active { transform: scale(.95); }
 }
 
 /* Concede Button placed above the bandeau */
+.hud-pause-btn {
+  position: absolute;
+  top: -24px;
+  right: 140px;
+  background: rgba(70, 150, 255, 0.15);
+  border: 1px solid rgba(70, 150, 255, 0.35);
+  color: #7ed0ff;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+}
+.hud-pause-btn:hover {
+  background: rgba(70, 150, 255, 0.3);
+  border-color: rgba(70, 150, 255, 0.6);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(70, 150, 255, 0.35);
+}
+
 .hud-concede-btn {
   position: absolute;
   top: -24px;
@@ -1659,6 +1685,13 @@ button.big:active { transform: scale(.95); }
   background: radial-gradient(circle at 50% 40%, rgba(12, 16, 32, 0.45), rgba(4, 6, 15, 0.75));
   backdrop-filter: blur(5px);
   -webkit-backdrop-filter: blur(5px);
+  /* Sans ça, un panneau plus haut que l'écran est centré et coupé en haut
+     ET en bas — impossible de scroller jusqu'aux réglages caméra / qualité. */
+  align-items: flex-start;
+  justify-content: center;
+  padding: max(10px, env(safe-area-inset-top, 0px)) 14px max(10px, env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .main-menu-panel {
   background: rgba(10, 14, 28, 0.78);
@@ -1672,7 +1705,13 @@ button.big:active { transform: scale(.95); }
   padding: 32px 28px 30px;
   max-width: 400px;
   width: 92%;
+  /* Centre verticalement quand il y a de la place ; sinon reste dans le flux
+     scrollable du overlay (margin:auto + flex-start). */
   margin: auto;
+  max-height: calc(100dvh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   position: relative;
   z-index: 5;
   animation: menuPanelEntrance 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
@@ -1680,6 +1719,20 @@ button.big:active { transform: scale(.95); }
 @keyframes menuPanelEntrance {
   from { opacity: 0; transform: scale(0.93) translateY(16px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Réglages caméra + qualité côte à côte : deux blocs empilés mangeaient trop
+   de hauteur et disparaissaient hors écran sur téléphone. */
+.main-menu-panel .menu-settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 18px;
+  margin-top: 12px;
+}
+.main-menu-panel .menu-settings-row .menu-cam-setting {
+  margin-top: 0;
+  flex: 1 1 140px;
 }
 
 /* ---------- Save Card and Actions on Home Screen ---------- */
@@ -2602,6 +2655,55 @@ button.btn-secondary:hover {
   to { transform: translateY(-6px) scale(1.02); }
 }
 
+/* Écrans bas (portrait téléphone, fenêtre courte) : densifier pour que logo,
+   campagne, boutons et réglages tiennent sans couper le bas. */
+@media (max-height: 820px) {
+  .main-menu-panel {
+    padding: 18px 18px 16px;
+    border-radius: 20px;
+  }
+  .main-logo-img {
+    max-width: 200px;
+    margin-bottom: 4px;
+    animation: none;
+  }
+  #start .tag {
+    margin: 4px 0 10px;
+    font-size: 13px;
+    line-height: 1.35;
+  }
+  #start .lbl2 { margin-bottom: 6px; }
+  .save-card {
+    margin: 0 auto 12px;
+    padding: 8px 12px;
+    gap: 10px;
+  }
+  #save-leader-avatar { width: 42px; height: 42px; }
+  .menu-actions { gap: 8px; }
+  #start button.big {
+    font-size: 16px;
+    padding: 11px 24px;
+  }
+  #start .secondary-btn {
+    font-size: 14px;
+    padding: 10px 20px;
+  }
+  .main-menu-panel .menu-settings-row { margin-top: 10px; gap: 8px 12px; }
+  .menu-cam-hint { display: none; }
+  .cam-dist-btn { padding: 5px 10px; font-size: 11px; }
+}
+
+@media (max-height: 640px) {
+  .main-logo-img { max-width: 150px; margin-bottom: 2px; }
+  #start .tag { display: none; }
+  .save-card { margin-bottom: 8px; }
+  #start button.big {
+    font-size: 15px;
+    padding: 9px 18px;
+  }
+  .main-menu-panel { padding: 12px 14px; }
+}
+
 @media (pointer: coarse) {
   *, *::before, *::after {
     backdrop-filter: none !important;
@@ -2976,6 +3078,20 @@ button.btn-secondary:hover {
   padding: 1px 5px; border-radius: 8px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.35);
 }
+/* « En jeu » : le joueur est resté dans la manche alors qu'on est au salon.
+   Placé en flux sous l'avatar, pas en absolu, pour ne pas se battre avec la
+   pastille IA (coin haut gauche) ni l'étoile d'hôte (coin haut droit). */
+.lobby-strip-playing {
+  font-size: 9px; font-weight: 900; letter-spacing: 0.4px;
+  color: #062e1b; background: #34d399;
+  padding: 1px 6px; border-radius: 8px;
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.55);
+  animation: lobbyPlayingPulse 1.8s ease-in-out infinite;
+}
+@keyframes lobbyPlayingPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
 .lobby-strip-avatar.is-host::before {
   content: '★'; position: absolute; top: -6px; right: -6px;
   width: 20px; height: 20px; border-radius: 50%;
@@ -3182,6 +3298,32 @@ button.btn-secondary:hover {
   text-transform: uppercase; opacity: 0.6;
   margin-top: 6px;
 }
+/* Roster des personnages d'une IA : 6 vignettes sur deux rangs, assez grandes
+   pour que le visage se reconnaisse — c'est à ça qu'on choisit, pas au nom. */
+.lobby-bot-char-row {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px;
+}
+.lobby-bot-char {
+  aspect-ratio: 1;
+  /* Plancher de lisibilité : en dessous, un visage devient une tache. La
+     grille peut les agrandir tant qu'elle veut, mais jamais les réduire au
+     point qu'on ne distingue plus qui est qui. */
+  min-width: 44px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.16);
+  background-size: cover; background-position: center top;
+  background-color: rgba(255,255,255,0.05);
+  cursor: pointer; transition: all 120ms;
+}
+.lobby-bot-char:hover {
+  border-color: rgba(255,255,255,0.5);
+  transform: translateY(-2px);
+}
+.lobby-bot-char.is-selected {
+  border-color: #ffe259;
+  box-shadow: 0 0 12px rgba(255,226,89,0.55);
+}
+
 .lobby-bot-diff-row {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
 }
@@ -3396,6 +3538,142 @@ button.btn-secondary:hover {
   transition: transform .12s ease, box-shadow .12s ease;
 }
 
+/* ============ Manette : pastilles de boutons ============
+   Dessinées en CSS, pas en images : les pastilles doivent suivre la couleur du
+   texte autour d'elles et rester nettes à toute densité d'écran, et surtout ne
+   pas ajouter six requêtes réseau pour six glyphes. Les couleurs sont celles de
+   la manette Xbox — c'est ce que le joueur cherche des yeux. */
+.gp-glyph {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.35em;
+  height: 1.35em;
+  padding: 0 .22em;
+  margin-right: .32em;
+  border-radius: 999px;
+  font: 700 .78em/1 system-ui, sans-serif;
+  color: #0b0d14;
+  vertical-align: middle;
+}
+.gp-a { background: #6fbf3a; }
+.gp-b { background: #e8443a; }
+.gp-x { background: #3f8ee0; color: #fff; }
+.gp-y { background: #e8b830; }
+.gp-ps-cross { background: #3b82f6; color: #fff; }
+.gp-ps-circle { background: #ef4444; color: #fff; }
+.gp-ps-square { background: #ec4899; color: #fff; }
+.gp-ps-triangle { background: #10b981; color: #fff; }
+/* Gâchettes, sticks et boutons système ne sont pas des pastilles colorées :
+   les teinter inventerait un code couleur qui n'existe pas sur le pad. */
+.gp-bump, .gp-sys, .gp-stick {
+  background: rgba(255, 255, 255, .16);
+  color: #eaf2ff;
+  border: 1px solid rgba(255, 255, 255, .3);
+  border-radius: 7px;
+}
+.gp-stick { border-radius: 999px; }
+
+/* ============ Manette : barre d'aide contextuelle ============
+   Bas d'écran, discrète, et n'apparaît QUE manette branchée (.has-gamepad) :
+   au tactile ou à la souris elle ne serait qu'un bandeau de bruit.
+
+   Les overlays laissent une bande libre en bas (padding) pour que la barre
+   ne recouvre jamais boutons ni réglages — défaut constaté sur l'accueil. */
+.gp-hints {
+  position: fixed;
+  left: 50%;
+  bottom: max(12px, env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  /* Au-dessus du HUD, sous les modales critiques (clavier virtuel = 240). */
+  z-index: 90;
+  display: none;
+  gap: 1.1em;
+  align-items: center;
+  padding: .5em 1.1em;
+  border-radius: 999px;
+  background: rgba(8, 11, 20, .82);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, .12);
+  font: 600 13px/1 system-ui, sans-serif;
+  color: #cfe0f5;
+  letter-spacing: .01em;
+  pointer-events: none;
+  max-width: 94vw;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+body.has-gamepad .gp-hints:not(.hidden) { display: flex; }
+.gp-hint { display: inline-flex; align-items: center; white-space: nowrap; }
+
+/* Réserve la place des hints sous le contenu des menus. */
+body.has-gamepad .overlay {
+  padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+}
+body.has-gamepad #start.overlay {
+  padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+}
+body.has-gamepad #start .main-menu-panel {
+  max-height: calc(100dvh - 84px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+}
+
+/* ============ Manette : clavier virtuel ============
+   Sans lui, une manette seule ne peut pas commencer de campagne : le créateur
+   exige un nom de prophète et le bouton de lancement reste inerte à vide. */
+.gp-osk {
+  position: fixed;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  z-index: 240;                 /* modal : au-dessus de sa propre barre d'aide */
+  width: min(560px, 94vw);
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(10, 13, 24, .96);
+  border: 1px solid rgba(126, 200, 255, .28);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .6);
+  font-family: system-ui, sans-serif;
+}
+.gp-osk.hidden { display: none; }
+.gp-osk-head {
+  display: flex;
+  align-items: baseline;
+  gap: .6em;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, .1);
+}
+.gp-osk-label { font: 600 11px/1 system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; color: #7f93ad; }
+.gp-osk-value { font: 700 18px/1.2 system-ui, sans-serif; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-osk-row { display: flex; gap: 6px; margin-bottom: 6px; justify-content: center; }
+.gp-osk-key {
+  flex: 1 1 0;
+  display: grid;
+  place-items: center;
+  height: 40px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .07);
+  border: 1px solid rgba(255, 255, 255, .1);
+  font: 700 16px/1 system-ui, sans-serif;
+  color: #dce8f6;
+}
+.gp-osk-key.sel {
+  background: #7ec8ff;
+  border-color: #b6e0ff;
+  color: #08121c;
+  box-shadow: 0 0 0 4px rgba(126, 200, 255, .22);
+}
+.gp-osk-legend {
+  display: flex;
+  gap: 1em;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, .1);
+  font: 600 12px/1 system-ui, sans-serif;
+  color: #a8bcd2;
+}
+
 /* ===================== Hub Overworld — bandeau de progression ===================== */
 #overworld-hud {
   position: fixed;
@@ -3503,4 +3781,538 @@ button.btn-secondary:hover {
 @media (max-width: 640px) {
   #overworld-hud { font-size: 0.78rem; gap: 8px; padding: 6px 12px; }
   #overworld-prompt { font-size: 0.85rem; padding: 8px 14px; bottom: 18%; }
+}
+
+/* ================= Modal de Pause & Options ================= */
+.pause-panel {
+  width: min(440px, 92vw);
+  background: rgba(14, 18, 32, 0.96);
+  border: 1px solid rgba(120, 190, 255, 0.3);
+  border-radius: 20px;
+  padding: 24px 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8), 0 0 30px rgba(70, 150, 255, 0.15);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  backdrop-filter: blur(16px);
+  color: #fff;
+  animation: pauseModalPop 0.2s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+}
+
+@keyframes pauseModalPop {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.pause-header h2 {
+  font-family: 'Cinzel', serif;
+  font-size: 1.5rem;
+  margin: 0;
+  color: #7ed0ff;
+  text-shadow: 0 0 12px rgba(126, 208, 255, 0.4);
+  text-align: center;
+}
+
+.pause-options-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pause-opt-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #dce8f6;
+}
+
+.pause-opt-row--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.pause-opt-row--stack .cam-dist-picker {
+  align-self: stretch;
+  justify-content: stretch;
+}
+.pause-opt-row--stack .cam-dist-btn {
+  flex: 1;
+  text-align: center;
+}
+
+.pause-toggle-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #aaa;
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pause-toggle-btn.active {
+  background: rgba(70, 180, 255, 0.25);
+  border-color: rgba(70, 180, 255, 0.6);
+  color: #6ed3ff;
+  box-shadow: 0 0 12px rgba(70, 180, 255, 0.2);
+}
+
+.pause-actions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pause-actions-list button {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+/* ---- Salon 3D : ouvrir le panneau pour laisser voir la scène ----
+   .overlay pose un fond plein et un flou d'arrière-plan : tel quel, les
+   personnages seraient rendus derrière un voile et resteraient invisibles. En
+   mode scène, on garde des bandes sombres en haut et en bas — le texte doit
+   rester lisible — et on dégage le centre. Le panneau passe à gauche, comme
+   une colonne, laissant la rangée de personnages occuper le reste. */
+/* Le panneau devient un CADRE : bandeau fin en haut, quai d'outils en bas, et
+   tout l'espace entre les deux laissé aux personnages. C'est l'inverse de
+   l'ancien salon, qui était une carte centrée occupant l'écran. */
+#multi-panel.has-stage {
+  background: none;
+  backdrop-filter: none;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+  overflow: hidden;
+}
+#multi-panel.has-stage .multi-panel-inner,
+#multi-panel.has-stage .panel {
+  margin: 0;
+  max-width: none;
+  width: 100%;
+  padding: 0;
+  background: none;
+  display: flex;
+  flex-direction: column;
+}
+#multi-panel.has-stage .lobby-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  gap: 0;
+}
+
+/* Bandeau du haut : une seule ligne. Fond dégradé pour que le titre reste
+   lisible quel que soit le décor derrière. */
+.lobby-topbar {
+  display: flex; align-items: center; gap: 10px;
+  /* Même plafond de contenu que le quai, pour que titre, code et décompte
+     restent alignés sur lui au lieu de fuir aux deux bords de la fenêtre. */
+  padding-block: 10px 6px;
+  padding-inline: max(14px, calc((100% - 620px) / 2));
+  background: linear-gradient(180deg, rgba(18, 24, 48, 0.88), rgba(18, 24, 48, 0));
+}
+.lobby-topbar h1 {
+  font-size: clamp(18px, 4vw, 26px); margin: 0;
+  background: linear-gradient(90deg,#ffe259,#ffa751);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.lobby-topbar-gap { flex: 1; }
+.lobby-icon-btn {
+  width: 30px; height: 30px; flex: none;
+  border-radius: 50%;
+  background: rgba(255,90,90,0.16);
+  border: 1.5px solid rgba(255,90,90,0.45);
+  color: #ff9090; font-weight: 900; cursor: pointer;
+}
+.lobby-icon-btn:hover { background: rgba(255,90,90,0.34); color: #fff; }
+.lobby-hint-line {
+  margin: 0;
+  padding-block: 0 8px;
+  padding-inline: max(14px, calc((100% - 620px) / 2));
+  font-size: 11px; opacity: 0.72; text-align: left;
+  background: linear-gradient(180deg, rgba(18, 24, 48, 0.55), rgba(18, 24, 48, 0));
+}
+
+/* Quai du bas : tout ce qui se règle. Poussé en bas par le flex du layout, la
+   place restante revient à la scène. */
+.lobby-dock {
+  margin-top: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding-block: 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  /* Plafond de largeur du CONTENU, obtenu par les marges intérieures plutôt
+     que par un max-width : le dégradé de fond doit rester pleine largeur, sinon
+     le quai flotte au milieu de la scène comme une carte posée dessus.
+
+     Sans ce plafond, le quai s'étirait sur toute la fenêtre et les six
+     portraits de personnages devenaient des vignettes géantes en 1920 px — les
+     grilles internes se dimensionnent en fractions de leur conteneur, c'est
+     donc ici que leur taille se décide. */
+  padding-inline: max(12px, calc((100% - 620px) / 2));
+  background: linear-gradient(180deg, rgba(16, 22, 42, 0), rgba(16, 22, 42, 0.82) 22%, rgba(16, 22, 42, 0.94));
+}
+.lobby-dock-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lobby-dock-player {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Salon 3D : le panneau annule le padding des overlays, donc on réserve la
+   place des hints manette dans le quai — sinon Terrain / Lancer sont masqués. */
+body.has-gamepad:has(#multi-panel.has-stage:not(.hidden)) .lobby-dock {
+  padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+}
+
+/* Sélecteur de joueur : flèches, identité de la vedette, bouton « + ». */
+.lobby-pick {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.lobby-pick-id { flex: 1; min-width: 0; text-align: center; }
+.lobby-pick-name {
+  font-size: 15px; font-weight: 900; line-height: 1.15;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lobby-pick-sub {
+  font-size: 10px; opacity: 0.7; line-height: 1.2;
+  text-transform: uppercase; letter-spacing: 0.6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.lobby-mebar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.lobby-mebar.hidden { display: none; }
+.lobby-mebar #lobby-me-name {
+  flex: 1 1 7rem; min-width: 6rem;
+  padding: 7px 10px; border-radius: 10px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.14);
+  color: #fff; font-size: 13px; font-weight: 700;
+}
+.lobby-dot {
+  width: 34px; height: 34px; flex: none;
+  border-radius: 50%; cursor: pointer;
+  background: rgba(255,255,255,0.06);
+  border: 1.5px solid rgba(255,255,255,0.18);
+  display: flex; align-items: center; justify-content: center;
+}
+.lobby-dot:hover { border-color: rgba(255,255,255,0.5); }
+.lobby-dot-swatch {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; color: #fff;
+  background-size: cover; background-position: center;
+}
+.lobby-addbot { display: flex; }
+
+/* Terrain — mobile : bouton qui ouvre la grille ; PC : panneau + grille inline. */
+.lobby-biome-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.lobby-biome-panel-head { display: none; }
+.lobby-biome-inline { display: none; }
+.lobby-biome-btn {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  border: 1.5px solid rgba(255,255,255,0.16);
+  color: #fff; cursor: pointer; text-align: left;
+  transition: all 0.15s ease;
+}
+.lobby-biome-btn:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.35); }
+.lobby-biome-btn.is-readonly { opacity: 0.72; cursor: default; }
+.lobby-biome-btn.is-readonly:hover { background: rgba(255,255,255,0.06); }
+.lobby-biome-panel.is-readonly .lobby-biome-tile:disabled {
+  opacity: 0.85;
+}
+.lobby-biome-cur { flex: 1; font-weight: 800; font-size: 14px; }
+.lobby-biome-more { font-size: 12px; opacity: 0.7; flex: none; font-weight: 700; }
+.lobby-line-label,
+.lobby-sec-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px;
+  opacity: 0.65; flex: none;
+}
+.lobby-sec-label {
+  margin: 2px 0 -2px;
+  text-align: left;
+}
+
+/* Grille des terrains (modale mobile + inline PC). */
+.lobby-modal-grid.is-biomes {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 10px;
+}
+.lobby-biome-tile {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 14px 8px;
+  border-radius: 14px;
+  background: rgba(255,255,255,0.06);
+  border: 2px solid rgba(255,255,255,0.12);
+  color: #cbd5e1; cursor: pointer;
+  transition: all 0.15s ease;
+}
+.lobby-biome-tile:hover:not(:disabled) {
+  background: rgba(255,255,255,0.13);
+  border-color: rgba(255,255,255,0.4);
+  color: #fff; transform: translateY(-2px);
+}
+.lobby-biome-tile.is-selected {
+  border-color: #63a4ff; color: #fff;
+  background: rgba(120,180,255,0.2);
+  box-shadow: 0 0 14px rgba(99,164,255,0.45);
+}
+.lobby-biome-tile:disabled { cursor: default; }
+.lobby-modal-note {
+  grid-column: 1 / -1; margin: 4px 0 0;
+  font-size: 11px; opacity: 0.7; text-align: center;
+}
+.lobby-actions { display: flex; gap: 8px; }
+.lobby-actions .big { flex: 1; }
+
+/* Fiche du personnage sélectionné. */
+.lobby-sel {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px;
+  border-radius: 14px;
+  background: rgba(10,14,26,0.9);
+  border: 1.5px solid var(--slot-color, #ffe259);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--slot-color, #ffe259) 30%, transparent);
+}
+.lobby-sel.hidden { display: none; }
+.lobby-sel-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.lobby-sel-role {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1px;
+  opacity: 0.65; flex: 1; text-align: left;
+}
+.lobby-sel-close {
+  width: 24px; height: 24px; border-radius: 50%;
+  background: rgba(255,255,255,0.08); border: none; color: #fff; cursor: pointer;
+}
+.lobby-sel-chars {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+}
+.lobby-sel-perk { font-size: 11px; opacity: 0.85; text-align: left; }
+.lobby-sel-diffs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.lobby-sel-remove {
+  padding: 10px 12px; border-radius: 10px;
+  background: rgba(255,90,90,0.14);
+  border: 1.5px solid rgba(255,90,90,0.45);
+  color: #ff9090; font-weight: 700; font-size: 13px; cursor: pointer;
+}
+.lobby-sel-remove:hover { background: rgba(255,90,90,0.3); color: #fff; }
+
+.lobby-biome-ico { font-size: 1.55rem; line-height: 1; flex: none; }
+.lobby-biome-name { font-size: 0.68rem; font-weight: 700; white-space: nowrap; }
+
+/* ---- Hub PC : largeur utilisée, chaque bloc a sa place ----
+   Fiche joueur à gauche, terrain en grille à droite, lancer en bas.
+   Plus bas que la pile mobile → plus de scène visible. */
+@media (min-width: 960px) {
+  .lobby-dock {
+    gap: 14px;
+    padding: 16px 28px calc(18px + env(safe-area-inset-bottom, 0px));
+    max-width: 1180px;
+    width: 100%;
+    margin-inline: auto;
+  }
+  body.has-gamepad:has(#multi-panel.has-stage:not(.hidden)) .lobby-dock {
+    padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .lobby-dock-main {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.95fr);
+    gap: 14px;
+    align-items: stretch;
+  }
+
+  .lobby-pick {
+    padding: 10px 14px;
+    gap: 12px;
+    border-radius: 16px;
+    background: rgba(10, 14, 26, 0.78);
+    border-color: rgba(255,255,255,0.14);
+  }
+  .lobby-pick-name { font-size: 20px; }
+  .lobby-pick-sub { font-size: 12px; letter-spacing: 0.8px; }
+  .lobby-nav-btn { width: 44px; height: 44px; }
+
+  .lobby-sel {
+    flex: 1;
+    gap: 10px;
+    padding: 16px 18px;
+    border-radius: 16px;
+  }
+  .lobby-sec-label {
+    font-size: 11px;
+    letter-spacing: 1.8px;
+    opacity: 0.72;
+  }
+  /* Pas de plafond de largeur : les six portraits prennent toute la colonne.
+     C'est à eux qu'on choisit un personnage — un visage de 40 px ne se
+     reconnaît pas, et la place est disponible sur grand écran. */
+  .lobby-sel-chars {
+    margin: 0;
+    gap: 10px;
+  }
+  .lobby-sel-perk {
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.05);
+  }
+  .lobby-sel-diffs { gap: 10px; }
+  .lobby-sel-diffs .lobby-bot-diff {
+    padding: 14px 12px;
+    font-size: 15px;
+    border-radius: 12px;
+    border-width: 2px;
+  }
+  .lobby-sel-remove {
+    margin-top: auto;
+    padding: 13px 16px;
+    font-size: 14px;
+    border-radius: 12px;
+  }
+
+  .lobby-mebar {
+    padding: 10px 12px;
+    gap: 12px;
+    border-radius: 14px;
+    background: rgba(10, 14, 26, 0.78);
+  }
+  .lobby-mebar #lobby-me-name {
+    padding: 12px 14px;
+    font-size: 15px;
+  }
+  .lobby-dot { width: 44px; height: 44px; }
+  .lobby-dot-swatch { width: 28px; height: 28px; font-size: 15px; }
+
+  /* Panneau terrain : composant à part entière, pas une mince barre. */
+  .lobby-biome-panel {
+    gap: 12px;
+    padding: 16px 18px;
+    border-radius: 16px;
+    background: rgba(10, 14, 26, 0.9);
+    border: 1.5px solid rgba(99, 164, 255, 0.35);
+    box-shadow: 0 0 18px rgba(99, 164, 255, 0.12);
+  }
+  .lobby-biome-panel-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .lobby-biome-panel-head .lobby-line-label {
+    font-size: 11px;
+    letter-spacing: 1.8px;
+    opacity: 0.72;
+  }
+  .lobby-biome-panel-head .lobby-biome-cur {
+    flex: none;
+    font-size: 17px;
+    color: #cfe2ff;
+  }
+  .lobby-biome-inline {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    flex: 1;
+  }
+  .lobby-biome-inline .lobby-biome-tile {
+    padding: 12px 6px;
+    gap: 5px;
+    border-radius: 12px;
+  }
+  .lobby-biome-inline .lobby-biome-ico { font-size: 1.65rem; }
+  .lobby-biome-inline .lobby-biome-name {
+    font-size: 0.72rem;
+    white-space: normal;
+    text-align: center;
+    line-height: 1.15;
+  }
+  /* Mobile garde le bouton-modale ; PC choisit inline. */
+  .lobby-biome-btn { display: none; }
+
+  .lobby-actions .big,
+  #btn-lobby-start.big {
+    padding: 18px 28px;
+    font-size: 18px;
+    border-radius: 14px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .lobby-dock { max-width: 1280px; }
+  .lobby-dock-main {
+    grid-template-columns: minmax(0, 1.05fr) minmax(340px, 1fr);
+    gap: 16px;
+  }
+  .lobby-biome-inline {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .lobby-biome-inline .lobby-biome-tile { padding: 14px 8px; }
+  .lobby-sel-chars { gap: 12px; }
+}
+
+/* Avertissement d'abandon : masqué hors campagne, où rien n'est en jeu
+   (voir openPauseModal). */
+.pause-warn {
+  margin: -2px 0 0;
+  text-align: center;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: #ff8a98;
+  opacity: 0.85;
+}
+.pause-warn.hidden { display: none; }
+
+.danger-btn {
+  background: rgba(240, 60, 80, 0.18);
+  border: 1px solid rgba(240, 60, 80, 0.4);
+  color: #ff8a98;
+}
+.danger-btn:hover {
+  background: rgba(240, 60, 80, 0.35);
+  border-color: rgba(240, 60, 80, 0.7);
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(240, 60, 80, 0.4);
 }

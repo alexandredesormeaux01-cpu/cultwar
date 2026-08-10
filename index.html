@@ -31,6 +31,7 @@
 
     <!-- Top Bar Bandoulière : minimap | Rang + % | boule peinture -->
     <div id="hud-top-bar">
+      <button id="btn-pause" class="hud-pause-btn" title="Pause & Options (P ou Echap)">⚙️ Options</button>
       <button id="btn-concede" class="hud-concede-btn" title="Céder la victoire aux rivaux (défaite immédiate)">Céder la victoire</button>
 
       <div id="hud-minimap-container">
@@ -169,25 +170,27 @@
         <button id="btn-delete-game" class="btn-danger hidden">Supprimer la partie</button>
       </div>
 
-      <!-- Réglage caméra : trois vues rapides, applicable en solo comme en multi -->
-      <div class="menu-cam-setting">
-        <div class="menu-cam-label">Vue caméra</div>
-        <div id="cam-dist-picker" class="cam-dist-picker">
-          <button type="button" data-dist="near" class="cam-dist-btn">Proche</button>
-          <button type="button" data-dist="mid" class="cam-dist-btn">Standard</button>
-          <button type="button" data-dist="far" class="cam-dist-btn">Éloignée</button>
+      <div class="menu-settings-row">
+        <!-- Réglage caméra : trois vues rapides, applicable en solo comme en multi -->
+        <div class="menu-cam-setting">
+          <div class="menu-cam-label">Vue caméra</div>
+          <div id="cam-dist-picker" class="cam-dist-picker">
+            <button type="button" data-dist="near" class="cam-dist-btn">Proche</button>
+            <button type="button" data-dist="mid" class="cam-dist-btn">Standard</button>
+            <button type="button" data-dist="far" class="cam-dist-btn">Éloignée</button>
+          </div>
         </div>
-      </div>
 
-      <!-- Qualité graphique : netteté / ombres (surtout utile sur mobile) -->
-      <div class="menu-cam-setting">
-        <div class="menu-cam-label">Qualité graphique</div>
-        <div id="gfx-picker" class="cam-dist-picker">
-          <button type="button" data-gfx="low" class="cam-dist-btn">Perf.</button>
-          <button type="button" data-gfx="mid" class="cam-dist-btn">Équilibré</button>
-          <button type="button" data-gfx="high" class="cam-dist-btn">Belle</button>
+        <!-- Qualité graphique : netteté / ombres (surtout utile sur mobile) -->
+        <div class="menu-cam-setting">
+          <div class="menu-cam-label">Qualité graphique</div>
+          <div id="gfx-picker" class="cam-dist-picker">
+            <button type="button" data-gfx="low" class="cam-dist-btn">Perf.</button>
+            <button type="button" data-gfx="mid" class="cam-dist-btn">Équilibré</button>
+            <button type="button" data-gfx="high" class="cam-dist-btn">Belle</button>
+          </div>
+          <div class="menu-cam-hint">Sur téléphone, Perf. limite la chauffe</div>
         </div>
-        <div class="menu-cam-hint">Sur téléphone, Perf. limite la chauffe</div>
       </div>
     </div>
   </div>
@@ -209,61 +212,81 @@
         </div>
       </div>
 
+      <!-- Salon : bandeau fin en haut, quai d'outils en bas, et tout l'espace
+           entre les deux laissé aux personnages 3D. Le gros portrait d'avant a
+           disparu : ton personnage se tient devant toi sur son socle, en
+           montrer une seconde fois une vignette ne servait qu'à manger
+           l'écran. -->
       <div id="multi-lobby" class="hidden lobby-layout">
-        <header class="lobby-header">
-          <div class="lobby-title-row">
-            <h1>Salon</h1>
-            <span class="lobby-code-pill" id="lobby-code">····</span>
-          </div>
-          <p class="tag" id="lobby-hint">Partage le code. Jusqu'à 5 places.</p>
+        <header class="lobby-topbar">
+          <h1>Salon</h1>
+          <span class="lobby-code-pill" id="lobby-code">····</span>
+          <span class="lobby-topbar-gap"></span>
+          <span id="lobby-players-count" class="lobby-players-count">0/5</span>
+          <button id="btn-lobby-leave" class="lobby-icon-btn" title="Quitter le salon">✕</button>
         </header>
+        <p class="lobby-hint-line" id="lobby-hint">Partage le code. Jusqu'à 5 places.</p>
 
-        <!-- Bande de récap : avatars des joueurs les uns à côté des autres -->
-        <section class="lobby-strip">
-          <div class="lobby-section-title">
-            <span>Joueurs</span>
-            <span id="lobby-players-count" class="lobby-players-count">0/5</span>
-          </div>
-          <div id="lobby-strip-slots" class="lobby-strip-row"></div>
-        </section>
-
-        <!-- Bloc du bas : configurateur perso façon carousel -->
-        <section class="lobby-me-card" id="lobby-me-card">
-          <div class="lobby-section-title">Ton personnage</div>
-
-          <div class="lobby-carousel" id="lobby-carousel">
-            <button type="button" class="lobby-nav-btn" id="lobby-nav-prev" aria-label="Précédent">
-              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.5" fill="none"><path d="M15 18l-6-6 6-6"/></svg>
+        <div class="lobby-dock">
+          <!-- Sélecteur de joueur : les flèches font défiler la rangée, le
+               personnage visé passe en vedette au premier plan. Le « + » ajoute
+               une IA. Tout ce qui suit ne parle que du joueur affiché ici. -->
+          <section class="lobby-pick">
+            <button type="button" class="lobby-nav-btn" id="lobby-slot-prev" aria-label="Joueur précédent">
+              <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none"><path d="M15 18l-6-6 6-6"/></svg>
             </button>
-            <div class="lobby-card-3d" id="lobby-card-3d"></div>
-            <button type="button" class="lobby-nav-btn" id="lobby-nav-next" aria-label="Suivant">
-              <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.5" fill="none"><path d="M9 18l6-6-6-6"/></svg>
+            <div class="lobby-pick-id">
+              <div class="lobby-pick-name" id="lobby-pick-name">—</div>
+              <div class="lobby-pick-sub" id="lobby-pick-sub">—</div>
+            </div>
+            <button type="button" class="lobby-nav-btn" id="lobby-slot-next" aria-label="Joueur suivant">
+              <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2.5" fill="none"><path d="M9 18l6-6-6-6"/></svg>
             </button>
-          </div>
-          <div id="lobby-carousel-dots" class="lobby-carousel-dots"></div>
+            <div id="lobby-strip-slots" class="lobby-addbot"></div>
+          </section>
 
-          <div class="lobby-field">
-            <label class="lbl2">Nom du Prophète</label>
-            <input id="lobby-me-name" maxlength="20" placeholder="Ton nom" />
+          <!-- PC : deux colonnes (fiche joueur | terrain). Mobile : pile. -->
+          <div class="lobby-dock-main">
+            <div class="lobby-dock-player">
+              <!-- Réglages du joueur sélectionné : personnage, nom, couleur,
+                   symbole si c'est moi ; personnage et difficulté si c'est une IA ;
+                   expulsion si c'est un invité et que je suis l'hôte. -->
+              <section id="lobby-sel" class="lobby-sel hidden"></section>
+
+              <!-- Nom, couleur et symbole : n'existent que pour MON siège. -->
+              <section class="lobby-mebar hidden" id="lobby-me-card">
+                <input id="lobby-me-name" maxlength="20" placeholder="Ton nom" />
+                <button type="button" class="lobby-dot" id="lobby-pastille-color" title="Couleur divine">
+                  <span class="lobby-dot-swatch" id="lobby-pastille-color-swatch"></span>
+                </button>
+                <button type="button" class="lobby-dot" id="lobby-pastille-sym" title="Symbole de religion">
+                  <span class="lobby-dot-swatch is-sym" id="lobby-pastille-sym-swatch"></span>
+                </button>
+              </section>
+            </div>
+
+            <!-- Terrain : sur PC, grille visible dans le quai ; sur mobile,
+                 bouton qui ouvre la même grille en fenêtre. -->
+            <aside class="lobby-biome-panel" id="lobby-biome-panel">
+              <div class="lobby-biome-panel-head">
+                <span class="lobby-line-label">Terrain</span>
+                <span id="lobby-biome-current" class="lobby-biome-cur">Aléatoire</span>
+              </div>
+              <div id="lobby-biome-grid" class="lobby-biome-inline" role="listbox" aria-label="Terrain de la manche"></div>
+              <button type="button" class="lobby-biome-btn" id="lobby-biome-card">
+                <span class="lobby-line-label">Terrain</span>
+                <span class="lobby-biome-ico" id="lobby-biome-ico">🎲</span>
+                <span class="lobby-biome-cur">Aléatoire</span>
+                <span class="lobby-biome-more">Changer ›</span>
+              </button>
+            </aside>
           </div>
 
-          <div class="lobby-pastilles">
-            <button type="button" class="lobby-pastille" id="lobby-pastille-color" title="Couleur divine">
-              <span class="lobby-pastille-swatch" id="lobby-pastille-color-swatch"></span>
-              <span class="lobby-pastille-label">Couleur</span>
-            </button>
-            <button type="button" class="lobby-pastille" id="lobby-pastille-sym" title="Symbole de religion">
-              <span class="lobby-pastille-swatch is-sym" id="lobby-pastille-sym-swatch"></span>
-              <span class="lobby-pastille-label">Symbole</span>
-            </button>
+          <div id="lobby-host-actions" class="lobby-actions hidden">
+            <button id="btn-lobby-start" class="big">Lancer la partie</button>
           </div>
-        </section>
-
-        <div id="lobby-host-actions" class="menu-actions hidden">
-          <button id="btn-lobby-start" class="big">Lancer la partie</button>
+          <p id="lobby-guest-hint" class="lobby-hint-line hidden">En attente que l'hôte lance la partie…</p>
         </div>
-        <p id="lobby-guest-hint" class="tag hidden">En attente que l'hôte lance la partie…</p>
-        <button id="btn-lobby-leave" class="secondary-btn">Quitter le salon</button>
       </div>
 
       <!-- Modal de sélection (couleur ou symbole) — s'ouvre par-dessus le lobby -->
@@ -291,7 +314,54 @@
     </div>
   </div>
 
+  <!-- Quitter le salon multi → menu d'accueil -->
+  <div id="confirm-leave-lobby" class="overlay hidden">
+    <div class="panel">
+      <h1 id="leave-lobby-title">Quitter le salon ?</h1>
+      <p class="tag" id="leave-lobby-msg">Tu retourneras au menu d'accueil.</p>
+      <div class="menu-actions">
+        <button id="btn-leave-lobby-confirm" class="btn-danger">Oui, quitter</button>
+        <button id="btn-leave-lobby-cancel" class="secondary-btn">Annuler</button>
+      </div>
+    </div>
+  </div>
 
+
+
+  <!-- Modal Pause / Options (Campagne / Partie) -->
+  <div id="pause-modal" class="overlay hidden">
+    <div class="panel pause-panel">
+      <div class="pause-header">
+        <h2>⏸️ Pause &amp; Options</h2>
+      </div>
+
+      <div class="pause-options-card">
+        <div class="pause-opt-row">
+          <span class="pause-opt-label">🎵 Musique</span>
+          <button id="btn-toggle-music" class="pause-toggle-btn active">🔊 Activée</button>
+        </div>
+        <div class="pause-opt-row">
+          <span class="pause-opt-label">🔊 Effets Sonores</span>
+          <button id="btn-toggle-sfx" class="pause-toggle-btn active">🔊 Activés</button>
+        </div>
+        <div class="pause-opt-row pause-opt-row--stack">
+          <span class="pause-opt-label">📷 Vue caméra</span>
+          <div id="pause-cam-dist-picker" class="cam-dist-picker">
+            <button type="button" data-dist="near" class="cam-dist-btn">Proche</button>
+            <button type="button" data-dist="mid" class="cam-dist-btn">Standard</button>
+            <button type="button" data-dist="far" class="cam-dist-btn">Éloignée</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="pause-actions-list">
+        <button id="btn-pause-resume" class="big primary-btn">▶️ Reprendre</button>
+        <button id="btn-pause-restart" class="secondary-btn">🔄 Redémarrer la zone</button>
+        <button id="btn-pause-quit" class="danger-btn">🏳️ Abandonner &amp; retour à la carte</button>
+        <p id="pause-warn" class="pause-warn hidden">L'abandon compte comme une défaite : la zone passe à un culte rival.</p>
+      </div>
+    </div>
+  </div>
 
   <!-- Fin -->
   <div id="end" class="overlay hidden">
