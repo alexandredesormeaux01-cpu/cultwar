@@ -30,6 +30,54 @@ button.big:active { transform: scale(.95); }
 #stats .v { font-size: 22px; font-weight: 800; }
 #stats .k { font-size: 11px; opacity: .6; text-transform: uppercase; letter-spacing: 1px; }
 
+/* ---------- Profondeur de champ (tilt-shift) ----------
+   La caméra est verrouillée sur un angle isométrique fixe : « loin » et « haut
+   de l'écran » sont donc la même chose. C'est ce qui autorise un masque en
+   simple dégradé vertical là où il faudrait normalement lire le tampon de
+   profondeur — et c'est ce qui rend l'effet gratuit.
+
+   Les valeurs vivent dans des variables CSS pour être réglables à chaud depuis
+   __grade.dof() sans recharger. */
+:root {
+  --dof-blur: 3.5px;
+  /* Où le flou s'arrête, en partant du haut. Au-delà de ~45 % il mord sur le
+     personnage, et l'effet cesse d'être une profondeur de champ pour devenir un
+     défaut d'affichage. */
+  --dof-top-end: 34%;
+  /* Le tout premier plan est légèrement adouci lui aussi : c'est ce qui
+     distingue une vraie profondeur de champ d'un simple fondu vers le haut.
+     Volontairement plus discret — on regarde plus souvent vers le haut. */
+  --dof-bottom-start: 93%;
+}
+#dof {
+  position: fixed;
+  inset: 0;
+  z-index: 5;            /* au-dessus du canvas, sous le HUD */
+  pointer-events: none;
+  -webkit-backdrop-filter: blur(var(--dof-blur));
+  backdrop-filter: blur(var(--dof-blur));
+  /* Le masque s'applique aussi à l'effet de fond : c'est lui qui fait varier
+     l'intensité du flou au lieu de l'appliquer uniformément. */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    rgba(0, 0, 0, 0.55) calc(var(--dof-top-end) * 0.5),
+    transparent var(--dof-top-end),
+    transparent var(--dof-bottom-start),
+    rgba(0, 0, 0, 0.35) 100%);
+  mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    rgba(0, 0, 0, 0.55) calc(var(--dof-top-end) * 0.5),
+    transparent var(--dof-top-end),
+    transparent var(--dof-bottom-start),
+    rgba(0, 0, 0, 0.35) 100%);
+}
+/* Coupé avec les autres effets sur les paliers graphiques bas : `backdrop-filter`
+   est peu coûteux mais pas gratuit, et il force le compositeur à conserver une
+   copie du fond. */
+#dof.off { display: none; }
+
 /* ---------- HUD ---------- */
 #hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; }
 
@@ -417,14 +465,14 @@ button.big:active { transform: scale(.95); }
   width: 104px;
   height: 104px;
   border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.35);
-  background: radial-gradient(circle at 50% 35%, rgba(60, 90, 140, 0.75), rgba(10, 14, 32, 0.85));
+  border: 2.5px solid rgba(80, 220, 255, 0.7);
+  background: radial-gradient(circle at 40% 35%, rgba(30, 90, 180, 0.85), rgba(8, 12, 28, 0.95));
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   box-shadow:
-    0 8px 24px rgba(0, 0, 0, 0.55),
-    0 0 0 1px rgba(0, 0, 0, 0.4),
-    inset 0 0 18px rgba(120, 190, 255, 0.18);
+    0 8px 24px rgba(0, 0, 0, 0.6),
+    0 0 20px rgba(0, 200, 255, 0.4),
+    inset 0 0 22px rgba(100, 220, 255, 0.25);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -433,25 +481,36 @@ button.big:active { transform: scale(.95); }
   cursor: pointer;
   pointer-events: auto;
   z-index: 5;
-  transition: transform 0.09s ease, box-shadow 0.2s ease;
+  transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease, border-color 0.2s ease;
   -webkit-tap-highlight-color: transparent;
 }
 #net-btn .net-ico {
-  width: 62px;
-  height: 62px;
-  background-image: var(--net-ico, none);
-  background-size: contain;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background-image: url('/assets/energy_ball.jpg'), radial-gradient(circle, #00f0ff 0%, #7000ff 70%);
+  background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+  filter: drop-shadow(0 0 10px rgba(0, 210, 255, 0.85));
+  position: relative;
 }
-/* Repli tant que la vignette du filet n'est pas cuite. */
+#net-btn .net-ico::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.8) 0%, rgba(0, 240, 255, 0.4) 45%, transparent 75%);
+  mix-blend-mode: screen;
+  pointer-events: none;
+  animation: energy-pulse 2s ease-in-out infinite alternate;
+}
 #net-btn .net-ico::after {
-  content: '🕸️';
-  font-size: 34px;
-  line-height: 62px;
-  display: block;
-  text-align: center;
+  content: none;
+}
+@keyframes energy-pulse {
+  0% { transform: scale(0.95); opacity: 0.7; }
+  100% { transform: scale(1.06); opacity: 1; }
 }
 #net-btn.has-ico .net-ico::after { content: none; }
 /* Recharge : un voile conique qui se vide, comme les pouvoirs de la barre.
@@ -639,50 +698,131 @@ button.big:active { transform: scale(.95); }
 
 #hud-actions-bar button {
   position: relative;
-  width: 52px;
-  height: 52px;
+  width: 54px;
+  height: 54px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 2px solid rgba(255, 255, 255, 0.2);
   color: #fff;
   cursor: pointer;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  transition: transform 0.1s, opacity 0.2s, box-shadow 0.2s;
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease, border-color 0.2s ease;
   overflow: hidden;
-  background: rgba(10, 12, 30, 0.6);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(10, 14, 30, 0.75);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), inset 0 0 12px rgba(255, 255, 255, 0.05);
 }
-#hud-actions-bar button:active { transform: scale(0.9); }
-#hud-actions-bar button.off { opacity: 0.4; pointer-events: none; }
 
-#hud-actions-bar button > * { z-index: 2; position: relative; }
-#hud-actions-bar button .ico { font-size: 18px; line-height: 1; }
-#hud-actions-bar button .lbl { font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+#hud-actions-bar button:active { transform: scale(0.92); }
 
-#boost-btn {
-  border-color: rgba(0, 200, 255, 0.3) !important;
-}
-#boost-btn.ready {
-  background: rgba(0, 255, 200, 0.22) !important;
-  border-color: rgba(0, 255, 200, 0.6) !important;
-  box-shadow: 0 0 12px rgba(0, 255, 200, 0.5);
-  animation: boostReadyPulse 1.5s infinite alternate;
-}
-#boost-cooldown-overlay {
+#hud-actions-bar button > * { z-index: 1; position: absolute; }
+#hud-actions-bar button .ico {
   position: absolute;
   inset: 0;
-  z-index: 1;
-  background: conic-gradient(rgba(10, 12, 30, 0.8) var(--cooldown-deg), transparent var(--cooldown-deg));
-  pointer-events: none;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
-  transform: rotate(-90deg);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  display: block;
+  z-index: 1;
 }
+#hud-actions-bar button .ico.boost-ico {
+  background-image: url('/assets/boost_icon.jpg');
+}
+#hud-actions-bar button .ico.spirit-ico {
+  background-image: url('/assets/spirit_icon.jpg');
+}
+#hud-actions-bar button .lbl { display: none; }
+
+/* Jauges circulaires de chargement / déchargement */
+.action-gauge {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/* --- Pastille BOOST (Sprint) --- */
+#boost-btn {
+  border-color: rgba(0, 240, 255, 0.4);
+}
+#boost-cooldown-overlay {
+  background: conic-gradient(
+    rgba(0, 240, 255, 0.45) 0 var(--cooldown-deg, 0deg),
+    rgba(8, 12, 26, 0.85) var(--cooldown-deg, 0deg) 360deg
+  );
+  transform: rotate(-90deg);
+  transition: background 0.08s linear;
+}
+#boost-btn.charging {
+  border-color: rgba(0, 200, 255, 0.3);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+#boost-btn.ready {
+  background: radial-gradient(circle at 35% 35%, rgba(0, 255, 200, 0.35), rgba(8, 14, 30, 0.85));
+  border-color: rgba(0, 255, 200, 0.85);
+  box-shadow: 0 0 18px rgba(0, 255, 200, 0.6), inset 0 0 14px rgba(0, 255, 200, 0.3);
+  animation: boostReadyPulse 1.6s ease-in-out infinite alternate;
+}
+
 @keyframes boostReadyPulse {
-  from { box-shadow: 0 0 10px rgba(0, 255, 200, 0.4); }
-  to { box-shadow: 0 0 20px rgba(0, 255, 200, 0.8); }
+  0% { transform: scale(1); box-shadow: 0 0 12px rgba(0, 255, 200, 0.4); }
+  100% { transform: scale(1.04); box-shadow: 0 0 22px rgba(0, 255, 200, 0.85); }
+}
+
+/* --- Pastille ESPRIT (Spirit Mode) --- */
+#spirit-btn {
+  border-color: rgba(160, 130, 255, 0.4);
+}
+#spirit-cooldown-overlay {
+  background: conic-gradient(
+    rgba(160, 120, 255, 0.5) 0 var(--spirit-deg, 0deg),
+    rgba(8, 12, 26, 0.85) var(--spirit-deg, 0deg) 360deg
+  );
+  transform: rotate(-90deg);
+  transition: background 0.08s linear;
+}
+#spirit-btn.charging {
+  border-color: rgba(160, 120, 255, 0.3);
+  opacity: 0.65;
+}
+#spirit-btn.ready {
+  border-color: rgba(180, 160, 255, 0.7);
+  box-shadow: 0 0 14px rgba(160, 120, 255, 0.4);
+}
+/* Actif : Déchargement des 10 secondes d'esprit */
+#spirit-btn.on {
+  background: radial-gradient(circle at 35% 35%, rgba(140, 180, 255, 0.4), rgba(12, 16, 40, 0.9));
+  border-color: rgba(190, 220, 255, 0.9);
+  box-shadow: 0 0 20px rgba(150, 200, 255, 0.8), inset 0 0 14px rgba(180, 230, 255, 0.4);
+  animation: spiritActivePulse 2s ease-in-out infinite alternate;
+}
+#spirit-btn.on #spirit-cooldown-overlay {
+  background: conic-gradient(
+    rgba(150, 210, 255, 0.65) 0 var(--spirit-deg, 0deg),
+    rgba(8, 12, 30, 0.85) var(--spirit-deg, 0deg) 360deg
+  );
+}
+/* Avertissement : sous 3 secondes d'esprit restantes */
+#spirit-btn.on.warning {
+  border-color: #ff5577;
+  box-shadow: 0 0 24px rgba(255, 85, 119, 0.85), inset 0 0 16px rgba(255, 85, 119, 0.5);
+  animation: spiritWarnPulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes spiritActivePulse {
+  0% { transform: scale(1); }
+  100% { transform: scale(1.05); }
+}
+@keyframes spiritWarnPulse {
+  0% { transform: scale(1); filter: brightness(1); }
+  100% { transform: scale(1.08); filter: brightness(1.3); }
 }
 
 /* Bouton pouvoir actif — thème doré (slot 1) / cyan (slot 2). */
@@ -1430,7 +1570,9 @@ button.big:active { transform: scale(.95); }
   backdrop-filter: blur(8px); padding: 7px 13px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 .prog-country { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; touch-action: none; cursor: pointer; }
 
-.prog-zone-panel { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 4;
+/* Le panneau vit maintenant sur le globe (modèle v3 : un pays = un match), donc
+   au-dessus de .prog-hint qui occupe le bas de la scène. */
+.prog-zone-panel { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); z-index: 4;
   display: flex; flex-direction: column; align-items: center; gap: 10px; background: rgba(10,14,30,.82);
   backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.15); border-radius: 18px; padding: 16px 22px;
   min-width: 260px; max-width: 88%; }
@@ -1892,6 +2034,58 @@ button.btn-secondary:hover {
   color: #ffe259;
   font-variant-numeric: tabular-nums;
 }
+/* Objectif de campagne : rallier l'humanité. Repère permanent — sans lui, le
+   but du mode campagne serait invisible et le joueur croirait devoir peindre
+   toute la carte. */
+.prog-goal {
+  flex-shrink: 0;
+  padding: 6px 14px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.prog-goal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.prog-goal-lbl {
+  font-size: 9.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 1.1px;
+  opacity: 0.62;
+}
+.prog-goal-val {
+  font-size: 12px;
+  font-weight: 900;
+  color: #ffe259;
+  font-variant-numeric: tabular-nums;
+}
+.prog-goal-track {
+  margin-top: 5px;
+  height: 6px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.10);
+  overflow: hidden;
+}
+.prog-goal-track > i {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #ffb300, #ffe259);
+  transition: width 0.45s ease;
+}
+.prog-goal-sub {
+  margin-top: 4px;
+  font-size: 10px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+.prog-goal.is-won .prog-goal-track > i {
+  background: linear-gradient(90deg, #22dd77, #ffe259);
+}
+.prog-goal.is-won .prog-goal-val { color: #22dd77; }
+
 .prog-lb-list {
   flex: 1;
   min-height: 0;
@@ -3433,62 +3627,79 @@ button.btn-secondary:hover {
 #crash.hidden { display: none; }
 #crash pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
 
-/* ---- Cortège : inventaire des six éléments ----
-   Sous la bannière, au centre. C'est l'information qu'on consulte en marchant
-   vers un autel : « ai-je de quoi l'alimenter ? ». Elle doit donc se lire sans
-   quitter la route des yeux — pastilles larges, chiffres épais, et tout ce qui
-   est à zéro s'efface pour laisser ressortir ce qu'on possède. */
+/* ---- Cortège : inventaire des six éléments (âmes transportées) ----
+   En haut au centre sous la barre supérieure. Pastilles sphériques d'énergie,
+   chiffres épais et lueur néon par élément. */
 #hud-spirits {
   position: absolute;
-  top: calc(178px + env(safe-area-inset-top));
+  top: calc(72px + env(safe-area-inset-top));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   gap: 8px;
-  pointer-events: none;
+  padding: 5px 10px;
+  background: rgba(8, 12, 26, 0.78);
+  border: 1.5px solid rgba(255, 255, 255, 0.16);
+  border-radius: 20px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), inset 0 0 16px rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  pointer-events: auto;
   z-index: 4;
 }
 .spirit-chip {
   position: relative;
-  width: 46px;
-  height: 46px;
-  border-radius: 12px;
-  background: rgba(10, 14, 30, 0.66);
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, rgba(30, 45, 75, 0.7), rgba(6, 10, 22, 0.95));
   border: 2px solid var(--elem, #888);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45),
-              inset 0 0 12px color-mix(in srgb, var(--elem, #888) 30%, transparent);
+              inset 0 0 12px color-mix(in srgb, var(--elem, #888) 35%, transparent);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  transition: opacity 0.2s ease, transform 0.18s ease;
+  transition: opacity 0.25s ease, transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.22s ease;
 }
-/* Rien à déposer : la pastille s'efface sans disparaître — savoir ce qui
-   MANQUE compte autant que savoir ce qu'on a. */
-.spirit-chip.vide { opacity: 0.28; }
-.spirit-chip.plein { transform: translateY(-2px); }
+.spirit-chip.vide {
+  opacity: 0.32;
+  filter: grayscale(0.3);
+  transform: scale(0.92);
+}
+.spirit-chip.plein {
+  opacity: 1;
+  transform: translateY(-3px) scale(1.05);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--elem, #888) 60%, transparent),
+              0 0 12px var(--elem, #888),
+              inset 0 0 14px color-mix(in srgb, var(--elem, #888) 50%, transparent);
+  animation: soul-float 3s ease-in-out infinite alternate;
+}
+@keyframes soul-float {
+  0% { transform: translateY(-3px) scale(1.04); }
+  100% { transform: translateY(-6px) scale(1.08); }
+}
 .spirit-chip img {
   position: absolute;
-  inset: 2px;
-  width: calc(100% - 4px);
-  height: calc(100% - 4px);
-  object-fit: cover;
-  object-position: center 24%;
-  border-radius: 9px;
+  inset: 3px;
+  width: calc(100% - 6px);
+  height: calc(100% - 6px);
+  object-fit: contain;
+  border-radius: 50%;
+  filter: drop-shadow(0 0 5px var(--elem, rgba(255,255,255,0.5)));
   display: block;
 }
-/* Repli tant que le portrait 3D n'est pas cuit : le symbole de l'élément. */
 .spirit-chip .sym {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
+  font-size: 18px;
 }
 .spirit-chip.has-img .sym { display: none; }
 .spirit-chip .n {
   position: absolute;
-  right: -5px;
-  bottom: -5px;
+  right: -4px;
+  bottom: -4px;
   min-width: 20px;
   height: 20px;
   padding: 0 4px;
@@ -3503,20 +3714,22 @@ button.btn-secondary:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
 }
 .spirit-chip.plein .n {
   background: var(--elem, #888);
   color: #0b0e1a;
+  box-shadow: 0 0 8px var(--elem, #888);
 }
 
 @media (max-width: 720px) {
   #hud-spirits {
-    top: calc(150px + env(safe-area-inset-top));
-    gap: 5px;
+    top: calc(64px + env(safe-area-inset-top));
+    gap: 6px;
+    padding: 4px 8px;
   }
-  .spirit-chip { width: 36px; height: 36px; border-radius: 10px; }
-  .spirit-chip .n { min-width: 17px; height: 17px; font-size: 10px; }
+  .spirit-chip { width: 36px; height: 36px; }
+  .spirit-chip .n { min-width: 17px; height: 17px; font-size: 10px; right: -4px; bottom: -4px; }
   .spirit-chip .sym { font-size: 16px; }
 }
 
@@ -4073,29 +4286,75 @@ body.has-gamepad:has(#multi-panel.has-stage:not(.hidden)) .lobby-dock {
 
 /* Grille des terrains (modale mobile + inline PC). */
 .lobby-modal-grid.is-biomes {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
   gap: 10px;
 }
 .lobby-biome-tile {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 14px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
   border-radius: 14px;
-  background: rgba(255,255,255,0.06);
-  border: 2px solid rgba(255,255,255,0.12);
-  color: #cbd5e1; cursor: pointer;
-  transition: all 0.15s ease;
+  background: rgba(14, 20, 36, 0.85);
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  color: #cbd5e1;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+  overflow: hidden;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 .lobby-biome-tile:hover:not(:disabled) {
-  background: rgba(255,255,255,0.13);
-  border-color: rgba(255,255,255,0.4);
-  color: #fff; transform: translateY(-2px);
+  background: rgba(24, 34, 58, 0.95);
+  border-color: rgba(99, 164, 255, 0.65);
+  color: #fff;
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5), 0 0 12px rgba(99, 164, 255, 0.3);
 }
 .lobby-biome-tile.is-selected {
-  border-color: #63a4ff; color: #fff;
-  background: rgba(120,180,255,0.2);
-  box-shadow: 0 0 14px rgba(99,164,255,0.45);
+  border-color: #63a4ff;
+  color: #fff;
+  background: rgba(30, 60, 110, 0.85);
+  box-shadow: 0 0 18px rgba(99, 164, 255, 0.6), inset 0 0 12px rgba(99, 164, 255, 0.3);
+  transform: translateY(-2px);
 }
 .lobby-biome-tile:disabled { cursor: default; }
+.lobby-biome-thumb {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 10px;
+  overflow: hidden;
+  position: relative;
+  background: #090d18;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.lobby-biome-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.3s ease;
+}
+.lobby-biome-tile:hover:not(:disabled) .lobby-biome-thumb img {
+  transform: scale(1.08);
+}
+.lobby-biome-card-img {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
+  display: inline-block;
+  vertical-align: middle;
+  border: 1px solid rgba(255,255,255,0.3);
+}
+.lobby-biome-name {
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
 .lobby-modal-note {
   grid-column: 1 / -1; margin: 4px 0 0;
   font-size: 11px; opacity: 0.7; text-align: center;

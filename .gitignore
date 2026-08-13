@@ -24,3 +24,19 @@ scratch/
 # tiers, retéléchargeables à la demande. Les SOURCES du projet (hex_tile*.blend
 # et les scripts .py appelés par `npm run tiles:build`) restent suivies.
 blender/assets/
+
+# Sauvegardes automatiques de Blender : régénérées à chaque enregistrement,
+# elles n'ont aucune valeur d'historique là où git en tient déjà un.
+*.blend1
+
+# Sauvegardes créées par scripts/lift-model-texture.mjs et blender/bake_ao.py
+# avant toute modification d'un modèle. Ce sont des copies EXACTES de la
+# version d'origine, que git conserve déjà dans son historique — les versionner
+# doublerait le poids du dépôt pour la même information.
+#
+# Conséquence à connaître : après un clone, ces .bak n'existent pas. Les deux
+# scripts repartent alors du .glb suivi, qui est déjà corrigé — relancer une
+# correction l'appliquerait donc une seconde fois. Pour repartir de l'original,
+# c'est git qu'il faut interroger :
+#     git show <commit-avant>:public/assets/models/<modele>.glb > <modele>.glb
+*.glb.bak

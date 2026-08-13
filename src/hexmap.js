@@ -25,7 +25,7 @@
 =========================================================================== */
 
 import * as THREE from 'three';
-import { BIOMES, toonMaterial, attachCartoonOutline, getNatureAsset } from './biomes.js';
+import { BIOMES, toonMaterial, attachCartoonOutline, getNatureAsset, conditionAlbedo } from './biomes.js';
 import { IS_MOBILE } from './device.js';
 import { GROUND_NOISE_GLSL, LIFT_FADE_IN, LIFT_FADE_OUT, applyGroundFollow } from './groundNoise.js';
 import { makeGLTFLoader } from './gltf.js';
@@ -282,7 +282,12 @@ export function generateIsland(opts = {}) {
 
   /* --- 6. Teinte unie par tuile (variations douces dans la palette biome). --- */
   const B = BIOMES[opts.biomeKey] || BIOMES.temperate;
-  const cGround = B.ground.map((h) => new THREE.Color(h));
+  /* Teintes de sol du biome. Elles finissent en `instanceColor` sur la croûte,
+     donc multipliées par l'éclairage : ce sont des albédos, et c'est ici que se
+     joue l'essentiel de l'aspect de l'image — le sol couvre presque tout
+     l'écran. Sans conditionnement, un vert de prairie noté pour le toon vire au
+     néon dès qu'il prend le soleil. */
+  const cGround = B.ground.map((h) => conditionAlbedo(new THREE.Color(h)));
   const biomeKey = opts.biomeKey || 'temperate';
   for (const t of tiles) {
     const n = noise(t.x * 0.05 + 40, t.z * 0.05 + 40);
@@ -1031,17 +1036,6 @@ function makeCrust() {
 let crustGeo = null;
 const clippedCrustCache = new Map();
 
-let _crustGradient = null;
-function getCrustGradient() {
-  if (_crustGradient) return _crustGradient;
-  const data = new Uint8Array([70, 130, 190, 255]);
-  _crustGradient = new THREE.DataTexture(data, 4, 1, THREE.RedFormat);
-  _crustGradient.minFilter = THREE.NearestFilter;
-  _crustGradient.magFilter = THREE.NearestFilter;
-  _crustGradient.needsUpdate = true;
-  return _crustGradient;
-}
-
 /* Varyings du shader de sol. Le champ de hauteur lui-meme vit dans
    groundNoise.js : il est partage avec le decor, qui doit se decaler
    d'exactement la meme quantite. */
@@ -1204,6 +1198,15 @@ function applyGroundDetail(mat, cheap) {
     uMatWobble: { value: 2.6 },
     uMatFieldFreq: { value: 0.045 },
     uMatEdge: { value: 0.07 },
+    /* Direction du soleil, pour le hillshade du sol (voir plus bas).
+       Elle était écrite en dur dans le GLSL, avec un commentaire demandant de la
+       tenir à jour à la main quand main.js bougeait la lumière — une consigne
+       qu'aucun code ne fait respecter, et qui avait effectivement décroché : le
+       relief du sol s'éclairait d'un côté pendant que les ombres portées
+       tombaient de l'autre. Elle est maintenant poussée par main.js à chaque
+       déplacement du soleil, ce qui rend la désynchronisation impossible.
+       Valeur initiale : l'ancienne, le temps de la première image. */
+    uSunDir: { value: new THREE.Vector3(28, 40, 20).normalize() },
   });
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, u);
@@ -1298,6 +1301,8 @@ ${GROUND_WANG_GLSL}
       /* Demi-largeur du fondu entre matières : 0.02 = lisière nette,
          0.20 = dégradé large. */
       uniform float uMatEdge;
+      /* Direction du soleil en espace monde, normalisée côté JS. */
+      uniform vec3 uSunDir;
 
       /* Décalages des six centres voisins, en repère de tuile. Ce sont les
          mêmes que NORMALS × 2 × apothème côté JS ; ils sont constants parce
@@ -1347,14 +1352,14 @@ ${GROUND_WANG_GLSL}
            pas comme une forme. La méthode est celle des cartes en relief, et elle
            fonctionne même vue de la verticale — justement le cas ici.
 
-           La direction doit rester alignée sur le soleil de la scène,
-           sun.position = (28, 40, 20) dans main.js. Les deux étant liés par le
-           rendu et non par le code, un changement là-bas doit être répercuté ici,
-           sans quoi les bosses paraîtront éclairées par la gauche et les ombres
-           portées des arbres tomberont vers la droite. */
+           La direction vient de l'uniforme uSunDir, poussée par main.js depuis
+           la position réelle du soleil : sans ça, les bosses s'éclairent d'un
+           côté pendant que les ombres portées tombent de l'autre.
+           (Pas de backtick dans ce commentaire : il vit à l'intérieur d'un
+           template literal, un backtick y fermerait la chaîne GLSL.) */
         /* Hors du bloc conditionnel ci-dessous : la matière de sol s'en sert
            aussi, et elle, elle reste active sur tactile. */
-        const vec3 SUN_DIR = normalize(vec3(28.0, 40.0, 20.0));
+        vec3 SUN_DIR = uSunDir;
         float shade = 0.0;
         /* Hauteur brute, en appui : elle creuse légèrement les cuvettes, à la
            manière d'une occlusion ambiante. Dosée bien plus bas que l'ombrage
@@ -1537,7 +1542,7 @@ ${GROUND_WANG_GLSL}
 
 let _crustMat = null;
 let _crustDepthMat = null;
-const CRUST_V = 5;
+const CRUST_V = 6;   // 6 : passage du toon au PBR
 
 /* La passe d'ombres n'utilise PAS le matériau ci-dessous mais un MeshDepthMaterial
    généré par three.js, qui ignore donc l'étirement de la jupe. Tant qu'il passait
@@ -1602,13 +1607,35 @@ export function setGroundMaterial(biomeKey) {
   else u.uGroundTexAmt.value.set(0, 0, 0);
 }
 
+/**
+ * Aligne le hillshade du sol sur la lumière réelle de la scène.
+ *
+ * Appelé par main.js à chaque déplacement du soleil. Le vecteur est normalisé
+ * ici : le shader l'utilise tel quel, et une longueur différente de 1 fausserait
+ * le terme `dot(n, SUN_DIR) - SUN_DIR.y`.
+ */
+export function setGroundSunDir(v) {
+  const u = getCrustMaterial().userData.groundUniforms;
+  if (u) u.uSunDir.value.copy(v).normalize();
+}
+
 function getCrustMaterial() {
   if (_crustMat && _crustMat.userData.crustV === CRUST_V) return _crustMat;
   if (_crustMat) { _crustMat.dispose(); _crustMat = null; }
-  _crustMat = new THREE.MeshToonMaterial({
-    gradientMap: getCrustGradient(),
+  /* Ex-MeshToonMaterial. Le sol est la surface qui couvre le plus de pixels : la
+     bascule en PBR est plus chère ici que partout ailleurs, mais c'est aussi ici
+     qu'elle rapporte le plus. Le sable est ce qui renvoie la lumière indirecte
+     dans tout le reste du décor — sans lui en PBR, l'IBL n'aurait rien à
+     rebondir.
+
+     Rugosité à 1.0, contrairement au décor : du sable n'a aucune spéculaire, et
+     le moindre reflet large sur une surface aussi vaste se lit immédiatement
+     comme du plastique verni. */
+  _crustMat = new THREE.MeshStandardMaterial({
     vertexColors: true,
     color: 0xffffff,
+    roughness: 1.0,
+    metalness: 0,
     flatShading: false,
   });
   applyGroundDetail(_crustMat, IS_MOBILE);
@@ -1894,7 +1921,7 @@ export function buildRampStairs(scene, island, biomeKey) {
     if (grass) {
       /* Le dessus herbeux des marches, un cran plus sombre que le sol : à teinte
          égale il capte la lumière comme une tuile et la volée disparaît. */
-      color = new THREE.Color(B.ground[1]).offsetHSL(0, 0, -0.07);
+      color = conditionAlbedo(new THREE.Color(B.ground[1])).offsetHSL(0, 0, -0.07);
     } else {
       /* Pierre éclaircie vers le sommet de montagne du biome. mountainBase seul
          donnait des marches presque noires, noyées sous le dessus vert. */

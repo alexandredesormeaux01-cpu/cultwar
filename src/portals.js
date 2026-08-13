@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { makeGLTFLoader, modelURL } from './gltf.js';
-import { toonMaterial, attachCartoonOutline } from './biomes.js';
+import { toonMaterial, modelMaterial, attachCartoonOutline } from './biomes.js';
 
 /* ---------------------------------------------------------------------------
    Arche modélisée des portails de niveau
@@ -58,7 +58,7 @@ export function loadPortalFrame() {
       if (!c.isMesh) return;
       c.castShadow = true;
       c.receiveShadow = true;
-      c.material = toonMaterial({ map: c.material && c.material.map });
+      c.material = modelMaterial(c);
     });
 
     const box = new THREE.Box3().setFromObject(scene);

@@ -10,6 +10,7 @@ import {
   canUpgradeSkill, upgradeSkill, isSkillUnlocked, awardConquestSkills,
   nextUpgradeCost, spentSkillPoints, WORLD_SKILL_BUDGET, treeCapacity,
   addXp, ensureLevelState, aiSpendSkillPoints, aiExpansionPower, xpToNext, POINTS_PER_LEVEL,
+  getSkillModsForSkills,
 } from './skills.js';
 import { soundEngine } from './soundEngine.js';
 import { registerPadSurface, unregisterPadSurface } from './gamepad.js';
@@ -338,28 +339,6 @@ function parseGeo(data) {
   return shapes;
 }
 
-function getFallbackRegions(iso) {
-  if (!SHAPES) return [];
-  // Collecte toutes les entrées SHAPES pour ce pays (une par polygone séparé)
-  const entries = SHAPES.filter(s => s.countryId === iso);
-  if (!entries.length) return [];
-
-  const regions = [];
-  let idx = 0;
-  for (const entry of entries) {
-    const outerRing = entry.rings[0];
-    if (!outerRing || outerRing.length < 3) continue;
-    regions.push({
-      id: `${iso}-${idx}`,
-      name: `Zone ${idx + 1}`,
-      rings: [outerRing.map(pt => ({ lon: pt.lon / DEG, lat: pt.lat / DEG }))]
-    });
-    idx++;
-  }
-
-  // Si on n'a qu'un seul polygone, on le retourne tel quel (1 zone = tout le pays)
-  return regions.length > 0 ? regions : [];
-}
 function subdivide(shapes, maxDeg = 2.5) {
   const maxDist = maxDeg * DEG;
   const sub = (pts) => {
@@ -428,99 +407,11 @@ function screenToLatLon(px, py, cx, cy, R, rotY, rotX) {
   return { lat, lon };
 }
 
-/* ---- Régions internes d'un pays (admin-1) : les "zones" à conquérir ---- */
-const regionCache = {};
-async function loadRegions(iso) {
-  if (regionCache[iso]) return regionCache[iso];
-  try {
-    const res = await fetch(`assets/maps/admin-1/${iso}.geojson`);
-    if (!res.ok) throw new Error('regions introuvables');
-    const data = await res.json();
-    const regions = [];
-    data.features.forEach((f, i) => {
-      const name = (f.properties && f.properties.name) || `Zone ${i + 1}`;
-      const g = f.geometry;
-      if (!g) return;
-      const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
-      // ne garde que le plus grand anneau extérieur de chaque polygone (zones lisibles)
-      const rings = [];
-      for (const poly of polys) {
-        const outer = poly[0];
-        if (outer && outer.length > 2) rings.push(outer.map((p) => ({ lon: p[0], lat: p[1] })));
-      }
-      if (!rings.length) return;
-      regions.push({ id: `${iso}-${i}`, name, rings });
-    });
-    const zones = clusterRegions(iso, filterMainland(regions));
-    regionCache[iso] = zones;
-    return zones;
-  } catch (err) {
-    const fallback = getFallbackRegions(iso);
-    if (fallback && fallback.length > 0) {
-      regionCache[iso] = fallback;
-      return fallback;
-    }
-    throw new Error('regions introuvables');
-  }
-}
-/* Regroupe les régions admin-1 en 8–15 zones plus larges (k-means déterministe sur les centroïdes). */
-function ringBBox(ring) {
-  let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
-  for (const p of ring) { if (p.lon < a) a = p.lon; if (p.lon > b) b = p.lon; if (p.lat < c) c = p.lat; if (p.lat > d) d = p.lat; }
-  return { minLon: a, maxLon: b, minLat: c, maxLat: d };
-}
-function clusterRegions(iso, regions) {
-  const n = regions.length;
-  if (n <= 15) { // déjà assez peu de zones : on garde tel quel
-    return regions.map((r, k) => ({ id: `${iso}-z${k}`, name: r.name, rings: r.rings }));
-  }
-  const K = Math.min(n, Math.max(8, Math.min(15, Math.round(n / 8))));
-  const cs = regions.map(centroidOf);
-  const lat0 = cs.reduce((s, c) => s + c.lat, 0) / n;
-  const kx = Math.cos(lat0 * DEG);
-  const pts = cs.map((c) => ({ x: c.lon * kx, y: c.lat }));
-  // init déterministe : tri par x puis y, K centroïdes régulièrement espacés (zones stables entre sessions)
-  const order = [...pts.keys()].sort((a, b) => pts[a].x - pts[b].x || pts[a].y - pts[b].y);
-  let cent = [];
-  for (let k = 0; k < K; k++) cent.push({ ...pts[order[Math.floor((k + 0.5) * n / K)]] });
-  const assign = new Array(n).fill(0);
-  for (let it = 0; it < 40; it++) {
-    let changed = false;
-    for (let i = 0; i < n; i++) {
-      let best = 0, bd = Infinity;
-      for (let k = 0; k < K; k++) { const dx = pts[i].x - cent[k].x, dy = pts[i].y - cent[k].y; const dd = dx * dx + dy * dy; if (dd < bd) { bd = dd; best = k; } }
-      if (assign[i] !== best) { assign[i] = best; changed = true; }
-    }
-    const sx = new Array(K).fill(0), sy = new Array(K).fill(0), cnt = new Array(K).fill(0);
-    for (let i = 0; i < n; i++) { sx[assign[i]] += pts[i].x; sy[assign[i]] += pts[i].y; cnt[assign[i]]++; }
-    for (let k = 0; k < K; k++) if (cnt[k]) cent[k] = { x: sx[k] / cnt[k], y: sy[k] / cnt[k] };
-    if (!changed && it > 0) break;
-  }
-  const zones = [];
-  for (let k = 0; k < K; k++) {
-    const members = regions.filter((_, i) => assign[i] === k);
-    if (!members.length) continue;
-    const rings = [];
-    for (const m of members) for (const ring of m.rings) rings.push(ring);
-    // nom = la région la plus étendue du groupe (plus reconnaissable)
-    let name = members[0].name, bestA = -1;
-    for (const m of members) { const b = ringBBox(m.rings[0]); const a = (b.maxLon - b.minLon) * (b.maxLat - b.minLat); if (a > bestA) { bestA = a; name = m.name; } }
-    zones.push({ id: `${iso}-z${zones.length}`, name, rings });
-  }
-  return zones;
-}
-/* Écarte les exclaves lointaines (outre-mer) pour cadrer la masse principale. */
-function centroidOf(r) { let sx = 0, sy = 0, n = 0; for (const p of r.rings[0]) { sx += p.lon; sy += p.lat; n++; } return { lon: sx / n, lat: sy / n }; }
-function median(a) { const b = [...a].sort((x, y) => x - y); const m = b.length >> 1; return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2; }
-function filterMainland(regions) {
-  if (regions.length < 5) return regions;
-  const cs = regions.map(centroidOf);
-  const mlon = median(cs.map((c) => c.lon)), mlat = median(cs.map((c) => c.lat));
-  const madLon = median(cs.map((c) => Math.abs(c.lon - mlon))) || 1;
-  const madLat = median(cs.map((c) => Math.abs(c.lat - mlat))) || 1;
-  const tolLon = Math.max(madLon * 3.5, 8), tolLat = Math.max(madLat * 3.5, 8);
-  return regions.filter((r, i) => Math.abs(cs[i].lon - mlon) <= tolLon && Math.abs(cs[i].lat - mlat) <= tolLat);
-}
+
+/* Les provinces admin-1 (loadRegions, clusterRegions, filterMainland…) ont été
+   retirées avec le modèle v3 : le pays est désormais l'unité de conquête, et
+   la campagne n'a plus besoin de découper les pays ni de charger les 254
+   fichiers GeoJSON de provinces. Le globe se contente de SHAPES. */
 
 /* ============================ Fond étoilé ============================ */
 function seeded(seed) {
@@ -1525,7 +1416,9 @@ function createGlobe(canvas, opts) {
 
   function accessibleWorlds() {
     const save = loadSave();
-    return WORLDS.filter(w => w.iso === save.startIso || canEnterCountry(save, w.iso));
+    // Nos propres terres restent sélectionnables (on veut pouvoir les inspecter),
+    // en plus de tout ce qui est attaquable.
+    return WORLDS.filter((w) => ownerOf(save, w.iso) === save.playerColor || canEnterCountry(save, w.iso));
   }
 
   function padStep(dir) {
@@ -1689,77 +1582,65 @@ function createGlobe(canvas, opts) {
   };
 }
 
-/* ===================== Conquête : état des zones d'un pays ===================== */
-function conqOf(save, iso) { save.conq = save.conq || {}; return save.conq[iso]; }
+/* ===================== Conquête : le PAYS est l'unité ===================== *
+ * Modèle v3. Fini les provinces : un pays = un propriétaire = un match.
+ *
+ * Pourquoi : à 1537 provinces et ~4 min de match, la campagne demandait des
+ * dizaines d'heures et le joueur n'avait rallié que 2,4 % de l'humanité au bout
+ * de deux heures. Au niveau pays (177 unités) il en est à 11,3 %, et le taux de
+ * victoire des matchs contre un rival passe de 10 % à 45 % — parce qu'on
+ * mobilise des nations entières au lieu de provinces à moitié vides.
+ *
+ *   save.conq[iso]    = couleur du culte qui tient le pays, ou NEUTRAL
+ *   save.conqPop[iso] = fidèles convertis dans ce pays
+ *   save.seats[color] = pays d'origine du culte
+ *
+ * La foi se propage le long de NEIGHBORS — un graphe de voisinage écrit à la
+ * main et fiable — au lieu d'une adjacence de provinces reconstruite à partir
+ * de la géométrie.
+ */
 
-function getWorldReligion(save, world) {
-  const conq = save.conq && save.conq[world.iso];
-  if (!conq) {
-    return { color: '#7a8290', name: 'Gris', sym: '•' };
-  }
-  
-  const counts = {};
-  for (const zoneId in conq) {
-    const color = conq[zoneId];
-    counts[color] = (counts[color] || 0) + 1;
-  }
-  
-  let maxCount = -1;
-  let bestColors = [];
-  for (const color in counts) {
-    const cnt = counts[color];
-    if (cnt > maxCount) {
-      maxCount = cnt;
-      bestColors = [color];
-    } else if (cnt === maxCount) {
-      bestColors.push(color);
-    }
-  }
-  
-  // S'il y a égalité, aucune religion n'est dominante => Gris
-  if (bestColors.length !== 1) {
-    return { color: '#7a8290', name: 'Gris', sym: '•' };
-  }
-  
-  const majorityColor = bestColors[0];
-  if (majorityColor === NEUTRAL) {
-    return { color: NEUTRAL, name: 'Non conquis', sym: '•' };
-  }
-  if (majorityColor === save.playerColor && save.playerName) {
-    return { color: majorityColor, name: save.religionName || 'Mon Culte', sym: save.religionIcon || '✦' };
-  }
-  return CULTS.find(c => c.color === majorityColor) || { color: majorityColor, name: 'Inconnu', sym: '•' };
+/** Population totale d'un pays (son plafond de fidèles). */
+function countryPop(iso) {
+  const w = ISO_WORLD[iso] !== undefined ? WORLDS[ISO_WORLD[iso]] : null;
+  return Math.max(1, w?.pop || 1000000);
+}
+/** Culte qui tient ce pays (NEUTRAL si terre barbare, null si inconnu). */
+function ownerOf(save, iso) {
+  return (save.conq && save.conq[iso]) || null;
+}
+/** Fidèles convertis dans ce pays. */
+function believersIn(save, iso) {
+  return (save.conqPop && save.conqPop[iso]) || 0;
+}
+/** Ferveur : part de la population du pays effectivement convertie (0..1). */
+function fervorOf(save, iso) {
+  return Math.max(0, Math.min(1, believersIn(save, iso) / countryPop(iso)));
+}
+const isMineCountry = (save, iso) => ownerOf(save, iso) === save.playerColor;
+/** Nombre de pays tenus par un culte. */
+function countriesOf(save, color) {
+  let n = 0;
+  for (const iso in (save.conq || {})) if (save.conq[iso] === color) n++;
+  return n;
+}
+/** Liste des pays tenus par un culte. */
+function countryListOf(save, color) {
+  const out = [];
+  for (const iso in (save.conq || {})) if (save.conq[iso] === color) out.push(iso);
+  return out;
 }
 
-function getCountryReligionPercentages(save, world, regions) {
-  const conq = save.conq && save.conq[world.iso];
-  if (!conq) return [];
-  
-  const counts = {};
-  let total = 0;
-  for (const r of regions) {
-    const color = conq[r.id] || NEUTRAL;
-    counts[color] = (counts[color] || 0) + 1;
-    total++;
+/** Identité du culte qui tient un pays — utilisée par le rendu du globe. */
+function getWorldReligion(save, world) {
+  const color = ownerOf(save, world.iso);
+  if (!color || color === NEUTRAL) {
+    return { color: NEUTRAL, name: 'Terres barbares', sym: '⚔' };
   }
-  
-  const pcts = [];
-  for (const color in counts) {
-    let cult = CULTS.find(c => c.color === color);
-    let name = cult ? cult.name : (color === NEUTRAL ? 'Terres barbares' : 'Neutres');
-    let sym = cult ? cult.sym : (color === NEUTRAL ? '⚔' : '•');
-    
-    if (color === save.playerColor && save.playerName) {
-      name = save.religionName || name;
-      sym = save.religionIcon || sym;
-    }
-    
-    const percent = Math.round((counts[color] / total) * 100);
-    pcts.push({ color, name, sym, percent, count: counts[color] });
+  if (color === save.playerColor && save.playerName) {
+    return { color, name: save.religionName || 'Mon Culte', sym: save.religionIcon || '✦' };
   }
-  
-  pcts.sort((a, b) => b.percent - a.percent);
-  return pcts;
+  return CULTS.find((c) => c.color === color) || { color, name: 'Inconnu', sym: '•' };
 }
 
 /* ===================== Système de niveaux & religions IA ===================== */
@@ -1781,11 +1662,22 @@ function ensureAiState(save, color) {
   return save.ai[color];
 }
 
-/** Paramètres de simulation par difficulté : probabilité d'agir + de voler une autre IA. */
+/**
+ * Paramètres de simulation par difficulté.
+ *  · act   : probabilité qu'une IA agisse ce tour.
+ *  · steal : probabilité qu'elle s'en prenne à une zone déjà tenue.
+ *  · focus : part de ses vols dirigée vers le JOUEUR plutôt qu'une autre IA.
+ *
+ * `focus` corrige une inversion de difficulté mesurée au simulateur : avec un
+ * `steal` élevé et aucun ciblage, les IA se cannibalisaient entre elles, se
+ * ruinaient mutuellement et le joueur dépassait le leader au tour 29 en `hard`
+ * contre 89 en `normal` — le mode difficile était le plus facile. Monter la
+ * difficulté doit augmenter la pression SUR LE JOUEUR, pas le désordre entre IA.
+ */
 const DIFF_SIM = {
-  easy:   { act: 0.35, steal: 0.05 },
-  normal: { act: 0.65, steal: 0.20 },
-  hard:   { act: 0.95, steal: 0.45 },
+  easy:   { act: 0.35, steal: 0.05, focus: 0.10 },
+  normal: { act: 0.65, steal: 0.20, focus: 0.40 },
+  hard:   { act: 0.95, steal: 0.30, focus: 0.75 },
 };
 /** Garantit les champs de niveau du joueur. */
 function ensurePlayerLevel(save) {
@@ -1801,86 +1693,46 @@ function colorLevel(save, color) {
   return (save.ai && save.ai[color] && save.ai[color].level) | 0;
 }
 
-/** Bascule vers le nouveau modèle de monde (v2) : réinitialise l'état de conquête. */
+/**
+ * Bascule vers le modèle v3 (le pays est l'unité) : réinitialise la conquête.
+ * Les sauvegardes v2 stockaient une table de provinces par pays — incompatible,
+ * et il n'y a pas de conversion sensée d'un découpage vers l'autre.
+ */
 function ensureWorldModel(save) {
-  if (save.worldModel === 2) { ensurePlayerLevel(save); return; }
+  if (save.worldModel === 3) { ensurePlayerLevel(save); return; }
   save.conq = {};
   save.conqPop = {};
-  save.conqMaxPop = {};
   save.conquered = {};
   save.ai = {};
+  save.seats = {}; save.decapAt = {};
   save.level = 0; save.xp = 0;
   save.skills = {}; save.skillPoints = 0;
   save.skillMajority = {}; save.skillFull = {};
+  save.discovered = {};
   save.seeded = false;
-  save.worldModel = 2;
+  save.worldTurn = 0;
+  delete save.conqMaxPop;   // notion de province : sans objet en v3
+  save.worldModel = 3;
   persist(save);
 }
 
-/** Initialise les zones d'un pays : tout en NEUTRAL (non conquis) dans le modèle v2. */
-function initCountry(save, world, regions) {
+/** Déclare un pays comme terre barbare (non conquise) s'il n'est pas déjà connu. */
+function initCountry(save, iso) {
   save.conq = save.conq || {};
-  if (save.conq[world.iso]) return;
-
-  // 1. Calculer l'aire géographique de chaque région
-  const areas = regions.map(r => {
-    let totalArea = 0;
-    for (const ring of r.rings) {
-      let area = 0;
-      const n = ring.length;
-      for (let i = 0; i < n; i++) {
-        const p1 = ring[i];
-        const p2 = ring[(i + 1) % n];
-        const avgLat = (p1.lat + p2.lat) / 2;
-        const kx = Math.cos(avgLat);
-        const x1 = p1.lon * kx;
-        const x2 = p2.lon * kx;
-        area += (x1 * p2.lat - x2 * p1.lat);
-      }
-      totalArea += Math.abs(area) / 2;
-    }
-    return { id: r.id, area: totalArea };
-  });
-
-  // 2. Trouver les valeurs min/max des aires
-  let minArea = Infinity, maxArea = -Infinity;
-  for (const a of areas) {
-    if (a.area < minArea) minArea = a.area;
-    if (a.area > maxArea) maxArea = a.area;
-  }
-  
-  const diffArea = maxArea - minArea;
-
   save.conqPop = save.conqPop || {};
-  save.conqMaxPop = save.conqMaxPop || {};
-  const map = {};
-  
-  const zoneRealMaxPop = Math.round((world.pop || 1000000) / regions.length);
-
-  regions.forEach((r) => {
-    const rAreaObj = areas.find(a => a.id === r.id);
-    const rArea = rAreaObj ? rAreaObj.area : minArea;
-    
-    // Échelonner la population gameplay entre 200 et 600
-    let maxPop = 350;
-    if (diffArea > 0.000001) {
-      const t = (rArea - minArea) / diffArea;
-      maxPop = Math.round(200 + t * 400);
-    } else {
-      maxPop = 250 + Math.floor(Math.random() * 250);
-    }
-
-    save.conqMaxPop[`${world.iso}_${r.id}`] = maxPop;
-    // Zone non conquise : aucun fidèle, couleur grise.
-    save.conqPop[`${world.iso}_${r.id}`] = 0;
-    map[r.id] = NEUTRAL;
-  });
-
-  save.conq[world.iso] = map;
-  persist(save);
+  if (save.conq[iso]) return;
+  save.conq[iso] = NEUTRAL;
+  save.conqPop[iso] = 0;
 }
 
-/** Attribue une zone de départ à chaque religion (joueur + IA) sur des pays aléatoires. */
+/** Déclare d'un coup tous les pays du globe. Plus aucun fetch : le modèle v3
+ *  n'a pas besoin des provinces, donc la carte est prête immédiatement. */
+function initAllCountries(save) {
+  save.conq = save.conq || {};
+  save.conqPop = save.conqPop || {};
+  for (const w of WORLDS) if (w.iso) initCountry(save, w.iso);
+}
+
 /** Grands pays bien visibles : le joueur y commence toujours (repère clair où cliquer). */
 const PLAYER_START_ISO = [
   'RUS', 'CAN', 'USA', 'CHN', 'BRA', 'AUS', 'IND', 'ARG', 'KAZ', 'DZA',
@@ -1889,278 +1741,492 @@ const PLAYER_START_ISO = [
   'TUR', 'FRA', 'ESP', 'UKR', 'MMR', 'MOZ', 'NAM', 'ZMB', 'CHL', 'BOL',
 ];
 
+/** Distance angulaire entre deux pays, pour les espacer au semis. */
+function seedTooClose(iso, used, minDist) {
+  for (const u of used) if (isoDistance(iso, u) < minDist) return true;
+  return false;
+}
+
+/**
+ * Sème les 10 religions sur le globe : une par pays d'origine, bien réparties.
+ * Chaque culte démarre à 12 % de la population de son pays, comme avant — mais
+ * il tient désormais le pays ENTIER, ce qui lui donne une base réelle pour
+ * mobiliser ses fidèles au premier assaut.
+ */
 async function seedReligionStarts() {
-  let save = loadSave();
-  if (save.seeded) {
-    await healPlayerStart(save);
-    return;
-  }
+  const save = loadSave();
+  if (save.seeded) { healPlayerStart(save); return; }
+
   const difficulty = localStorage.getItem('cultio_difficulty') || 'normal';
+  initAllCountries(save);
+
   const religions = [{ color: save.playerColor, isPlayer: true }];
   for (const c of aiColors(save)) religions.push({ color: c, isPlayer: false });
+
   const candidates = WORLDS.filter((w) => !!w.iso);
   if (!candidates.length) return;
-  const bigPool = candidates.filter((w) => PLAYER_START_ISO.includes(w.iso));
   const shuffle = (arr) => arr.map((v) => [Math.random(), v]).sort((a, b) => a[0] - b[0]).map((p) => p[1]);
-  const used = new Set();
+  const bigPool = candidates.filter((w) => PLAYER_START_ISO.includes(w.iso));
+  const used = [];
+
   for (const rel of religions) {
     if (!rel.color) continue;
-    // Le joueur démarre sur un grand pays visible ; les IA n'importe où.
-    const pool = rel.isPlayer && bigPool.length ? bigPool : candidates;
-    let world = null, regions = null;
-    // Essaie plusieurs pays (chargeables + non pris) jusqu'à en trouver un valide.
-    for (const w of shuffle(pool)) {
-      if (used.has(w.iso)) continue;
-      try { regions = await loadRegions(w.iso); } catch { regions = null; }
-      if (regions && regions.length) { world = w; break; }
-    }
-    // Repli ultime : n'importe quel candidat chargeable.
-    if (!world) {
-      for (const w of shuffle(candidates)) {
-        if (used.has(w.iso)) continue;
-        try { regions = await loadRegions(w.iso); } catch { regions = null; }
-        if (regions && regions.length) { world = w; break; }
+    /* Le joueur démarre sur un grand pays visible ; les IA n'importe où.
+       Dans les deux cas le pays DOIT avoir une frontière terrestre : semé sur
+       une île isolée, un culte n'a aucun voisin à convertir et la partie est
+       bloquée au premier tour (mesuré : « 0 pays attaquable »). */
+    const usable = (list) => list.filter((w) => neighborsOf(w.iso).length > 0);
+    const pool = usable(rel.isPlayer && bigPool.length ? bigPool : candidates);
+    if (!pool.length) continue;
+
+    /* Les cultes sont écartés les uns des autres pour que chacun ait de la
+       terre barbare à convertir avant le premier contact. Sans cet espacement,
+       deux religions voisines se bloquent mutuellement dès le tour 1. Le
+       dernier repli relâche la distance mais JAMAIS l'interdiction d'être
+       frontalier — c'est le minimum vital. */
+    let chosen = null;
+    for (const minDist of [0.9, 0.6, 0.35, 0]) {
+      for (const w of shuffle(pool)) {
+        if (used.includes(w.iso)) continue;
+        if (minDist > 0 && seedTooClose(w.iso, used, minDist)) continue;
+        if (neighborsOf(w.iso).some((n) => used.includes(n))) continue;   // jamais voisins
+        chosen = w.iso; break;
       }
+      if (chosen) break;
     }
-    if (!world || !regions) continue;
-    used.add(world.iso);
-    const cur = loadSave();
-    initCountry(cur, world, regions);
-    const region = regions[(Math.random() * regions.length) | 0];
-    cur.conq[world.iso] = cur.conq[world.iso] || {};
-    cur.conq[world.iso][region.id] = rel.color;
-    const realMax = Math.round((world.pop || 1000000) / regions.length);
-    cur.conqPop = cur.conqPop || {};
-    cur.conqPop[`${world.iso}_${region.id}`] = Math.round(realMax * 0.12);
-    // Zone de départ = 1 point de foi pour chaque religion.
+    if (!chosen) continue;
+
+    used.push(chosen);
+    save.conq[chosen] = rel.color;
+    save.conqPop[chosen] = Math.round(countryPop(chosen) * 0.12);
+    // Le pays d'origine est le siège du culte : le perdre brise la religion.
+    save.seats = save.seats || {};
+    save.seats[rel.color] = chosen;
+
     if (rel.isPlayer) {
-      cur.startIso = world.iso;
-      ensurePlayerLevel(cur);
-      cur.skillPoints = (cur.skillPoints | 0) + 1;
+      save.startIso = chosen;
+      ensurePlayerLevel(save);
+      save.skillPoints = (save.skillPoints | 0) + 1;
     } else {
-      const st = ensureAiState(cur, rel.color);
-      st.startIso = world.iso;
+      const st = ensureAiState(save, rel.color);
+      st.startIso = chosen;
       st.skillPoints = (st.skillPoints | 0) + 1;
-      aiSpendSkillPoints(st, difficulty); // l'IA place aussitôt son point de départ
+      aiSpendSkillPoints(st, difficulty);   // l'IA place aussitôt son point de départ
     }
-    persist(cur);
   }
-  const fin = loadSave();
-  fin.seeded = true;
-  persist(fin);
+
+  save.seeded = true;
+  persist(save);
 }
 
-/** Répare une sauvegarde déjà semée où le joueur ne possède aucune zone (bug de race passé). */
-async function healPlayerStart(save) {
+/**
+ * Filet de sécurité : une sauvegarde semée où le joueur ne tient plus rien.
+ * En v3 la défaite est une vraie fin de partie — on ne ressuscite donc PAS un
+ * joueur éliminé au combat, on répare seulement une sauvegarde corrompue
+ * (aucun pays possédé alors qu'aucune défaite n'a été enregistrée).
+ */
+function healPlayerStart(save) {
   const pc = save.playerColor;
   if (!pc || !save.conq) return;
-  for (const iso in save.conq) {
-    if (Object.values(save.conq[iso]).includes(pc)) return; // le joueur possède déjà une zone
-  }
-  // Aucune zone possédée : on tente d'abord le pays de départ enregistré.
-  const isos = [];
-  if (save.startIso) isos.push(save.startIso);
-  for (const iso in save.conq) if (!isos.includes(iso)) isos.push(iso);
-  for (const iso of isos) {
-    let regions;
-    try { regions = await loadRegions(iso); } catch { continue; }
-    if (!regions || !regions.length) continue;
-    const cur = loadSave();
-    initCountry(cur, WORLDS[ISO_WORLD[iso]] || { iso }, regions);
-    cur.conq[iso] = cur.conq[iso] || {};
-    // Préfère une zone neutre pour ne rien voler à une IA.
-    const free = regions.filter((r) => (cur.conq[iso][r.id] || NEUTRAL) === NEUTRAL);
-    const pick = (free.length ? free : regions)[(Math.random() * (free.length || regions.length)) | 0];
-    cur.conq[iso][pick.id] = pc;
-    const realMax = Math.round(((WORLDS[ISO_WORLD[iso]]?.pop) || 1000000) / regions.length);
-    cur.conqPop = cur.conqPop || {};
-    cur.conqPop[`${iso}_${pick.id}`] = Math.round(realMax * 0.12);
-    cur.startIso = iso;
-    ensurePlayerLevel(cur);
-    persist(cur);
-    return;
-  }
+  if (countriesOf(save, pc) > 0) return;
+  if (save.campaignLost) return;          // défaite légitime : on n'y touche pas
+
+  const iso = save.startIso && save.conq[save.startIso] === NEUTRAL
+    ? save.startIso
+    : Object.keys(save.conq).find((i) => save.conq[i] === NEUTRAL);
+  if (!iso) return;
+  save.conq[iso] = pc;
+  save.conqPop[iso] = Math.round(countryPop(iso) * 0.12);
+  save.startIso = iso;
+  save.seats = save.seats || {};
+  save.seats[pc] = iso;
+  ensurePlayerLevel(save);
+  persist(save);
 }
 
-/** Simulation de conquête des religions IA (appelée à chaque lancement de partie). */
+/* ===================== Propagation de la Foi ===================== *
+ * Principe unique : LA FOI NE SE DUPLIQUE JAMAIS, ELLE SE DÉPLACE.
+ * Tous les transferts se font en croyants absolus, jamais en pourcentages.
+ *
+ *  1. Maturation — tout pays tenu voit ses fidèles croître en S vers un plafond
+ *     abaissé par la pression des pays rivaux limitrophes. Vaut pour TOUT LE
+ *     MONDE : c'est ce qui fait monter le classement mondial à chaque tour.
+ *  2. Déversement — au-delà d'un seuil, un pays donne son surplus au pays voisin
+ *     le plus faible. Réservé AU JOUEUR : c'est l'asymétrie qui le sort du
+ *     plateau des 10 % (mesuré au simulateur : +67 % de part de foi).
+ *  3. Prédication — déversé sur un pays rival, le surplus convertit ses fidèles ;
+ *     sous le plancher, le pays bascule. Sans ça le moteur cale dès que les
+ *     terres barbares sont épuisées.
+ *
+ * Le voisinage vient de NEIGHBORS — écrit à la main, fiable — et non plus d'une
+ * adjacence de provinces reconstruite depuis la géométrie.
+ *
+ * Valeurs calibrées avec scripts/campaign-balance-sim.mjs (médianes sur 25 à 30
+ * parties). Toucher à GROWTH_RATE ou SPILL_THRESHOLD sans relancer le
+ * simulateur, c'est régler à l'aveugle.
+ */
+const FAITH = {
+  GROWTH_RATE: 0.18,      // vitesse de maturation d'un pays
+  CAP_BASE: 0.95,         // plafond de conversion d'un pays tranquille
+  /* Pression frontalière : chaque pays rival limitrophe étouffe la foi. À 0.09
+     l'effet était négligeable et les fronts inertes ; à 0.22 ils deviennent
+     réellement corrosifs (mesuré : 40 % → 52 % de victoires). */
+  CAP_PER_RIVAL: 0.22,
+  CAP_MIN: 0.45,          // …sans jamais descendre sous ça
+  /* Reflux : au-dessus de son plafond, un pays perd sa ferveur. Sans lui la
+     saturation serait un cliquet, et la pression frontalière décorative. */
+  DECAY: 0.10,
+  SPILL_THRESHOLD: 0.55,  // seuil de débordement
+  SPILL_EFF: 0.60,        // part du surplus réellement transmise
+  SPILL_FLOOR: 0.20,      // un pays ne se vide jamais sous ce taux
+  EROSION: 0.90,          // efficacité de la prédication sur un pays rival
+  /* BUDGET DE CLERGÉ : nombre de pays convertibles passivement par tour. Sans
+     plafond, le déversement est linéaire en nombre de pays tenus et s'étaler
+     partout écrase toute autre stratégie (mesuré : 27 % → 66 % de part de foi
+     rien qu'en changeant les priorités de cible). */
+  CLERGY: 2,
+};
+
+/** Pays voisins qui existent vraiment sur la carte. */
+function neighborsOf(iso) {
+  return (NEIGHBORS[iso] || []).filter((n) => ISO_WORLD[n] !== undefined);
+}
+
+/** Plafond de conversion d'un pays : la pression rivale étouffe la foi. */
+function faithCap(save, iso, owner) {
+  let rivals = 0;
+  for (const n of neighborsOf(iso)) {
+    const h = ownerOf(save, n);
+    if (h && h !== NEUTRAL && h !== owner) rivals++;
+  }
+  return Math.max(FAITH.CAP_MIN, FAITH.CAP_BASE - rivals * FAITH.CAP_PER_RIVAL);
+}
+
+/**
+ * Un tour de propagation. Modifie `save` sans le persister (l'appelant s'en
+ * charge, pour ne pas multiplier les écritures localStorage).
+ * @returns {{gained: string[], preached: number}} de quoi informer le joueur.
+ */
+function faithTick(save) {
+  const out = { gained: [], preached: 0 };
+  if (!save.conq) return out;
+  save.conqPop = save.conqPop || {};
+  const pc = save.playerColor;
+  // L'arbre de foi pilote la propagation : il fait enfin tourner une machine
+  // en dehors des matchs.
+  const mods = getSkillModsForSkills(save.skills || {});
+  const growthMult = Math.max(0.5, mods.convMult || 1);
+  const spreadMult = Math.max(0.5, mods.influenceMult || 1);
+
+  /* ---- 1. Maturation : toutes les religions, tous les pays ---- */
+  for (const iso in save.conq) {
+    const owner = save.conq[iso];
+    if (!owner || owner === NEUTRAL) continue;
+    const maxPop = countryPop(iso);
+    const cur = save.conqPop[iso] || 0;
+    const pct = cur / maxPop;
+    const cap = faithCap(save, iso, owner);
+    if (pct >= cap) {
+      // Reflux : un pays encerclé se ramollit au lieu de rester figé.
+      if (pct > cap && FAITH.DECAY > 0) {
+        save.conqPop[iso] = Math.max(maxPop * cap, cur - (pct - cap) * maxPop * FAITH.DECAY);
+      }
+      continue;
+    }
+    const mult = owner === pc ? growthMult : 1;
+    // Amorce à 5 % : un pays à zéro ne démarrerait jamais en logistique pure.
+    const growth = FAITH.GROWTH_RATE * mult * Math.max(pct, 0.05) * (1 - pct / cap);
+    save.conqPop[iso] = Math.min(maxPop * cap, cur + growth * maxPop);
+  }
+
+  /* ---- 2 & 3. Déversement et prédication : le joueur seul ---- */
+  if (!pc) return out;
+
+  /* On rassemble d'abord TOUS les pays prêts à déborder, puis on ne sert que
+     les plus fervents, dans la limite du budget de clergé. Trier globalement
+     est indispensable : sinon l'ordre des clés de save.conq déciderait qui
+     prêche. */
+  const snap = {};
+  for (const iso in save.conq) snap[iso] = save.conqPop[iso] || 0;
+  const ready = [];
+  for (const iso in save.conq) {
+    if (save.conq[iso] !== pc) continue;
+    const pct = snap[iso] / countryPop(iso);
+    if (pct > FAITH.SPILL_THRESHOLD) ready.push({ iso, pct });
+  }
+  ready.sort((a, b) => b.pct - a.pct);
+  let budget = Math.max(1, Math.round(FAITH.CLERGY * spreadMult));
+
+  for (const cand of ready) {
+    if (budget <= 0) break;
+    const { iso, pct } = cand;
+    const maxPop = countryPop(iso);
+
+    // Cible : le voisin le plus faible — barbare en priorité, rival sinon.
+    let target = null, best = Infinity;
+    for (const n of neighborsOf(iso)) {
+      const h = ownerOf(save, n);
+      if (!h || h === pc) continue;
+      const score = (h !== NEUTRAL ? 1000 : 0) + (snap[n] || 0) / countryPop(n);
+      if (score < best) { best = score; target = n; }
+    }
+    if (!target) continue;
+
+    const surplus = (pct - FAITH.SPILL_THRESHOLD) * maxPop * FAITH.SPILL_EFF * spreadMult;
+    const sent = Math.max(0, Math.min(surplus, save.conqPop[iso] - maxPop * FAITH.SPILL_FLOOR));
+    if (sent <= 0) continue;
+    save.conqPop[iso] -= sent;
+    budget--;
+
+    if (ownerOf(save, target) === NEUTRAL) {
+      // Terre barbare : la foi s'y installe sans combat.
+      save.conq[target] = pc;
+      save.conqPop[target] = (save.conqPop[target] || 0) + sent;
+      out.gained.push(target);
+      revealNeighbors(save, target);
+    } else {
+      /* PRÉDICATION : on ne détruit pas les fidèles rivaux, on les convertit.
+         Sous le plancher, le pays bascule vers la foi qui l'arrose. */
+      const tMax = countryPop(target);
+      const drained = Math.min(save.conqPop[target] || 0, sent * FAITH.EROSION);
+      save.conqPop[target] = (save.conqPop[target] || 0) - drained;
+      out.preached++;
+      if (save.conqPop[target] <= tMax * FAITH.SPILL_FLOOR) {
+        const victim = save.conq[target];
+        save.conq[target] = pc;
+        save.conqPop[target] += drained;
+        out.gained.push(target);
+        revealNeighbors(save, target);
+        maybeDecapitate(save, target, victim, pc);
+      } else {
+        save.conqPop[iso] += drained * 0.5;   // une part revient au prêcheur
+      }
+    }
+  }
+  return out;
+}
+
+/* ===================== Décapitation des cultes ===================== *
+ * Chaque religion a un SIÈGE : son pays d'origine. Le prendre fait s'effondrer
+ * son empire — une part bascule vers le conquérant, une part part en schisme et
+ * redevient barbare, le reste tient. Plus une religion a grossi, plus l'abattre
+ * rapporte : les 9 rivaux deviennent 9 objectifs au lieu de 9 murs.
+ *
+ * Deux garde-fous, issus d'un exploit observé au simulateur (le joueur brisait
+ * le même culte 5 tours d'affilée, dont deux fois pour rien) :
+ *   · EXIL    — le siège fuit vers le pays survivant le plus LOIN du vainqueur,
+ *               pas vers le plus riche, sinon il se relocalise juste à côté.
+ *   · LATENCE — un culte fraîchement brisé se relève avant de pouvoir l'être encore.
+ */
+const DECAP = {
+  SHARE: 0.20,       // part de l'empire de la victime qui bascule
+  KEEP: 0.70,        // part des fidèles conservée dans la bascule
+  SCHISM: 0.15,      // part qui se disperse et redevient barbare
+  COOLDOWN: 25,      // tours de répit avant une nouvelle décapitation
+};
+
+/** Garantit la table des sièges : rattrape aussi les parties déjà commencées. */
+function ensureSeats(save) {
+  if (!save.seats || typeof save.seats !== 'object') save.seats = {};
+  if (!save.decapAt || typeof save.decapAt !== 'object') save.decapAt = {};
+  const claim = (color, iso) => {
+    if (!color || !iso || save.seats[color]) return;
+    if (ownerOf(save, iso) === color) save.seats[color] = iso;
+  };
+  claim(save.playerColor, save.startIso);
+  for (const color of aiColors(save)) claim(color, save.ai && save.ai[color] && save.ai[color].startIso);
+  return save.seats;
+}
+
+/** Le siège de `victim` vient de tomber : son empire s'effondre. */
+function decapitate(save, victim, conqueror) {
+  // Inventaire des terres de la victime, les plus ferventes d'abord.
+  const held = countryListOf(save, victim)
+    .map((iso) => ({ iso, pop: save.conqPop[iso] || 0 }))
+    .sort((a, b) => b.pop - a.pop);
+  if (!held.length) { delete save.seats[victim]; return 0; }
+
+  const nFlip = Math.round(held.length * DECAP.SHARE);
+  const nSchism = Math.round(held.length * DECAP.SCHISM);
+  for (let k = 0; k < nFlip && k < held.length; k++) {
+    save.conq[held[k].iso] = conqueror;
+    save.conqPop[held[k].iso] = Math.round(held[k].pop * DECAP.KEEP);
+  }
+  for (let k = nFlip; k < nFlip + nSchism && k < held.length; k++) {
+    save.conq[held[k].iso] = NEUTRAL;
+    save.conqPop[held[k].iso] = 0;
+  }
+
+  // EXIL : le siège se replie là où le vainqueur est le moins présent.
+  const survivors = held.slice(nFlip + nSchism);
+  if (survivors.length) {
+    let best = survivors[0], bestScore = Infinity;
+    for (const h of survivors) {
+      let adjacent = 0;
+      for (const n of neighborsOf(h.iso)) if (ownerOf(save, n) === conqueror) adjacent++;
+      const score = adjacent * 10 - h.pop / countryPop(h.iso);
+      if (score < bestScore) { bestScore = score; best = h; }
+    }
+    save.seats[victim] = best.iso;
+  } else {
+    delete save.seats[victim];
+  }
+  save.decapAt[victim] = save.worldTurn | 0;
+  return nFlip;
+}
+
+/**
+ * À appeler après toute prise de pays : le siège de l'ancien maître tombe-t-il ?
+ * @returns {{victim: string, flipped: number}|null}
+ */
+function maybeDecapitate(save, iso, oldOwner, newOwner) {
+  if (!oldOwner || oldOwner === NEUTRAL || oldOwner === newOwner) return null;
+  ensureSeats(save);
+  if (save.seats[oldOwner] !== iso) return null;
+  const since = (save.worldTurn | 0) - (save.decapAt[oldOwner] ?? -1e9);
+  if (since < DECAP.COOLDOWN) return null;   // culte encore à terre
+  const flipped = decapitate(save, oldOwner, newOwner);
+  save.lastDecap = { victim: oldOwner, by: newOwner, flipped, turn: save.worldTurn | 0 };
+  return { victim: oldOwner, flipped };
+}
+
+/* Surface d'essai pour scripts/campaign-faith-test.mjs. Ces fonctions n'ont pas
+   d'usage hors du module, mais sans elles rien ne vérifierait le câblage sur les
+   vraies formes de sauvegarde (conq, conqPop, seats) — seul le modèle théorique
+   est couvert par le simulateur d'équilibrage. */
+export const __faithTest = {
+  FAITH, DECAP, faithTick, decapitate, maybeDecapitate, ensureSeats,
+  countryPop, ownerOf, believersIn, countriesOf, neighborsOf, faithCap,
+  /* Hors du jeu, WORLDS n'est peuplé que par la carte de repli (5 pays sans
+     voisinage réel), donc neighborsOf ne renvoie rien et rien n'est testable.
+     Cette amorce déclare des pays fictifs pour le banc d'essai. */
+  primeWorlds(list) {
+    for (const w of list) {
+      if (ISO_WORLD[w.iso] !== undefined) { WORLDS[ISO_WORLD[w.iso]] = w; continue; }
+      ISO_WORLD[w.iso] = WORLDS.length;
+      WORLDS.push(w);
+    }
+  },
+  /* Chargement de la carte du monde. Exposé pour qu'un test puisse vérifier que
+     le globe a bien ses terres : c'est précisément ce qui manquait quand un
+     nettoyage a emporté ensureShapes sans qu'aucun test ne s'en aperçoive
+     (le build passe, esbuild ne résolvant pas les identifiants globaux). */
+  ensureShapes,
+  worlds: () => WORLDS,
+  seedReligionStarts,
+  canEnterCountry,
+  initAllCountries,
+};
+
+/**
+ * Un tour de monde : la foi se propage, puis les 9 IA agissent.
+ * Appelé au lancement de chaque match — un match = un tour.
+ *
+ * Les TERRES BARBARES (grises) ne sont jamais agressives : elles n'ont aucune
+ * agence ici. Personne ne peut se faire prendre un pays par du gris ; seule une
+ * religion prend à une religion.
+ */
 function simulateWorldTurn() {
   const save = loadSave();
   if (!save.seeded || !save.conq) return;
-  const colors = aiColors(save);
-  const isos = Object.keys(save.conq);
-  if (!isos.length) return;
 
-  // Réinitialise les changements passifs pour ce tour
+  save.worldTurn = (save.worldTurn | 0) + 1;
+  ensureSeats(save);
   save.passiveChanges = [];
 
-  // Index des pays où chaque IA est présente.
-  const holdIsos = {};
-  for (const color of colors) holdIsos[color] = [];
-  for (const iso of isos) {
-    const present = new Set(Object.values(save.conq[iso]));
-    for (const color of colors) if (present.has(color)) holdIsos[color].push(iso);
-  }
+  /* La foi mûrit et se propage AVANT que les IA n'agissent : le joueur récolte
+     le fruit de ses terres, puis le monde lui répond. */
+  const faith = faithTick(save);
+  save.lastFaith = { gained: faith.gained.length, preached: faith.preached };
 
   const diff = localStorage.getItem('cultio_difficulty') || 'normal';
   const dp = DIFF_SIM[diff] || DIFF_SIM.normal;
 
-  for (const color of colors) {
+  for (const color of aiColors(save)) {
     const state = ensureAiState(save, color);
     const power = aiExpansionPower(state);
-    // Agressivité = difficulté (groupe) × variation individuelle + bonus de puissance.
     const actProb = Math.max(0, Math.min(0.98, dp.act * (0.7 + state.aggr * 0.6) + (power - 1) * 0.05));
-    if (Math.random() >= actProb) continue; // cette IA n'agit pas ce tour
+    if (Math.random() >= actProb) continue;   // cette IA n'agit pas ce tour
 
-    let mine = holdIsos[color];
-    if (!mine.length) mine = [isos[(Math.random() * isos.length) | 0]];
+    const mine = countryListOf(save, color);
+    if (!mine.length) continue;               // culte éteint
 
-    // Pays candidats : détenus + voisins déjà initialisés.
-    const candSet = new Set();
+    // Cibles : pays limitrophes qui ne sont pas à elle.
+    const barbarian = [], rivals = [];
     for (const iso of mine) {
-      candSet.add(iso);
-      for (const n of (NEIGHBORS[iso] || [])) if (save.conq[n]) candSet.add(n);
+      for (const n of neighborsOf(iso)) {
+        const h = ownerOf(save, n);
+        if (!h || h === color) continue;
+        (h === NEUTRAL ? barbarian : rivals).push({ iso: n, from: iso });
+      }
     }
-    const cand = [...candSet];
 
-    // Une seule zone conquise par tour (comme le joueur).
-    let captured = false, completed = false;
-    for (let tries = 0; tries < cand.length && !captured; tries++) {
-      const iso = cand[(Math.random() * cand.length) | 0];
-      const m = save.conq[iso];
-      if (!m) continue;
-      
-      const neutral = Object.keys(m).filter((z) => m[z] === NEUTRAL);
-      let target = null;
-      if (neutral.length) {
-        target = neutral[(Math.random() * neutral.length) | 0];
-      } else if (Math.random() < dp.steal) {
-        // Vol à un rival (incluant désormais le joueur !)
-        const enemies = Object.keys(m).filter((z) => m[z] !== NEUTRAL && m[z] !== color);
-        if (enemies.length) target = enemies[(Math.random() * enemies.length) | 0];
+    let target = null;
+    if (barbarian.length) {
+      // L'expansion facile d'abord : les terres barbares ne se défendent pas.
+      target = barbarian[(Math.random() * barbarian.length) | 0];
+    } else if (rivals.length && Math.random() < dp.steal) {
+      /* La difficulté se joue ici : plus elle est haute, plus les IA
+         concentrent leurs assauts sur le joueur au lieu de se déchirer entre
+         elles. Sans ce ciblage, monter `steal` aidait le joueur (inversion de
+         difficulté mesurée : dépassement au tour 29 en hard contre 89 en normal). */
+      const onPlayer = rivals.filter((r) => ownerOf(save, r.iso) === save.playerColor);
+      target = (onPlayer.length && Math.random() < dp.focus)
+        ? onPlayer[(Math.random() * onPlayer.length) | 0]
+        : rivals[(Math.random() * rivals.length) | 0];
+    }
+    if (!target) continue;
+
+    const oldOwner = ownerOf(save, target.iso);
+    if (oldOwner === NEUTRAL) {
+      // Conversion d'une terre barbare : sans combat, mais peu de fidèles.
+      save.conq[target.iso] = color;
+      save.conqPop[target.iso] = Math.round(countryPop(target.iso) * (0.15 + Math.random() * 0.20));
+      addXp(state, 1);
+      aiSpendSkillPoints(state, diff);
+      continue;
+    }
+
+    /* Assaut sur une religion : les fidèles engagés de part et d'autre décident.
+       Une nation mûre se défend réellement — c'est ce qui fait des frontières
+       des lignes de front plutôt que des portes ouvertes. */
+    let attack = 0;
+    for (const n of neighborsOf(target.iso)) {
+      if (ownerOf(save, n) === color) attack += (save.conqPop[n] || 0) * 0.30;
+    }
+    attack *= aiExpansionPower(state);
+    const defenderColor = oldOwner;
+    const defense = (save.conqPop[target.iso] || 0)
+      * (defenderColor === save.playerColor ? 1 : aiExpansionPower(ensureAiState(save, defenderColor)));
+    if (attack <= 0) continue;
+
+    if (Math.random() < attack / (attack + defense)) {
+      save.conq[target.iso] = color;
+      save.conqPop[target.iso] = Math.round(attack + defense * 0.40);
+      addXp(state, 2);
+      aiSpendSkillPoints(state, diff);
+      maybeDecapitate(save, target.iso, oldOwner, color);
+      // Le joueur doit savoir ce qu'on lui a pris pendant qu'il jouait.
+      if (oldOwner === save.playerColor) {
+        const w = ISO_WORLD[target.iso] !== undefined ? WORLDS[ISO_WORLD[target.iso]] : null;
+        save.passiveChanges.push({
+          iso: target.iso, countryName: w ? w.name : target.iso,
+          oldOwner, newOwner: color,
+        });
       }
-      if (!target) continue;
-
-      // --- SIMULATION DE COMBAT MULTI-FACTIONS ---
-      // Les participants sont : l'attaquant, le propriétaire actuel, et toute religion présente dans le pays
-      const participantsSet = new Set();
-      participantsSet.add(color); // l'attaquant
-      const oldOwner = m[target];
-      if (oldOwner !== NEUTRAL) {
-        participantsSet.add(oldOwner);
-      }
-      for (const zId in m) {
-        if (m[zId] !== NEUTRAL) {
-          participantsSet.add(m[zId]);
-        }
-      }
-      const participants = Array.from(participantsSet);
-
-      // Calcul des forces de chacun
-      const strengths = participants.map((pColor) => {
-        let basePower = 1;
-        if (pColor === save.playerColor) {
-          basePower = aiExpansionPower(save);
-        } else {
-          const pState = ensureAiState(save, pColor);
-          basePower = aiExpansionPower(pState);
-        }
-        
-        // Bonus de support : nombre de zones détenues dans ce pays
-        let ownedCount = 0;
-        for (const zId in m) {
-          if (m[zId] === pColor) ownedCount++;
-        }
-        const supportBonus = 1.0 + ownedCount * 0.15;
-        
-        // Bonus défensif si c'est le propriétaire actuel de la zone cible
-        const defenseBonus = (m[target] === pColor) ? 1.3 : 1.0;
-
-        return { color: pColor, str: basePower * supportBonus * defenseBonus };
-      });
-
-      const totalStr = strengths.reduce((sum, item) => sum + item.str, 0) || 1;
-      let rand = Math.random() * totalStr;
-      let winnerColor = color;
-      for (const item of strengths) {
-        rand -= item.str;
-        if (rand <= 0) {
-          winnerColor = item.color;
-          break;
-        }
-      }
-
-      // Si le territoire change de propriétaire à l'issue de la simulation
-      if (winnerColor !== oldOwner) {
-        m[target] = winnerColor;
-        const w = ISO_WORLD[iso] !== undefined ? WORLDS[ISO_WORLD[iso]] : null;
-        const zonesCount = Math.max(1, Object.keys(m).length);
-        const realMax = Math.round((w?.pop || 1000000) / zonesCount);
-        save.conqPop = save.conqPop || {};
-        save.conqPop[`${iso}_${target}`] = Math.round(realMax * (0.3 + Math.random() * 0.5));
-        captured = true;
-        
-        if (Object.values(m).every((h) => h === winnerColor)) {
-          completed = true;
-          if (winnerColor === save.playerColor) {
-            save.conquered = save.conquered || {};
-            save.conquered[iso] = true;
-            revealNeighbors(save, iso);
-          }
-        }
-
-        // Attribution XP
-        if (winnerColor === save.playerColor) {
-          ensurePlayerLevel(save);
-          addXp(save, 1 + (completed ? 3 : 0));
-        } else {
-          const winnerState = ensureAiState(save, winnerColor);
-          addXp(winnerState, 1 + (completed ? 3 : 0));
-          aiSpendSkillPoints(winnerState, diff);
-        }
-
-        // Trace du changement passif si le joueur y participe (gagne ou perd)
-        if (oldOwner === save.playerColor || winnerColor === save.playerColor) {
-          save.passiveChanges.push({
-            iso,
-            countryName: w ? w.name : iso,
-            oldOwner,
-            newOwner: winnerColor
-          });
-        }
-      } else {
-        // Résistance défensive réussie
-        captured = true;
-      }
+    } else {
+      // Assaut repoussé : le défenseur y gagne en ferveur.
+      save.conqPop[target.iso] = Math.min(
+        countryPop(target.iso),
+        (save.conqPop[target.iso] || 0) + attack * 0.25
+      );
     }
   }
+
   persist(save);
 }
 
-/** Le joueur dtient-il la majorit (>50%) des zones d'un pays ? */
-function isMajorityMine(save, iso) {
-  const m = save.conq && save.conq[iso];
-  if (!m) return false;
-  const zones = Object.values(m);
-  if (!zones.length) return false;
-  const mine = zones.filter(c => c === save.playerColor).length;
-  return mine * 2 > zones.length;
-}
-/** Pays entièrement conquis par le joueur (toutes les zones lui appartiennent). */
-function isFullyMine(save, iso) {
-  const m = save.conq && save.conq[iso];
-  if (!m) return false;
-  const zones = Object.values(m);
-  if (!zones.length) return false;
-  return zones.every(c => c === save.playerColor);
-}
-/** Le joueur possède-t-il au moins une zone dans ce pays ? (pour pouvoir le finir) */
-function hasAnyZoneMine(save, iso) {
-  const m = save.conq && save.conq[iso];
-  if (!m) return false;
-  return Object.values(m).some(c => c === save.playerColor);
-}
-
-/** Distance angulaire (rad) entre les centro�des de deux pays. */
+/** Distance angulaire (rad) entre les centroïdes de deux pays. */
 function isoDistance(isoA, isoB) {
   const a = ISO_WORLD[isoA] !== undefined ? WORLDS[ISO_WORLD[isoA]] : null;
   const b = ISO_WORLD[isoB] !== undefined ? WORLDS[ISO_WORLD[isoB]] : null;
@@ -2172,52 +2238,61 @@ function isoDistance(isoA, isoB) {
   return Math.hypot(dLat, dLon);
 }
 
-/** Peut-on entrer dans ce pays ? D�part, majorit�, ou voisin d'un pays o� l'on est majoritaire (avec hop d'�les). */
+/**
+ * Peut-on partir à l'assaut de ce pays ? Il suffit qu'il touche une de nos
+ * terres. On avance de proche en proche depuis le pays d'origine.
+ *
+ * Les îles sans voisin déclaré restent atteignables par un saut court depuis une
+ * de nos côtes — sans quoi des pays entiers seraient définitivement injouables.
+ */
 function canEnterCountry(save, iso) {
-  if (!iso) return false;
-  if (iso === save.startIso) return true;
-  // Pays déjà entamé (au moins une zone à nous) : on peut y revenir pour le terminer.
-  if (hasAnyZoneMine(save, iso)) return true;
-  // Expansion : un pays voisin ne s'ouvre que si l'on détient ENTIÈREMENT un pays adjacent.
-  const neighbors = NEIGHBORS[iso] || [];
-  for (const n of neighbors) {
-    if (isFullyMine(save, n)) return true;
+  if (!iso || !save.conq) return false;
+  const owner = ownerOf(save, iso);
+  if (owner === save.playerColor) return false;   // déjà à nous : rien à y faire
+  if (!owner) return false;                       // pays hors carte
+
+  for (const n of neighborsOf(iso)) {
+    if (ownerOf(save, n) === save.playerColor) return true;
   }
-  // Fallback : île isolée (aucun voisin listé) => saut depuis un pays 100% conquis proche.
-  if (neighbors.length === 0) {
+  // Repli : île isolée (aucun voisin listé) => saut depuis une de nos terres proches.
+  if (neighborsOf(iso).length === 0) {
     for (const w of WORLDS) {
-      if (w.iso === iso) continue;
-      if (!isFullyMine(save, w.iso)) continue;
+      if (!w.iso || w.iso === iso) continue;
+      if (ownerOf(save, w.iso) !== save.playerColor) continue;
       if (isoDistance(iso, w.iso) <= ISLAND_HOP_RADIUS) return true;
     }
   }
   return false;
 }
+
 /* ===================== Brouillard de guerre ===================== */
 /** Un pays est-il découvert (brouillard levé) ? */
 function isDiscovered(save, iso) {
   return !!(save.discovered && save.discovered[iso]);
 }
-/** Reconstitue l'ensemble découvert : pays de départ + voisins, pays entamés,
- *  et voisins des pays conquis à 100 %. Rétroactif pour les parties en cours. */
+/** Reconstitue l'ensemble découvert : nos terres et tout ce qu'elles touchent.
+ *  Le brouillard suit exactement la règle de canEnterCountry — sinon un pays
+ *  attaquable resterait masqué et le clic tomberait dans onUnknown.
+ *  Rétroactif pour les parties en cours. */
 function ensureDiscovery(save) {
   if (!save.discovered || typeof save.discovered !== 'object') save.discovered = {};
   let changed = false;
   const reveal = (iso) => { if (iso && !save.discovered[iso]) { save.discovered[iso] = true; changed = true; } };
   if (save.startIso) {
     reveal(save.startIso);
-    for (const n of (NEIGHBORS[save.startIso] || [])) reveal(n);
+    for (const n of neighborsOf(save.startIso)) reveal(n);
   }
   if (save.conq) {
     for (const iso in save.conq) {
-      if (hasAnyZoneMine(save, iso)) reveal(iso);
-      if (isFullyMine(save, iso)) for (const n of (NEIGHBORS[iso] || [])) reveal(n);
+      if (ownerOf(save, iso) !== save.playerColor) continue;
+      reveal(iso);
+      for (const n of neighborsOf(iso)) reveal(n);
     }
   }
   if (changed) persist(save);
   return save.discovered;
 }
-/** Révèle un pays et ses voisins directs (appelé quand un pays est conquis à 100 %). */
+/** Révèle un pays et ses voisins directs (appelé à chaque conquête). */
 function revealNeighbors(save, iso) {
   save.discovered = save.discovered || {};
   let changed = false;
@@ -2228,41 +2303,29 @@ function revealNeighbors(save, iso) {
   return changed;
 }
 
-function holderOf(save, iso, id) { const m = conqOf(save, iso); return m ? m[id] : null; }
-function setHolder(iso, id, color, conversions = 0, worldPop = 1000000, zonesCount = 1) {
+/**
+ * Le joueur remporte un pays. `conversions` vient du match (fidèles ralliés sur
+ * le terrain) et `grade` du RANG S/A/B/C affiché en fin de partie : bien jouer
+ * donne un pays plus fervent, donc plus utile pour la suite de la campagne.
+ */
+const GRADE_START = { S: 0.60, A: 0.45, B: 0.30, C: 0.20 };
+function captureCountry(iso, color, grade = 'B', conversions = 0) {
   const s = loadSave();
   s.conq = s.conq || {};
-  s.conq[iso] = s.conq[iso] || {};
-  s.conq[iso][id] = color;
-  if (conversions > 0) {
-    s.conqPop = s.conqPop || {};
-    s.conqMaxPop = s.conqMaxPop || {};
-    const gameMax = s.conqMaxPop[`${iso}_${id}`] || 500;
-    const zoneRealMax = Math.round(worldPop / zonesCount);
-    const ratio = Math.min(1.0, conversions / gameMax);
-    s.conqPop[`${iso}_${id}`] = Math.round(ratio * zoneRealMax);
-  }
+  s.conqPop = s.conqPop || {};
+  const oldOwner = s.conq[iso];
+  const maxPop = countryPop(iso);
+
+  // Base selon le rang, relevée si le match a converti beaucoup de monde.
+  const base = (GRADE_START[grade] ?? GRADE_START.B) * maxPop;
+  const fromMatch = conversions > 0 ? Math.min(maxPop * 0.9, conversions * (maxPop / 1000)) : 0;
+  s.conq[iso] = color;
+  s.conqPop[iso] = Math.round(Math.max(base, fromMatch));
+
+  if (color === s.playerColor) revealNeighbors(s, iso);
+  const decap = maybeDecapitate(s, iso, oldOwner, color);
   persist(s);
-}
-function zonePopOf(save, iso, id) {
-  save.conqPop = save.conqPop || {};
-  const val = save.conqPop[`${iso}_${id}`];
-  if (val !== undefined) return val;
-  // Fallback réaliste basé sur la pop du pays si non défini
-  const w = WORLDS.find(x => x.iso === iso);
-  const conq = save.conq && save.conq[iso];
-  const zonesCount = conq ? Object.keys(conq).length : 10;
-  const zoneRealMax = Math.round((w ? w.pop : 1000000) / zonesCount);
-  return Math.round(zoneRealMax * (0.05 + Math.random() * 0.1));
-}
-function zoneMaxPopOf(save, iso, id) {
-  save.conqMaxPop = save.conqMaxPop || {};
-  const val = save.conqMaxPop[`${iso}_${id}`];
-  if (val !== undefined) return val;
-  const maxPop = 250 + Math.floor(Math.random() * 250);
-  save.conqMaxPop[`${iso}_${id}`] = maxPop;
-  persist(save);
-  return maxPop;
+  return { oldOwner, decap };
 }
 export function formatBelievers(n) {
   if (n >= 1e9) {
@@ -2300,26 +2363,69 @@ function formatFaithPct(raw) {
 }
 
 /** Classement mondial des religions : % de foi + fidèles (toujours les 10 cultes). */
+/**
+ * CONDITION DE VICTOIRE : la carte n'est pas le score, l'humanité l'est.
+ *
+ * Peindre le monde est hors de portée — le simulateur montre que même à 1200
+ * tours il reste des centaines de zones neutres, que les 10 religions se
+ * répartissent le globe en sphères et ne s'affrontent jamais vraiment. En
+ * revanche 8 pays contiennent 54 % de l'humanité : convertir les hommes est un
+ * objectif atteignable, disputé, et qui donne enfin un sens à la géographie.
+ *
+ * Gagne la première religion à rallier cette part de l'humanité.
+ */
+export const WORLD_FAITH_GOAL = 4e9;   // 4 milliards d'âmes ralliées
+
+/**
+ * Où en est la course à l'humanité ?
+ *
+ * Le seuil ne règle PAS la difficulté — mesuré au simulateur, le taux de
+ * victoire est identique de 2 à 4 milliards (73 / 37 / 23 % selon la
+ * difficulté). Ce qu'il règle, c'est la DURÉE : l'issue se joue tôt, soit on
+ * amorce la boule de neige et on franchira n'importe quel seuil, soit on
+ * stagne. 4 Md donne une campagne d'environ 55 tours en normal, soit ~3,7 h.
+ */
+export function getFaithGoalState() {
+  const board = getReligionWorldScores();
+  const player = board.religions.find((r) => r.isPlayer) || null;
+  const leader = board.religions[0] || null;
+  const believers = player ? player.believers : 0;
+  const save = loadSave();
+  /* Défaite : plus un seul pays. Les terres barbares n'attaquant jamais, être
+     rayé de la carte ne peut venir que d'un culte rival — c'est une vraie fin
+     de partie, pas un accident. */
+  const wipedOut = !!(save.seeded && save.playerColor && countriesOf(save, save.playerColor) === 0);
+  return {
+    goal: WORLD_FAITH_GOAL,
+    believers,
+    progress: Math.max(0, Math.min(1, believers / WORLD_FAITH_GOAL)),
+    playerWon: believers >= WORLD_FAITH_GOAL,
+    wipedOut,
+    leader,
+    // Un rival a-t-il coiffé le joueur au poteau ?
+    rivalWon: !!(leader && !leader.isPlayer && leader.believers >= WORLD_FAITH_GOAL),
+    playerPct: player ? player.rawPct : 0,
+    totalEarthPop: board.totalEarthPop,
+  };
+}
+
 export function getReligionWorldScores() {
   const save = loadSave();
   const byColor = {};
   for (const c of CULTS) byColor[c.color] = 0;
   if (save.playerColor && byColor[save.playerColor] === undefined) byColor[save.playerColor] = 0;
 
-  let totalZones = 0;
-  let playerZones = 0;
+  let totalZones = 0;      // pays sur la carte
+  let playerZones = 0;     // pays tenus par le joueur
 
   for (const w of WORLDS) {
-    const conq = save.conq && save.conq[w.iso];
-    if (!conq) continue;
-    for (const zoneId in conq) {
-      totalZones++;
-      const color = conq[zoneId];
-      if (!color || color === NEUTRAL) continue;
-      if (byColor[color] === undefined) byColor[color] = 0;
-      byColor[color] += zonePopOf(save, w.iso, zoneId);
-      if (color === save.playerColor) playerZones++;
-    }
+    if (!w.iso || !save.conq || save.conq[w.iso] === undefined) continue;
+    totalZones++;
+    const color = save.conq[w.iso];
+    if (!color || color === NEUTRAL) continue;
+    if (byColor[color] === undefined) byColor[color] = 0;
+    byColor[color] += believersIn(save, w.iso);
+    if (color === save.playerColor) playerZones++;
   }
 
   const totalEarthPop = WORLDS.reduce((sum, w) => sum + (w.pop || 1000000), 0) || 1;
@@ -2352,463 +2458,20 @@ export function getGlobalStats() {
     religions: board.religions,
   };
 }
-function conqueredCount(save, world, regions) {
-  const m = conqOf(save, world.iso); if (!m) return 0;
-  const playerColor = save.playerColor;
-  let n = 0; for (const r of regions) if (m[r.id] === playerColor) n++;
-  return n;
-}
-function isCountryConquered(save, world, regions) { return regions.length > 0 && conqueredCount(save, world, regions) === regions.length; }
-
-function buildRegionNeighbors(regions) {
-  const neighbors = {};
-  for (const r of regions) {
-    neighbors[r.id] = new Set();
-  }
-  const vertexToRegions = {};
-  for (const r of regions) {
-    for (const ring of r.rings) {
-      for (const p of ring) {
-        const key = `${p.lon.toFixed(5)},${p.lat.toFixed(5)}`;
-        if (!vertexToRegions[key]) {
-          vertexToRegions[key] = [];
-        }
-        if (!vertexToRegions[key].includes(r.id)) {
-          vertexToRegions[key].push(r.id);
-        }
-      }
-    }
-  }
-  for (const key in vertexToRegions) {
-    const list = vertexToRegions[key];
-    if (list.length > 1) {
-      for (let i = 0; i < list.length; i++) {
-        for (let j = i + 1; j < list.length; j++) {
-          neighbors[list[i]].add(list[j]);
-          neighbors[list[j]].add(list[i]);
-        }
-      }
-    }
-  }
-  return neighbors;
-}
-
-/* ===================== Carte de conquête d'un pays ===================== */
-function createCountryMap(canvas, world, regions, onSelect) {
-  const ctx = canvas.getContext('2d');
-  let W = 0, H = 0, dpr = 1, tf = null;
-  let selectedId = null;
-  const screenPolys = []; // {region, rings:[[{x,y}]]}
-  const regionNeighbors = buildRegionNeighbors(regions);
-
-  /** Ensemble des zones conquérables (non détenues + accessibles) — pour la surbrillance. */
-  function computeAttackable(save) {
-    const set = new Set();
-    const pc = save.playerColor;
-    const hOf = (id) => (save.conq && save.conq[world.iso]) ? save.conq[world.iso][id] : null;
-    const playerOwnsAny = regions.some((r) => hOf(r.id) === pc);
-    let hasAdjNonOwned = false;
-    if (playerOwnsAny) {
-      for (const r of regions) {
-        if (hOf(r.id) === pc) continue;
-        if ([...(regionNeighbors[r.id] || [])].some((n) => hOf(n) === pc)) { hasAdjNonOwned = true; break; }
-      }
-    }
-    for (const r of regions) {
-      if (hOf(r.id) === pc) continue;
-      const isAdjacent = [...(regionNeighbors[r.id] || [])].some((n) => hOf(n) === pc);
-      if (!playerOwnsAny || isAdjacent || !hasAdjNonOwned) set.add(r.id);
-    }
-    return set;
-  }
-  const ZOOM_MIN = 1, ZOOM_MAX = 6;
-  let zoom = 1, panX = 0, panY = 0;   // vue : zoom + déplacement
-  function clampPan() {
-    const mx = (zoom - 1) * W / 2 + W * 0.3;
-    const my = (zoom - 1) * H / 2 + H * 0.3;
-    panX = Math.max(-mx, Math.min(mx, panX));
-    panY = Math.max(-my, Math.min(my, panY));
-  }
-  function zoomAt(sx, sy, factor) {
-    const nz = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom * factor));
-    if (nz === zoom) return;
-    // garde le point (sx,sy) stable à l'écran
-    panX = sx - W / 2 - ((sx - W / 2 - panX) / zoom) * nz;
-    panY = sy - H / 2 - ((sy - H / 2 - panY) / zoom) * nz;
-    zoom = nz;
-    clampPan();
-    render();
-  }
-
-  function getPolygonCentroid(ring) {
-    let area = 0;
-    let cx = 0;
-    let cy = 0;
-    const n = ring.length;
-    for (let i = 0; i < n; i++) {
-      const p1 = ring[i];
-      const p2 = ring[(i + 1) % n];
-      const factor = (p1.x * p2.y - p2.x * p1.y);
-      area += factor;
-      cx += (p1.x + p2.x) * factor;
-      cy += (p1.y + p2.y) * factor;
-    }
-    area = area / 2;
-    if (Math.abs(area) < 0.1) {
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const p of ring) {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      }
-      return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-    }
-    cx = cx / (6 * area);
-    cy = cy / (6 * area);
-    return { x: cx, y: cy };
-  }
-
-  // bornes géographiques
-  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
-  for (const r of regions) for (const ring of r.rings) for (const p of ring) {
-    if (p.lon < minLon) minLon = p.lon; if (p.lon > maxLon) maxLon = p.lon;
-    if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
-  }
-  const centerLat = (minLat + maxLat) / 2, kx = Math.cos(centerLat * DEG);
-
-  function resize() {
-    dpr = Math.min(devicePixelRatio || 1, 2);
-    const rect = canvas.getBoundingClientRect();
-    W = canvas.width = Math.round(rect.width * dpr);
-    H = canvas.height = Math.round(rect.height * dpr);
-    const pad = 40 * dpr;
-    const spanX = (maxLon - minLon) * kx, spanY = (maxLat - minLat);
-    const scale = Math.min((W - 2 * pad) / spanX, (H - 2 * pad) / spanY);
-    const offX = (W - spanX * scale) / 2, offY = (H - spanY * scale) / 2;
-    tf = { scale, offX, offY };
-  }
-  const proj = (lon, lat) => {
-    const bx = tf.offX + (lon - minLon) * kx * tf.scale;
-    const by = tf.offY + (maxLat - lat) * tf.scale;
-    return { x: (bx - W / 2) * zoom + W / 2 + panX, y: (by - H / 2) * zoom + H / 2 + panY };
-  };
-
-  function render() {
-    if (!tf) resize();
-    ctx.clearRect(0, 0, W, H);
-    const save = loadSave();
-    screenPolys.length = 0;
-    const attackable = computeAttackable(save);
-
-    for (const r of regions) {
-      const rings = r.rings.map((ring) => ring.map((p) => proj(p.lon, p.lat)));
-      const holder = holderOf(save, world.iso, r.id) || NEUTRAL;
-      const mine = holder === save.playerColor;
-
-      // Calcul du centroïde écran pour dessiner le symbole religieux sur la masse principale
-      let largestRing = null;
-      let maxBoxArea = -1;
-      for (const ring of rings) {
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (const p of ring) {
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-        }
-        const boxArea = (maxX - minX) * (maxY - minY);
-        if (boxArea > maxBoxArea) {
-          maxBoxArea = boxArea;
-          largestRing = ring;
-        }
-      }
-      const centroid = largestRing ? getPolygonCentroid(largestRing) : null;
-
-      let religionSym = '';
-      if (holder !== NEUTRAL) {
-        if (mine && save.playerName) {
-          religionSym = save.religionIcon || '✦';
-        } else {
-          const cult = CULTS.find(c => c.color === holder);
-          if (cult) religionSym = cult.sym;
-        }
-      }
-
-      screenPolys.push({ region: r, rings, color: holder, centroid, sym: religionSym });
-
-      ctx.fillStyle = holder;
-      ctx.strokeStyle = holder;
-      ctx.lineWidth = 1.5 * dpr;
-      ctx.globalAlpha = mine ? 0.95 : 0.82;
-      for (const ring of rings) {
-        ctx.beginPath();
-        ring.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      }
-
-      // Collecte des arêtes pour détecter le contour extérieur
-      const edgeCounts = {};
-      for (const ring of rings) {
-        for (let i = 0; i < ring.length; i++) {
-          const p1 = ring[i], p2 = ring[(i + 1) % ring.length];
-          const x1 = Math.round(p1.x * 10) / 10, y1 = Math.round(p1.y * 10) / 10;
-          const x2 = Math.round(p2.x * 10) / 10, y2 = Math.round(p2.y * 10) / 10;
-          const key = (x1 < x2 || (x1 === x2 && y1 < y2))
-            ? `${x1},${y1}_${x2},${y2}` : `${x2},${y2}_${x1},${y1}`;
-          if (!edgeCounts[key]) edgeCounts[key] = { count: 0, p1: { x: p1.x, y: p1.y }, p2: { x: p2.x, y: p2.y } };
-          edgeCounts[key].count++;
-        }
-      }
-
-      ctx.globalAlpha = 1;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-
-      if (mine) {
-        ctx.beginPath();
-        for (const key in edgeCounts) if (edgeCounts[key].count === 1) {
-          const e = edgeCounts[key]; ctx.moveTo(e.p1.x, e.p1.y); ctx.lineTo(e.p2.x, e.p2.y);
-        }
-        ctx.lineWidth = 1.6 * dpr;
-        ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-        ctx.stroke();
-      }
-
-      ctx.beginPath();
-      for (const key in edgeCounts) if (edgeCounts[key].count === 1) {
-        const e = edgeCounts[key]; ctx.moveTo(e.p1.x, e.p1.y); ctx.lineTo(e.p2.x, e.p2.y);
-      }
-      ctx.lineWidth = (r.id === selectedId ? 3.2 : 1.2) * dpr;
-      ctx.strokeStyle = r.id === selectedId ? '#fff' : 'rgba(0,0,0,0.35)';
-      ctx.stroke();
-    }
-
-    // Surbrillance des zones conquérables (contour doré + halo).
-    ctx.save();
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    ctx.shadowColor = '#ffe259';
-    ctx.shadowBlur = 8 * dpr;
-    ctx.strokeStyle = 'rgba(255,226,89,0.95)';
-    ctx.lineWidth = 2.4 * dpr;
-    for (const sp of screenPolys) {
-      if (!attackable.has(sp.region.id) || sp.region.id === selectedId) continue;
-      for (const ring of sp.rings) {
-        ctx.beginPath();
-        ring.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
-        ctx.closePath();
-        ctx.stroke();
-      }
-    }
-    ctx.restore();
-
-    // Dessiner les icônes de religion au centre des zones
-    for (const sp of screenPolys) {
-      if (!sp.centroid || !sp.sym) continue;
-      const x = sp.centroid.x;
-      const y = sp.centroid.y;
-      
-      const isImage = (sp.sym.startsWith('data:') || sp.sym.startsWith('http'));
-      if (isImage) {
-        const img = getCachedImage(sp.sym, () => {
-          if (canvas.width) render();
-        });
-        if (img) {
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(x, y, 10 * dpr, 0, Math.PI * 2);
-          ctx.clip();
-          ctx.drawImage(img, x - 10 * dpr, y - 10 * dpr, 20 * dpr, 20 * dpr);
-          ctx.restore();
-          
-          ctx.beginPath();
-          ctx.arc(x, y, 10 * dpr, 0, Math.PI * 2);
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
-          ctx.lineWidth = 1.5 * dpr;
-          ctx.stroke();
-        }
-      } else {
-        ctx.beginPath();
-        ctx.arc(x, y, 10 * dpr, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(10, 14, 30, 0.75)';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-        ctx.lineWidth = 1 * dpr;
-        ctx.stroke();
-        
-        ctx.fillStyle = '#ffffff';
-        ctx.font = `bold ${Math.round(11 * dpr)}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(sp.sym, x, y);
-      }
-    }
-  }
-
-  function pointInPoly(x, y, ring) {
-    let inside = false;
-    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-      const xi = ring[i].x, yi = ring[i].y, xj = ring[j].x, yj = ring[j].y;
-      if (((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) inside = !inside;
-    }
-    return inside;
-  }
-  function hit(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
-    const x = (clientX - rect.left) * dpr, y = (clientY - rect.top) * dpr;
-    for (const sp of screenPolys) for (const ring of sp.rings) if (pointInPoly(x, y, ring)) return sp.region;
-    return null;
-  }
-
-  let downX = 0, downY = 0, lastX = 0, lastY = 0, dragging = false, moved = 0, pinching = false;
-  function onDown(e) {
-    if (pinching) return;
-    dragging = true; moved = 0;
-    downX = e.clientX; downY = e.clientY; lastX = e.clientX; lastY = e.clientY;
-    canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
-  }
-  function onMove(e) {
-    if (!dragging || pinching) return;
-    const dx = e.clientX - lastX, dy = e.clientY - lastY;
-    moved += Math.abs(dx) + Math.abs(dy);
-    panX += dx * dpr; panY += dy * dpr;
-    clampPan();
-    lastX = e.clientX; lastY = e.clientY;
-    render();
-  }
-  function onUp(e) {
-    if (!dragging) return;
-    dragging = false;
-    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 8 || moved > 8) return; // c'était un déplacement
-    const r = hit(e.clientX, e.clientY);
-    selectedId = r ? r.id : null;
-    render();
-    if (r) playUIClick();
-    onSelect(r || null);
-  }
-  function onWheel(e) {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const sx = (e.clientX - rect.left) * dpr, sy = (e.clientY - rect.top) * dpr;
-    zoomAt(sx, sy, e.deltaY < 0 ? 1.1 : 0.9);
-  }
-  let pinchDist = null, pinchCx = 0, pinchCy = 0;
-  function onTouchStart(e) {
-    if (e.touches.length === 2) {
-      pinching = true; dragging = false;
-      pinchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-    }
-  }
-  function onTouchMove(e) {
-    if (e.touches.length === 2 && pinchDist !== null) {
-      e.preventDefault();
-      const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      const rect = canvas.getBoundingClientRect();
-      pinchCx = ((e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left) * dpr;
-      pinchCy = ((e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top) * dpr;
-      zoomAt(pinchCx, pinchCy, dist / pinchDist);
-      pinchDist = dist;
-    }
-  }
-  function onTouchEnd(e) {
-    if (e.touches.length < 2) { pinchDist = null; pinching = false; }
-  }
-  function onResizeEvt() { resize(); clampPan(); render(); }
-  resize();
-  addEventListener('resize', onResizeEvt);
-  canvas.addEventListener('pointerdown', onDown);
-  canvas.addEventListener('pointermove', onMove);
-  canvas.addEventListener('pointerup', onUp);
-  canvas.addEventListener('pointercancel', onUp);
-  canvas.addEventListener('wheel', onWheel, { passive: false });
-  canvas.addEventListener('touchstart', onTouchStart);
-  canvas.addEventListener('touchmove', onTouchMove, { passive: false });
-  canvas.addEventListener('touchend', onTouchEnd);
-  /* ---------- Navigation à la manette ----------
-     Les zones sont des polygones peints dans le canvas : rien à focaliser. On
-     parcourt donc leurs centroïdes déjà calculés au rendu, dans la direction
-     demandée. Le survol met à jour `selectedId`, exactement comme un clic — la
-     carte se surligne toute seule et le joueur voit où il en est. */
-  function padStep(dir) {
-    if (!screenPolys.length) return;
-    const cur = screenPolys.find(sp => sp.region.id === selectedId);
-    if (!cur) {
-      selectedId = screenPolys[0].region.id;
-      render();
-      return;
-    }
-    const [vx, vy] = { 1: [0, -1], 2: [0, 1], 3: [-1, 0], 4: [1, 0] }[dir];
-    let best = null, bestScore = Infinity;
-    for (const sp of screenPolys) {
-      if (sp === cur) continue;
-      const ox = sp.centroid.x - cur.centroid.x, oy = sp.centroid.y - cur.centroid.y;
-      const along = ox * vx + oy * vy;
-      if (along <= 2) continue;
-      const off = Math.abs(ox * -vy + oy * vx);
-      const score = along + off * 2.4;
-      if (score < bestScore) { bestScore = score; best = sp; }
-    }
-    if (!best) return;
-    selectedId = best.region.id;
-    render();
-    playUIClick();
-  }
-
-  function padPick() {
-    const cur = screenPolys.find(sp => sp.region.id === selectedId);
-    if (!cur) { padStep(4); return; }
-    playUIClick();
-    onSelect(cur.region);
-  }
-
-  /* Déplacement libre de la vue au stick : la carte d'un pays peut être zoomée
-     au-delà du cadre, et sans ça les zones sorties de l'écran seraient
-     sélectionnables sans être visibles. */
-  function padPan(dx, dy, dt) {
-    panX -= dx * 900 * dpr * dt;
-    panY -= dy * 900 * dpr * dt;
-    clampPan();
-    render();
-  }
-
-  const padNav = {
-    el: canvas, label: 'Zone', pickLabel: 'Choisir', panLabel: 'Déplacer',
-    step: padStep, pick: padPick, pan: padPan,
-  };
-  registerPadSurface('countrymap', padNav);
-
-  render();
-  return {
-    repaint() { selectedId = null; render(); },
-    padNav,
-    stop() {
-      unregisterPadSurface('countrymap', padNav);
-      removeEventListener('resize', onResizeEvt);
-      canvas.removeEventListener('pointerdown', onDown);
-      canvas.removeEventListener('pointermove', onMove);
-      canvas.removeEventListener('pointerup', onUp);
-      canvas.removeEventListener('pointercancel', onUp);
-      canvas.removeEventListener('wheel', onWheel);
-      canvas.removeEventListener('touchstart', onTouchStart);
-      canvas.removeEventListener('touchmove', onTouchMove);
-      canvas.removeEventListener('touchend', onTouchEnd);
-    },
-  };
-}
-
 /* ============================ Controleur d ecran ============================ */
-let root = null, star = null, globe = null, country = null, playHandler = null, onCloseCb = null, curNeighbors = {};
+let root = null, star = null, globe = null, playHandler = null, onCloseCb = null;
+/* Listener clavier du créateur : posé sur `document`, il doit être retiré par
+   closeProgression, sinon chaque réouverture de la campagne en empile un de
+   plus (une flèche ← ferait tourner la carte de leader N fois) et retient
+   l'ancien `root` détaché en mémoire. */
+let creatorKeyHandler = null;
 
 export function setPlayHandler(fn) { playHandler = fn; }
 
-/* Entrer dans un pays n'ouvre plus la carte des provinces : on atterrit dans le
-   Hub Overworld 3D, où le choix de la zone se fait en franchissant un portail.
-   La carte des provinces ne sert plus que de repli si aucun hub n'est branché. */
-let hubHandler = null;
-export function setHubHandler(fn) { hubHandler = fn; }
+/* Le hub 3D à portails a été retiré : toute la campagne se joue sur le globe.
+   Toucher un pays le sélectionne, un bouton lance le match. Un pays = un match,
+   ce qui divise par ~9 la longueur de campagne (1537 provinces → 177 pays) et
+   fait passer la progression à 2 h de jeu de 2,4 % à 11,3 % de l'humanité. */
 
 export async function openProgression(opts = {}) {
   onCloseCb = opts.onClose || null;
@@ -2828,31 +2491,22 @@ export async function openProgression(opts = {}) {
           <button class="prog-skills-btn">✦ Compétences <span class="skill-pts-badge">0</span></button>
           <h2 class="prog-h2">Choisissez une terre à convertir</h2>
         </div>
-        <p class="prog-hint">Glissez à gauche / à droite · touchez un pays pour y entrer</p>
+        <p class="prog-hint">Glissez pour tourner le globe · touchez un pays pour le viser</p>
         <div class="prog-loading">Chargement du monde…</div>
+        <div class="prog-zone-panel hidden">
+          <div class="prog-zone-info"><span class="prog-zone-name"></span><span class="prog-zone-holder"></span></div>
+          <button class="prog-zone-play">⚔ Partir en croisade</button>
+        </div>
       </div>
       <aside class="prog-global-stats" aria-label="Classement des religions">
         <div class="prog-lb-head">
           <span class="prog-lb-title">Foi mondiale</span>
           <span class="prog-lb-pts">✦ <span id="global-skill-pts">0</span></span>
         </div>
+        <div id="faith-goal" class="prog-goal"></div>
         <div id="global-religion-lb" class="prog-lb-list"></div>
       </aside>
     </section>
-    <section class="prog-view prog-country-view hidden">
-      <div class="prog-head">
-        <button class="prog-back2">‹ Globe</button>
-        <h2 class="prog-c-title"></h2>
-        <span class="prog-c-progress"></span>
-      </div>
-      <div class="prog-c-stats-container"></div>
-      <canvas class="prog-country"></canvas>
-      <div class="prog-zone-panel hidden">
-        <div class="prog-zone-info"><span class="prog-zone-name"></span><span class="prog-zone-holder"></span></div>
-        <button class="prog-zone-play">⚔ Convertir cette zone</button>
-      </div>
-    </section>
-    
     <div id="skill-tree" class="skill-sanctum hidden">
       <div class="skill-cosmos" aria-hidden="true">
         <div class="skill-nebula"></div>
@@ -2957,12 +2611,7 @@ export async function openProgression(opts = {}) {
     </div>`;
   document.body.appendChild(root);
 
-  const globeView = root.querySelector('.prog-globe-view');
-  const countryView = root.querySelector('.prog-country-view');
   const loading = root.querySelector('.prog-loading');
-  const cTitle = root.querySelector('.prog-c-title');
-  const cProgress = root.querySelector('.prog-c-progress');
-  const countryCanvas = root.querySelector('.prog-country');
   const panel = root.querySelector('.prog-zone-panel');
   const zoneName = root.querySelector('.prog-zone-name');
   const zoneHolder = root.querySelector('.prog-zone-holder');
@@ -3140,8 +2789,9 @@ export async function openProgression(opts = {}) {
     }
   }, 0);
 
-  // Keyboard navigation listener
-  document.addEventListener('keydown', (e) => {
+  // Keyboard navigation listener (retiré dans closeProgression)
+  if (creatorKeyHandler) document.removeEventListener('keydown', creatorKeyHandler);
+  creatorKeyHandler = (e) => {
     if (creatorOverlay && !creatorOverlay.classList.contains('hidden')) {
       if (e.key === 'ArrowLeft') {
         renderCreatorLeaders(-1);
@@ -3149,7 +2799,8 @@ export async function openProgression(opts = {}) {
         renderCreatorLeaders(1);
       }
     }
-  });
+  };
+  document.addEventListener('keydown', creatorKeyHandler);
 
   function highlightDifficulty() {
     creatorDifficulty.querySelectorAll('.diff-btn').forEach((b) => {
@@ -3174,8 +2825,7 @@ export async function openProgression(opts = {}) {
     if (s.playerColor) {
       selectedCreatorColor = s.playerColor;
       creatorSwatches.querySelectorAll('.swatch').forEach((sw) => {
-        const on = sw.style.backgroundColor === s.playerColor || sw.style.background === s.playerColor;
-        sw.classList.toggle('sel', on);
+        sw.classList.toggle('sel', sw.dataset.color === s.playerColor);
       });
     }
 
@@ -3523,14 +3173,11 @@ export async function openProgression(opts = {}) {
     const save = loadSave();
     if (!save.playerColor || !save.conq) return;
     let totalGained = 0;
-    for (const iso in save.conq) {
-      const zones = save.conq[iso];
-      const colors = Object.values(zones || {});
-      if (!colors.length) continue;
-      const isMajority = isMajorityMine(save, iso);
-      const isFull = colors.every((c) => c === save.playerColor);
-      if (!isMajority && !isFull) continue;
-      const award = awardConquestSkills({ iso, wasMajority: false, isMajority, isFull });
+    /* Un pays tenu vaut ses points de foi. L'attribution est idempotente
+       (skillMajority/skillFull par ISO), donc on peut la rejouer sans risque —
+       c'est ce qui rattrape les gains manqués des parties déjà commencées. */
+    for (const iso of countryListOf(save, save.playerColor)) {
+      const award = awardConquestSkills({ iso, wasMajority: false, isMajority: true, isFull: true });
       totalGained += award.gained;
     }
     if (totalGained > 0) {
@@ -3571,6 +3218,77 @@ export async function openProgression(opts = {}) {
     }
   }
 
+  /* Rend visible ce que la propagation a fait pendant qu'on jouait : sans ce
+     retour, la mécanique tourne mais le joueur ne la voit jamais. */
+  function checkFaithSpread() {
+    const save = loadSave();
+    const f = save.lastFaith;
+    const d = save.lastDecap;
+    let delay = 0;
+    if (f && (f.gained > 0 || f.preached > 0)) {
+      const bits = [];
+      if (f.gained > 0) bits.push(`${f.gained} territoire${f.gained > 1 ? 's' : ''} converti${f.gained > 1 ? 's' : ''}`);
+      if (f.preached > 0) bits.push(`${f.preached} zone${f.preached > 1 ? 's' : ''} sous prédication`);
+      setTimeout(() => toast(`✧ Votre foi se répand : ${bits.join(' · ')}.`), delay);
+      delay += 3000;
+    }
+    // Une décapitation subie ou infligée passivement doit être annoncée.
+    if (d && d.turn === (save.worldTurn | 0)) {
+      const victim = CULTS.find((c) => c.color === d.victim);
+      const mine = d.by === save.playerColor;
+      const victimName = d.victim === save.playerColor
+        ? 'VOTRE CULTE'
+        : `le culte ${victim ? victim.name : 'rival'}`;
+      setTimeout(() => toast(mine
+        ? `⛧ SIÈGE BRISÉ — ${victimName} s'effondre ! ${d.flipped} territoires vous rejoignent.`
+        : `☠ VOTRE SIÈGE EST TOMBÉ — ${d.flipped} de vos territoires ont fait défection.`
+      ), delay);
+    }
+    if (save.lastFaith || save.lastDecap) {
+      delete save.lastFaith;
+      delete save.lastDecap;
+      persist(save);
+    }
+  }
+
+  /* Barre d'objectif : la campagne se gagne en ralliant l'humanité, pas en
+     peignant la carte. Sans ce repère permanent, le but du mode campagne
+     resterait invisible et le joueur croirait devoir tout conquérir. */
+  function updateFaithGoalUI() {
+    const el = root.querySelector('#faith-goal');
+    if (!el) return;
+    const g = getFaithGoalState();
+    const done = Math.round(g.progress * 100);
+    el.innerHTML = `
+      <div class="prog-goal-head">
+        <span class="prog-goal-lbl">Objectif — 4 milliards d'âmes</span>
+        <span class="prog-goal-val">${formatBelievers(g.believers)}</span>
+      </div>
+      <div class="prog-goal-track"><i style="width:${done}%"></i></div>
+      <div class="prog-goal-sub">${done} % de l'objectif · ${g.playerPct.toFixed(1)} % de l'humanité</div>`;
+    el.classList.toggle('is-won', g.playerWon);
+
+    // Fin de campagne : on ne l'annonce qu'une fois.
+    const save = loadSave();
+    if (g.playerWon && !save.campaignWon) {
+      save.campaignWon = true; persist(save);
+      setTimeout(() => toast(
+        `🏆 VICTOIRE — ${save.religionName || 'votre culte'} rassemble ${formatBelievers(g.believers)} fidèles.\n`
+        + `Le monde a une nouvelle foi.`
+      ), 600);
+    } else if (g.wipedOut && !save.campaignLost) {
+      save.campaignLost = true; persist(save);
+      setTimeout(() => toast(
+        `☠ DÉFAITE — votre culte a perdu sa dernière terre. La foi s'éteint.`
+      ), 600);
+    } else if (g.rivalWon && !save.campaignLost) {
+      save.campaignLost = true; persist(save);
+      setTimeout(() => toast(
+        `☠ DÉFAITE — le culte ${g.leader.name} a rallié 4 milliards d'âmes avant vous.`
+      ), 600);
+    }
+  }
+
   function updateGlobalStatsUI() {
     const board = getReligionWorldScores();
     const list = root.querySelector('#global-religion-lb');
@@ -3598,8 +3316,8 @@ export async function openProgression(opts = {}) {
         }).join('');
       }
     }
+    updateFaithGoalUI();
     refreshSkillPointsUI();
-    checkPassiveChanges();
   }
 
   // Remplir les couleurs du créateur
@@ -3614,6 +3332,10 @@ export async function openProgression(opts = {}) {
     sw.setAttribute('role', 'button');
     sw.tabIndex = 0;
     sw.setAttribute('aria-label', `Couleur ${c.name || c.color}`);
+    /* La couleur est mémorisée en dataset : `style.backgroundColor` est
+       normalisé par le navigateur en `rgb(...)` et ne pourra jamais être
+       comparé au `#rrggbb` de la sauvegarde. */
+    sw.dataset.color = c.color;
     sw.style.background = c.color;
     sw.addEventListener('pointerdown', () => {
       selectedCreatorColor = c.color;
@@ -3699,59 +3421,33 @@ export async function openProgression(opts = {}) {
       ai: {},
       conq: {},
       conqPop: {},
-      conqMaxPop: {},
+      seats: {},
+      decapAt: {},
+      discovered: {},
+      worldTurn: 0,
       seeded: false,
-      worldModel: 2,
+      worldModel: 3,
     };
     persist(save);
     creatorOverlay.classList.add('hidden');
 
     // Réinitialisation visuelle du globe
     if (globe) globe.stop();
-    globe = createGlobe(root.querySelector('.prog-globe'), {
-      onPick(world) {
-        const sCurrent = loadSave();
-        if (!canEnterCountry(sCurrent, world.iso)) {
-          globe.focusWorld(world);
-          toast(`« ${world.name} » n'est pas accessible depuis vos terres.`);
-          return;
-        }
-        globe.focusWorld(world);
-        setTimeout(() => enterCountry(world), 360);
-      },
-      onUnknown() { toast('Cette terre n\'a pas encore été révélée.'); },
-    });
+    globe = buildGlobe();
 
-    // Attribuer une zone de départ à chaque religion, PUIS pré-initialiser les
-    // autres pays. Séquentiel pour éviter que la pré-init n'écrase (race sur
-    // localStorage) la zone de départ tout juste attribuée au joueur.
+    /* Semis des 10 religions. Plus aucun fetch de provinces : le modèle v3 se
+       contente de la liste des pays, donc la carte est prête immédiatement —
+       là où la pré-init v2 chargeait 254 fichiers GeoJSON par lots de 20. */
     (async () => {
       try {
         await seedReligionStarts();
-        ensureDiscovery(loadSave());   // lève le brouillard sur le pays de départ + voisins
-        const sCurrent = loadSave();
-        const startWorld = WORLDS[ISO_WORLD[sCurrent.startIso]];
+        ensureDiscovery(loadSave());
+        const startWorld = WORLDS[ISO_WORLD[loadSave().startIso]];
         if (startWorld) {
           setTimeout(() => globe.focusWorld(startWorld), 200);
           setTimeout(() => toast(`Votre foi naît en ${startWorld.name}.`), 400);
         }
         updateGlobalStatsUI();
-
-        const BATCH = 20;
-        for (let i = 0; i < WORLDS.length; i += BATCH) {
-          const chunk = WORLDS.slice(i, i + BATCH);
-          const loaded = await Promise.all(chunk.map(async (w) => {
-            try { return { w, regs: await loadRegions(w.iso) }; }
-            catch { return null; }
-          }));
-          const s = loadSave();
-          for (const item of loaded) {
-            if (!item) continue;
-            if (s.conq && s.conq[item.w.iso]) continue;
-            initCountry(s, item.w, item.regs);
-          }
-          updateGlobalStatsUI();
-        }
       } catch (err) {
         console.error(err);
       }
@@ -3771,14 +3467,27 @@ export async function openProgression(opts = {}) {
       const oldColor = save.playerColor;
       const newColor = selectedCreatorColor;
       // Les zones sont stockées par couleur : migrer pour ne rien perdre.
-      if (oldColor && newColor && oldColor !== newColor && save.conq) {
-        for (const iso in save.conq) {
-          const zones = save.conq[iso];
-          for (const rid in zones) {
-            // Échange : le joueur prend newColor, une IA éventuelle récupère oldColor.
-            if (zones[rid] === oldColor) zones[rid] = newColor;
-            else if (zones[rid] === newColor) zones[rid] = oldColor;
+      if (oldColor && newColor && oldColor !== newColor) {
+        if (save.conq) {
+          for (const iso in save.conq) {
+            const zones = save.conq[iso];
+            for (const rid in zones) {
+              // Échange : le joueur prend newColor, une IA éventuelle récupère oldColor.
+              if (zones[rid] === oldColor) zones[rid] = newColor;
+              else if (zones[rid] === newColor) zones[rid] = oldColor;
+            }
           }
+        }
+        /* Les états IA sont eux aussi indexés par couleur : sans cet échange,
+           l'IA qui tenait newColor hériterait des zones oldColor avec un état
+           vierge (niveau, xp, skills, agressivité perdus), et son ancien état
+           deviendrait orphelin sous la couleur du joueur — invisible, puisque
+           aiColors() filtre playerColor. */
+        if (save.ai) {
+          const aiNew = save.ai[newColor];   // l'IA qui portait la nouvelle couleur
+          if (aiNew) save.ai[oldColor] = aiNew;   // …suit ses zones vers l'ancienne
+          else delete save.ai[oldColor];
+          delete save.ai[newColor];          // le joueur ne porte pas d'état IA
         }
       }
       save.playerName = pName;
@@ -3799,360 +3508,245 @@ export async function openProgression(opts = {}) {
   });
 
   star = createStarfield(root.querySelector('.prog-stars'));
-  let curWorld = null, curRegions = null, selectedRegion = null;
+  let selectedWorld = null;   // pays visé sur le globe
 
   root.querySelector('.prog-back').addEventListener('click', closeProgression);
-
   root.querySelector('.prog-edit').addEventListener('click', openReligionEditor);
 
-  root.querySelector('.prog-back2').addEventListener('click', () => {
-    country && country.stop(); country = null;
-    countryView.classList.add('hidden'); globeView.classList.remove('hidden');
-    panel.classList.add('hidden');
-  });
-
-  function refreshProgress() {
+  /**
+   * Panneau d'un pays visé, affiché sur le globe. Il doit répondre aux trois
+   * questions du joueur avant qu'il n'engage un match : qui tient ce pays,
+   * combien d'âmes il y a à prendre, et ce que ça coûte s'il perd.
+   */
+  function showCountryPanel(world) {
     const save = loadSave();
-    const n = conqueredCount(save, curWorld, curRegions), t = curRegions.length;
-    cProgress.textContent = `${n} / ${t} zones`;
-    cProgress.style.color = n === t ? '#ffd24d' : '#cfe';
+    const iso = world.iso;
+    const owner = ownerOf(save, iso);
+    const rel = getWorldReligion(save, world);
+    const pop = countryPop(iso);
+    const believers = believersIn(save, iso);
+    const mine = owner === save.playerColor;
+    const barbarian = owner === NEUTRAL;
 
-    // Remplissage des statistiques des religions
-    const pcts = getCountryReligionPercentages(save, curWorld, curRegions);
-    const statsContainer = root.querySelector('.prog-c-stats-container');
-    if (statsContainer) {
-      statsContainer.innerHTML = `
-        <div class="prog-c-stats-title">Religions Présentes</div>
-        ${pcts.map(p => {
-          const symHtml = (p.sym.startsWith('data:') || p.sym.startsWith('http'))
-            ? `<img src="${p.sym}" class="stats-cult-icon" />`
-            : p.sym;
-          return `
-            <div class="prog-c-stats-row">
-              <span class="prog-c-stats-dot" style="background: ${p.color}"></span>
-              <span class="prog-c-stats-name">${symHtml} ${p.name}</span>
-              <span class="prog-c-stats-pct">${p.percent}%</span>
-            </div>
-          `;
-        }).join('')}
-      `;
+    const symHtml = (rel.sym.startsWith('data:') || rel.sym.startsWith('http'))
+      ? `<img src="${rel.sym}" class="stats-cult-icon" />`
+      : rel.sym;
+
+    let body = `Tenu par : ${symHtml} <span style="font-weight:800;">${rel.name}</span>`;
+    body += `<br/><span style="font-size:12px;opacity:.85;display:block;margin-top:4px;">`
+      + `Population : <b style="color:#fff;">${formatBelievers(pop)}</b>`;
+    if (!barbarian) {
+      body += ` · Fidèles : <b style="color:#ffe259;">${formatBelievers(believers)}</b>`
+        + ` (${Math.round(fervorOf(save, iso) * 100)} %)`;
     }
-  }
+    body += `</span>`;
 
-  function selectZone(region) {
-    selectedRegion = region;
-    if (!region) { panel.classList.add('hidden'); return; }
-    const save = loadSave();
-    const holder = holderOf(save, curWorld.iso, region.id);
-    const mine = holder === save.playerColor;
-    
-    let religionName = 'Terres barbares';
-    let religionColor = (holder && holder !== NEUTRAL) ? holder : NEUTRAL;
-    let religionSym = '⚔';
-    
-    if (holder && holder !== NEUTRAL) {
-      if (holder === save.playerColor && save.playerName) {
-        religionName = save.religionName || 'Mon Culte';
-        religionSym = save.religionIcon || '✦';
-      } else {
-        const cult = CULTS.find(c => c.color === holder);
-        if (cult) {
-          religionName = `Culte ${cult.name}`;
-          religionSym = cult.sym;
-        }
-      }
-    }
-    
-    const symHtml = (religionSym.startsWith('data:') || religionSym.startsWith('http'))
-      ? `<img src="${religionSym}" class="stats-cult-icon" />`
-      : religionSym;
-
-    zoneName.textContent = region.name;
-    
-    const playerOwnsAny = curRegions.some(reg => {
-      return holderOf(save, curWorld.iso, reg.id) === save.playerColor;
-    });
-    
-    const isAdjacent = Array.from(curNeighbors[region.id] || []).some(neighId => {
-      return holderOf(save, curWorld.iso, neighId) === save.playerColor;
-    });
-    
-    let hasAnyAdjacentNonOwned = false;
-    for (const reg of curRegions) {
-      const regHolder = holderOf(save, curWorld.iso, reg.id);
-      if (regHolder !== save.playerColor) {
-        const adj = Array.from(curNeighbors[reg.id] || []).some(neighId => {
-          return holderOf(save, curWorld.iso, neighId) === save.playerColor;
-        });
-        if (adj) {
-          hasAnyAdjacentNonOwned = true;
-          break;
-        }
-      }
+    // Le siège d'un culte est l'objectif le plus rentable du jeu : il se voit.
+    const seats = ensureSeats(save);
+    const seatOwner = Object.keys(seats).find((c) => seats[c] === iso);
+    if (seatOwner && seatOwner !== save.playerColor) {
+      const sc = CULTS.find((c) => c.color === seatOwner);
+      body += `<br/><span style="color:#ffd24d;font-size:11px;font-weight:800;display:block;margin-top:4px;">`
+        + `⛧ BERCEAU du culte ${sc ? sc.name : 'rival'} — le prendre brisera son empire.</span>`;
+    } else if (seatOwner === save.playerColor) {
+      body += `<br/><span style="color:#ffd24d;font-size:11px;font-weight:800;display:block;margin-top:4px;">`
+        + `⛧ Votre berceau — le perdre disperserait vos fidèles.</span>`;
     }
 
-    const canAttack = !playerOwnsAny || isAdjacent || !hasAnyAdjacentNonOwned;
-
-    const maxPop = zoneMaxPopOf(save, curWorld.iso, region.id);
-    const curPop = zonePopOf(save, curWorld.iso, region.id);
-    const zoneRealMaxPop = Math.round((curWorld.pop || 1000000) / curRegions.length);
-    
-    let statsText = '';
-    if (mine) {
-      const pct = Math.min(100, Math.round((curPop / zoneRealMaxPop) * 100));
-      statsText = `<br/><span style="font-size: 12px; opacity: 0.85; display: block; margin-top: 4px;">Fidèles convertis : <span style="font-weight: 800; color: #ffe259;">${formatBelievers(curPop)}</span> / ${formatBelievers(zoneRealMaxPop)} (${pct}%)</span>`;
-    } else {
-      statsText = `<br/><span style="font-size: 12px; opacity: 0.85; display: block; margin-top: 4px;">Population de la zone : <span style="font-weight: 800; color: #fff;">${formatBelievers(zoneRealMaxPop)}</span> habitants</span>`;
-    }
+    zoneName.textContent = world.name;
+    zoneHolder.innerHTML = body;
+    zoneHolder.style.color = barbarian ? '#cfe' : rel.color;
 
     if (mine) {
-      zoneHolder.innerHTML = `Tenue par : ${symHtml} <span style="font-weight: 800;">${religionName}</span>${statsText}`;
       zonePlay.classList.add('hidden');
+    } else if (canEnterCountry(save, iso)) {
+      zonePlay.textContent = barbarian ? '⚔ Convertir cette terre' : '⚔ Partir en croisade';
+      zonePlay.disabled = false;
+      zonePlay.classList.remove('hidden');
     } else {
-      if (canAttack) {
-        zoneHolder.innerHTML = `Tenue par : ${symHtml} <span style="font-weight: 800;">${religionName}</span>${statsText}`;
-        zonePlay.disabled = false;
-      } else {
-        zoneHolder.innerHTML = `Tenue par : ${symHtml} <span style="font-weight: 800;">${religionName}</span>${statsText}<br/><span style="color: #ff5f6d; font-size: 11px; font-weight: 700; display: block; margin-top: 4px;">⚠️ Cette zone doit toucher un de vos territoires pour être convertie.</span>`;
-        zonePlay.disabled = true;
-      }
+      zoneHolder.innerHTML = body
+        + `<br/><span style="color:#ff5f6d;font-size:11px;font-weight:700;display:block;margin-top:4px;">`
+        + `⚠️ Ce pays doit toucher une de vos terres.</span>`;
+      zonePlay.disabled = true;
       zonePlay.classList.remove('hidden');
     }
-
-    zoneHolder.style.color = religionColor;
     panel.classList.remove('hidden');
+    // L'indice « glissez pour tourner » gênerait la lecture du panneau.
+    root.querySelector('.prog-hint')?.classList.add('hidden');
+  }
+
+  /** Referme le panneau et rend l'indice de manipulation du globe. */
+  function hideCountryPanel() {
+    panel.classList.add('hidden');
+    selectedWorld = null;
+    root.querySelector('.prog-hint')?.classList.remove('hidden');
   }
 
   zonePlay.addEventListener('click', () => {
-    if (selectedRegion) launchZone(selectedRegion);
+    if (selectedWorld) launchCountry(selectedWorld);
   });
 
   /**
-   * Lance la partie d'une zone. Appelé soit par la carte des provinces (repli),
-   * soit par un portail du Hub Overworld.
+   * Lance le match pour un pays. Un match = un tour de monde : la foi se
+   * propage, les 9 IA jouent, puis le combat a lieu.
    */
-  function launchZone(region) {
-    const world = curWorld;
-    if (!world || !region) return;
-    const preHolder = holderOf(loadSave(), world.iso, region.id);
-    const isBarbarian = !preHolder || preHolder === NEUTRAL;
-
-    // Collecte de toutes les religions non-barbares adjacentes (touchant la zone)
+  function launchCountry(world) {
+    if (!world) return;
     const save = loadSave();
+    const iso = world.iso;
+    const preHolder = ownerOf(save, iso);
+    const isBarbarian = preHolder === NEUTRAL;
+
+    /* Religions présentes autour de la cible : elles s'invitent au match, ce qui
+       rend les zones frontalières réellement disputées. */
     const adjacentSet = new Set();
-    if (preHolder && preHolder !== NEUTRAL && preHolder !== save.playerColor) {
-      adjacentSet.add(preHolder);
+    if (!isBarbarian && preHolder && preHolder !== save.playerColor) adjacentSet.add(preHolder);
+    for (const n of neighborsOf(iso)) {
+      const h = ownerOf(save, n);
+      if (h && h !== NEUTRAL && h !== save.playerColor) adjacentSet.add(h);
     }
-    const neighbors = curNeighbors[region.id] || [];
-    for (const nId of neighbors) {
-      const owner = save.conq[world.iso]?.[nId];
-      if (owner && owner !== NEUTRAL && owner !== save.playerColor) {
-        adjacentSet.add(owner);
-      }
-    }
-    const touchingOwners = Array.from(adjacentSet);
+
+    /* Force du défenseur transmise au match : une nation mûre doit se sentir.
+       Sans ça, une terre vide et une forteresse lançaient le même combat. */
+    const defenseInfo = {
+      believers: believersIn(save, iso),
+      saturation: fervorOf(save, iso),
+      isSeat: Object.values(ensureSeats(save)).includes(iso),
+      strength: isBarbarian ? 0 : Math.min(1, fervorOf(save, iso)
+        * (Object.values(ensureSeats(save)).includes(iso) ? 1.4 : 1)),
+    };
 
     const onResult = (res) => {
       const win = typeof res === 'object' ? res.win : res;
-      const conversions = typeof res === 'object' ? res.conversions : 0;
+      const conversions = typeof res === 'object' ? (res.conversions || 0) : 0;
+      const grade = typeof res === 'object' ? (res.grade || 'B') : 'B';
       const winnerColor = typeof res === 'object' ? res.winnerColor : null;
+
       root.classList.remove('hidden');
       if (!star) star = createStarfield(root.querySelector('.prog-stars'));
-      if (!globe) {
-        globe = createGlobe(root.querySelector('.prog-globe'), {
-          onPick(w2) {
-            const sv = loadSave();
-            if (!canEnterCountry(sv, w2.iso)) {
-              globe.focusWorld(w2);
-              toast(`« ${w2.name} » n'est pas accessible depuis vos terres.`);
-              return;
-            }
-            globe.focusWorld(w2);
-            setTimeout(() => enterCountry(w2), 360);
-          },
-          onUnknown() { toast('Cette terre n\'a pas encore été révélée.'); },
-        });
-      }
-      if (!country && curWorld && curRegions) {
-        requestAnimationFrame(() => {
-          country = createCountryMap(countryCanvas, curWorld, curRegions, selectZone);
-        });
-      }
-      if (win) {
-        const s0 = loadSave();
-        setHolder(world.iso, region.id, s0.playerColor, conversions, world.pop, curRegions.length);
-        country && country.repaint();
-        refreshProgress();
-        const save = loadSave();
-        const full = isCountryConquered(save, world, curRegions);
-        if (full) {
-          save.conquered = save.conquered || {}; save.conquered[world.iso] = true;
-          revealNeighbors(save, world.iso);   // lève le brouillard sur les voisins
-        }
-        // XP : +1 par zone conquise, +3 bonus si le pays est complété.
-        ensurePlayerLevel(save);
-        const proxy = { level: save.level, xp: save.xp, skillPoints: save.skillPoints, skills: save.skills };
-        const gainedPts = addXp(proxy, 1 + (full ? 3 : 0));
-        save.level = proxy.level; save.xp = proxy.xp; save.skillPoints = proxy.skillPoints;
-        persist(save);
+      if (!globe) globe = buildGlobe();
 
-        let msg = full
-          ? `🏆 ${world.name} entièrement convertie !`
-          : `✓ ${region.name} rejoint votre culte.`;
-        if (gainedPts > 0) {
-          msg += `\n⬆ Niveau ${save.level} ! +${gainedPts} pt${gainedPts > 1 ? 's' : ''} de compétence`;
-        }
+      if (win) {
+        const { decap } = captureCountry(iso, loadSave().playerColor, grade, conversions);
+        const s = loadSave();
+        ensurePlayerLevel(s);
+        const gained = addXp(s, isBarbarian ? 2 : 4);
+        delete s.lastDecap;   // on l'annonce nous-même juste en dessous
+        persist(s);
+
+        let msg = `✓ ${world.name} rejoint votre culte — ${formatBelievers(believersIn(s, iso))} fidèles.`;
+        if (gained > 0) msg += `\n⬆ Niveau ${s.level} ! +${gained} pt${gained > 1 ? 's' : ''} de foi`;
         toast(msg);
-      } else {
-        if (winnerColor) {
-          // L'IA gagnante du combat manuel prend le contrôle du territoire !
-          setHolder(world.iso, region.id, winnerColor, 0, world.pop, curRegions.length);
-          const save = loadSave();
-          // XP pour l'IA gagnante
-          const zones = Object.values(save.conq[world.iso] || {});
-          const fullAI = zones.length > 0 && zones.every(c => c === winnerColor);
-          const winnerState = ensureAiState(save, winnerColor);
-          addXp(winnerState, 1 + (fullAI ? 3 : 0));
-          persist(save);
-          
-          const cult = CULTS.find(c => c.color === winnerColor);
-          const name = cult ? cult.name : 'Un rival';
-          toast(`✗ Défaite. Le culte ${name} a conquis ${region.name}.`);
-        } else {
-          toast(`✗ ${region.name} résiste. Réessayez.`);
+
+        if (decap && decap.flipped > 0) {
+          const cult = CULTS.find((c) => c.color === decap.victim);
+          setTimeout(() => toast(
+            `⛧ BERCEAU BRISÉ — le culte ${cult ? cult.name : 'rival'} s'effondre !\n`
+            + `${decap.flipped} pays rejoignent votre foi.`
+          ), 2800);
         }
-        country && country.repaint();   // la simulation IA a pu changer des zones
+      } else if (winnerColor && winnerColor !== save.playerColor) {
+        // Un rival remporte le pays disputé.
+        captureCountry(iso, winnerColor, 'B', 0);
+        const s = loadSave();
+        addXp(ensureAiState(s, winnerColor), 2);
+        persist(s);
+        const cult = CULTS.find((c) => c.color === winnerColor);
+        toast(`✗ Défaite. Le culte ${cult ? cult.name : 'rival'} s'empare de ${world.name}.`);
+      } else {
+        toast(`✗ ${world.name} résiste. Vos fidèles se replient.`);
       }
+
+      reconcileConquestSkills();
       updateGlobalStatsUI();
-      panel.classList.add('hidden'); selectedRegion = null;
+      checkPassiveChanges();
+      checkFaithSpread();
+      hideCountryPanel();
+      globe && globe.repaint && globe.repaint();
     };
-    // Chaque lancement fait avancer la conquête des 9 IA.
+
+    // Un match = un tour de monde. La foi se propage, les IA jouent.
     simulateWorldTurn();
+
     if (playHandler) {
       root.classList.add('hidden');
       if (globe) { globe.stop(); globe = null; }
       if (star) { star.stop(); star = null; }
-      if (country) { country.stop(); country = null; }
       playHandler({
         world,
-        region,
+        region: { id: iso, name: world.name },   // compat : le match attend une « région »
         onResult,
-        playerColor: loadSave().playerColor,
-        zonesCount: curRegions.length,
+        playerColor: save.playerColor,
+        zonesCount: 1,
         barbarian: isBarbarian,
         owner: preHolder,
-        touchingOwners
+        touchingOwners: Array.from(adjacentSet),
+        defense: defenseInfo,
       });
-    } else { onResult(true); } // fallback autonome : conquête simulée
+    } else {
+      onResult({ win: true, grade: 'B' });   // repli autonome : conquête simulée
+    }
   }
 
-  async function enterCountry(world) {
-    loading && loading.parentNode && (loading.textContent = 'Chargement du territoire…');
-    let regions;
-    try { regions = await loadRegions(world.iso); } catch (e) { toast('Territoire indisponible.'); return; }
-    const save = loadSave();
-    initCountry(save, world, regions);
-    curWorld = world; curRegions = regions; selectedRegion = null;
-    curNeighbors = buildRegionNeighbors(regions);
-
-    // Nouveau flux : le pays s'explore en 3D. La carte des provinces est
-    // court-circuitée, chaque zone étant représentée par un portail du Hub.
-    if (hubHandler) {
-      root.classList.add('hidden');
-      if (globe) { globe.stop(); globe = null; }
-      if (star) { star.stop(); star = null; }
-      if (country) { country.stop(); country = null; }
-      hubHandler({
-        world,
-        regions,
-        zonesCount: regions.length,
-        playerColor: save.playerColor,
-        playerLeader: save.playerLeader,
-        launchZone: (i) => launchZone(regions[i]),
-      });
-      return;
-    }
-
-    const rel = getWorldReligion(save, world);
-    const symHtml = (rel.sym.startsWith('data:') || rel.sym.startsWith('http'))
-      ? `<img src="${rel.sym}" class="prog-head-icon" />`
-      : rel.sym;
-    cTitle.innerHTML = `${symHtml} ${world.name}`;
-    cTitle.style.color = rel.color;
-    globeView.classList.add('hidden'); countryView.classList.remove('hidden');
-    panel.classList.add('hidden');
-    country && country.stop();
-    // le canvas doit avoir sa taille avant le rendu
-    requestAnimationFrame(() => {
-      country = createCountryMap(countryCanvas, world, regions, selectZone);
-      refreshProgress();
+  /** Construit (ou reconstruit) le globe avec ses gestionnaires de sélection. */
+  function buildGlobe() {
+    return createGlobe(root.querySelector('.prog-globe'), {
+      onPick(world) {
+        const save = loadSave();
+        selectedWorld = world;
+        globe.focusWorld(world);
+        if (ownerOf(save, world.iso) === save.playerColor) {
+          showCountryPanel(world);   // nos terres : on informe, on ne combat pas
+          return;
+        }
+        showCountryPanel(world);
+      },
+      onUnknown() { toast('Cette terre n\'a pas encore été révélée.'); },
     });
   }
 
-  globe = createGlobe(root.querySelector('.prog-globe'), {
-    onPick(world) {
-      const save = loadSave();
-      if (!canEnterCountry(save, world.iso)) {
-        globe.focusWorld(world);
-        toast(`« ${world.name} » n'est pas accessible depuis vos terres.`);
-        return;
-      }
-      globe.focusWorld(world);
-      setTimeout(() => enterCountry(world), 360);
-    },
-    onUnknown() { toast('Cette terre n\'a pas encore été révélée.'); },
-  });
+  globe = buildGlobe();
 
   try { await ensureShapes(); } catch (e) { loading.textContent = 'Carte du monde indisponible.'; return; }
   loading.remove();
 
-  // Choix du pays de départ + couleur du joueur (dès que WORLDS est peuplé)
+  // Création du culte, ou reprise de la campagne en cours.
   {
     const s = loadSave();
     if (!s.playerName) {
-      // Pas encore de campagne active => ouvrir le créateur
       selectedCreatorLeader = 'monk';
       renderCreatorLeaders();
       creatorOverlay.classList.remove('hidden');
     } else {
-      ensureWorldModel(s);            // migre vers le modèle v2 (monde réinitialisé)
-      await seedReligionStarts();     // 1 zone par religion
-      ensureDiscovery(loadSave());    // brouillard : découverte rétroactive + pays de départ
+      ensureWorldModel(s);            // migre vers le modèle v3 (le pays est l'unité)
+      await seedReligionStarts();     // 1 pays par religion
+      /* Reprise de partie : la liste WORLDS vient d'être peuplée par
+         ensureShapes. Tout pays absent de la sauvegarde n'aurait aucun
+         propriétaire, donc serait à jamais inattaquable — on les déclare
+         barbares au passage. */
+      {
+        const cur = loadSave();
+        initAllCountries(cur);
+        persist(cur);
+      }
+      ensureDiscovery(loadSave());
       const s2 = loadSave();
       const w = WORLDS[ISO_WORLD[s2.startIso]];
-      if (w) {
-        setTimeout(() => globe.focusWorld(w), 200);
-      }
+      if (w) setTimeout(() => globe.focusWorld(w), 200);
+      reconcileConquestSkills();
     }
   }
 
   updateGlobalStatsUI();
-
-  // Pré-initialisation asynchrone de TOUS les pays.
-  // Fetch en parallèle par lots, puis écriture SÉRIELLE pour éviter les races sur localStorage.
-  (async () => {
-    const BATCH = 20;
-    for (let i = 0; i < WORLDS.length; i += BATCH) {
-      const chunk = WORLDS.slice(i, i + BATCH);
-      const loaded = await Promise.all(chunk.map(async (w) => {
-        try { return { w, regs: await loadRegions(w.iso) }; }
-        catch { return null; }
-      }));
-      const s = loadSave();
-      for (const item of loaded) {
-        if (!item) continue;
-        if (s.conq && s.conq[item.w.iso]) continue;
-        initCountry(s, item.w, item.regs);
-      }
-      updateGlobalStatsUI();
-    }
-  })();
+  checkPassiveChanges();
+  checkFaithSpread();
 }
 
 export function closeProgression() {
   if (!root) return;
-  country && country.stop(); globe && globe.stop(); star && star.stop();
-  root.remove(); root = null; globe = null; star = null; country = null;
+  if (creatorKeyHandler) { document.removeEventListener('keydown', creatorKeyHandler); creatorKeyHandler = null; }
+  globe && globe.stop(); star && star.stop();
+  root.remove(); root = null; globe = null; star = null;
   if (onCloseCb) onCloseCb();
 }
 

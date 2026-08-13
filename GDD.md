@@ -268,3 +268,268 @@ Chaque niveau d'un pays est matérialisé par un **Portail en pierre 3D** ayant 
 - **Lancement de partie** : Entrer dans un portail ouvert initialise la partie de la zone correspondante.
 - **Victoire** : À la fin du match, `recordPortalVictory(iso, portalIndex, spiritsEarned)` mémorise la conquête, puis le joueur est réexpédié dans le Hub Overworld 3D où le portail est peinté et le suivant est débloqué.
 
+---
+
+# 10. REFONTE DU CŒUR DE JEU — Les Deux Mondes (V3)
+
+> **Statut :** ce chapitre **remplace** le cœur de jeu décrit aux chapitres 1 à 4 et 7.
+> Les chapitres 5 (direction artistique), 5.3 et 9 (méta-progression, overworld) restent valides.
+>
+> **Motif de la refonte :** l'ancienne boucle produisait quatre joueurs jouant en solo côte à côte. Rien dans le score n'était disputé, aucune action n'enlevait quoi que ce soit à l'adversaire, et une partie suffisait à faire le tour du jeu.
+
+---
+
+## 10.1 Le jeu en une phrase
+
+> Tu déplaces **quatre sortes d'âmes** entre **dix autels**, en passant librement du **corps** à **l'esprit**, pour que ta peinture couvre la carte.
+
+Session cible : **5 minutes maximum**. Victoire : la plus grande part de territoire peint.
+
+---
+
+## 10.2 Les deux formes
+
+Le joueur bascule librement, à tout moment, d'une pression.
+
+### La Chair (le Leader)
+
+Forme par défaut. Elle **agit sur la matière** :
+- seule forme capable de **déposer une âme** sur un autel (donc de le capturer) ;
+- seule forme capable de **frapper** un rival ;
+- terrestre : elle contourne les obstacles, elle ne voit pas le monde caché.
+
+### L'Esprit
+
+**On ne devient pas un fantôme générique : on prend la forme de SON élémentaire.**
+Six personnages jouables, six esprits élémentaires — la transformation est propre au personnage et le dit d'un coup d'œil.
+
+| Personnage | Élémentaire |
+|---|---|
+| Moine | Lumière |
+| Sorcier | Éther |
+| Nomade | Terre |
+| Amazone | Feu |
+| Alien | Air |
+| Chef | Eau |
+
+**Un esprit est sa propre lumière.** Le monde des esprits est très sombre ; l'esprit, lui, est **auto-illuminé** — il garde exactement sa couleur d'élément, aucun éclairage n'a de prise sur lui — et il porte un **halo** qui révèle les alentours immédiats. C'est ce halo qui rend la carte lisible en esprit.
+
+> **Conséquence directe :** un rival passé en esprit est, lui aussi, **parfaitement visible** — il appartient au même monde et brille de la même façon. Deux esprits qui se croisent ne peuvent pas se rater. C'est ce qui rend la rencontre rare et électrique plutôt que furtive.
+
+> **Les esprits élémentaires sauvages sont retirés de la carte.** En laisser errer des copies au sol faisait doublon avec la transformation et brouillait la lecture. Les âmes ne viennent plus que des **piliers** (§10.4).
+
+Forme de reconnaissance. Elle **agit sur l'information** :
+- **traverse** roche, ravins et eau ;
+- voit les rivaux comme des **auras, à travers le terrain** ;
+- seule forme capable de **voir et ramasser les âmes** aux piliers ;
+- **ne peut rien capturer, rien frapper**.
+
+**Visibilité croisée :** un esprit n'est visible que par un autre esprit. Deux esprits qui se croisent est une rencontre rare et électrique. **Exception :** un esprit qui **porte une âme** émet une aura visible de tous, y compris en chair.
+
+### Le chrono d'esprit
+
+- **10 secondes** d'esprit maximum par passage.
+- Puis **5 secondes** avant de pouvoir y retourner.
+- Chrono épuisé = retour forcé en chair, où que tu sois.
+- Sortir tôt n'économise rien : le délai de retour est le même. Le joueur est donc poussé à **se servir de ses dix secondes** plutôt qu'à picorer.
+
+> Pas d'économie cachée, pas de ressource à gérer : un chrono que tout le monde lit du premier coup d'œil, y compris ses adversaires. La contrainte est **temporelle**, pas géographique — une incursion se planifie en secondes, pas en distance à sa propre peinture.
+
+### Le déplacement est identique dans les deux formes
+
+**Marche, course et boost fonctionnent en esprit exactement comme en chair**, avec les mêmes commandes. La forme change **ce qu'on peut faire**, jamais **la façon de se déplacer**. L'esprit est simplement plus rapide (×1,38), et le boost se cumule à cette vivacité.
+
+---
+
+## 10.3 Le monde des esprits
+
+En basculant, le monde matériel ne disparaît pas — il **s'efface**. Décor translucide et froid, couleurs vidées, son étouffé sous un chœur. Par-dessus apparaissent les objets qui n'existent que là :
+
+| Objet | Rôle |
+|---|---|
+| **Les Piliers** | Source **unique** des âmes. Invisibles en chair. |
+| **Les Âmes sauvages** | Ce qu'on ramasse aux piliers. |
+| **Les Auras** | Position des rivaux, visible à travers le terrain. |
+| **Les Traces** | Passage récent des rivaux, s'efface lentement. |
+| **Les Failles** | Raccourcis à travers roche et ravins, praticables en esprit seul. |
+| **Les Flammes adverses** | L'âme installée dans chaque autel ennemi (invisible en chair). |
+
+---
+
+## 10.4 Les piliers et l'économie des âmes
+
+- **8 piliers** pour 10 autels, à **recharge lente**. C'est le **seul** robinet à âmes du jeu.
+- Le type d'âme délivré est **aléatoire**, mais **annoncé** : une **flamme de couleur** flotte au-dessus du pilier et se lit de loin dans le monde des esprits.
+
+> Le hasard est donc **dans le monde, pas dans ta main**. Tu ne choisis pas la distribution, mais tu la lis et tu décides quel pilier vaut le déplacement. La reconnaissance en esprit ne consiste plus à chercher des âmes, mais **la bonne âme**.
+
+**Réglage :** le nombre d'âmes en circulation est le bouton principal du tempo. Garder la pénurie — la rareté force la rencontre. On ne doit **jamais** pouvoir équiper tous ses autels.
+
+---
+
+## 10.5 Le portage des âmes
+
+- **4 emplacements**, **une âme maximum par type**. Sélection à la **croix directionnelle** (manette) ou **4 symboles** (mobile).
+- Porter une âme fait apparaître une **aura** autour du joueur, dans les deux formes.
+- **Personne ne sait combien tu portes.** L'aura dit *« il a quelque chose »*, jamais combien.
+
+> On cache ce que tu **portes**, on montre ce que tu **encaisses**. Attaquer reste un pari sur le butin ; le bouclier, lui, est public (§10.7).
+
+**À la mort du porteur :**
+- l'âme **sélectionnée à la croix** tombe au sol, ramassable par tous ;
+- **toutes les autres retournent au monde des esprits**, sur des piliers au hasard.
+
+> **Conséquence :** thésauriser est irrationnel. Le jeu pousse à **dépenser vite** — prendre, placer, repartir. La carte reste en mouvement permanent sans qu'aucune règle anti-camping n'ait été écrite.
+>
+> **Corollaire tactique :** se déplacer avec sa moins précieuse sélectionnée est un réflexe de bon joueur.
+
+---
+
+## 10.6 Les quatre âmes
+
+Chaque âme répond à une **situation**, pas à une statistique.
+
+| Âme | Élément | Situation | Effet |
+|---|---|---|---|
+| **Fleuve** | Eau | Un autel neuf, du sol vide à prendre | Nappe **rapide et large** sur le sol neutre |
+| **Cendre** | Feu | Un autel avancé mais **bloqué** contre un front adverse | Sa nappe **avance sur la peinture ennemie** et la convertit |
+| **Racine** | Terre | Un autel **menacé** qu'on veut verrouiller | Nappe **dure** : résiste à la Cendre adverse, et l'autel est plus long à capturer |
+| **Gardienne** | — | Sa propre survie | Donne au porteur un **bouclier de 3 coups** (§10.7). **Ne produit aucune peinture.** |
+
+Étendre, percer, verrouiller, protéger. Les trois premières agissent sur **la peinture** ; la quatrième agit sur **le joueur**.
+
+**Toutes les quatre capturent un autel.** On n'est jamais bloqué faute de la « bonne » âme — le type détermine ce que l'autel fera ensuite, pas s'il peut être pris.
+
+---
+
+## 10.7 Le bouclier (Gardienne)
+
+- **Un seul autel Gardienne à la fois**, maximum.
+- Le joueur porte alors une **bulle alvéolée blanche lumineuse**, encaissant **3 coups**.
+- **La densité des alvéoles indique la résistance restante** : 3 coups = maillage serré et opaque ; 1 coup = maillage large et clignotant. Lisible en vision périphérique, et **sans conflit avec les couleurs des cultes** (contrairement à un code vert/orange/rouge).
+- **Aucune recharge en jeu.** Le bouclier ne revient qu'à la **réapparition à la base**.
+- Perdre son autel Gardienne **retire la bulle instantanément**.
+
+### L'autel Gardienne est un point faible assumé
+
+Il **ne produit aucune peinture** et est **entouré d'un halo lumineux blanc**, visible de tous, en chair comme en esprit. Il forme donc un trou de sol neutre cerclé de blanc au milieu du territoire de son propriétaire : **impossible à cacher, et volontairement.**
+
+- Le **blanc** est la signature de Gardienne — même langage visuel que la bulle du joueur.
+- Tout le monde sait où frapper pour **dénuder** un adversaire, et le prendre retire sa bulle instantanément.
+- Cela crée la meilleure séquence d'attaque du jeu : **casser le bouclier à l'autre bout de la carte, puis venir chercher le joueur.**
+
+> Une mécanique défensive a besoin d'un talon d'Achille **localisé et public**, sinon elle devient oppressante. C'est le prix de la survie : trois points de vie contre une cible peinte dans le dos.
+
+> **Le suicide-recharge est une option assumée** : un joueur dénudé peut choisir de mourir pour repartir bouclier plein. Sur une partie de 5 minutes, les secondes perdues en font un vrai coût. C'est un **échange de tempo**, pas un exploit.
+
+**Choix d'ouverture :** première âme en **Fleuve** (avance rapide, mais en verre) ou en **Gardienne** (lent, mais survit aux premières rencontres). Deux ouvertures viables — chaque partie a une identité dès la 20ᵉ seconde.
+
+---
+
+## 10.8 Les autels
+
+**10 autels** dispersés sur la carte, plus **une base par équipe**.
+
+### Règle fondamentale
+
+> **Un autel *est* son âme.**
+> - Autel **neutre** : aucune âme, **ne produit rien**.
+> - Autel **possédé** : exactement **une** âme, qui définit tout son comportement.
+> - **Capturer, c'est remplacer.**
+
+### Capture
+
+Le joueur, **en chair**, dépose une âme et **tient le cercle** pendant que l'autel la boit. Immobile, exposé, interruptible — c'est la fenêtre de combat du jeu.
+
+**L'âme précédente retourne au monde des esprits** (piliers au hasard).
+
+**Durée du sacre :** l'autel boit aussi **la peinture alentour**.
+- Autel entouré de ta couleur → sacre **très rapide**.
+- Autel isolé en plein territoire ennemi → sacre **très long**, probablement mortel.
+
+> **Effet structurel :** on conquiert **de proche en proche**, la marée pousse et les autels suivent. Le raid lointain reste possible mais c'est un exploit, pas une routine. On obtient un **front** sans avoir écrit une seule règle sur les fronts. C'est aussi ce qui empêche tout ping-pong d'autels.
+
+### Échange d'âme sur son propre autel
+
+En passant près d'un autel qu'on possède, on peut **remplacer son âme**. L'ancienne retourne au monde des esprits.
+
+> Ce n'est pas une amélioration, c'est un **renoncement** : passer un autel de Fleuve à Cendre pour percer, c'est arrêter son expansion ailleurs. Et l'âme libérée redevient disponible **pour tout le monde**, y compris l'adversaire qui te regardait faire.
+
+### Lisibilité
+
+- Un autel pris voit une **statue du joueur** s'y dresser (comportement déjà implémenté, `spawnAltar` / `_statueRises`).
+- Une **flamme de couleur** au-dessus de la statue indique l'âme installée — **uniquement sur ses propres autels**.
+- **En chair, on ne voit que la flamme de ses propres autels.** Celles des adversaires sont invisibles.
+- **En esprit, on voit toutes les flammes**, y compris celles des autels adverses.
+
+> C'est la première vraie information cachée de la carte : on voit qui possède quoi, mais pas **avec quoi**. Attaquer un autel adverse à l'aveugle est un pari — on peut tomber sur une Racine et y perdre dix secondes.
+>
+> Et la reconnaissance en esprit gagne un **second motif** : on ne part plus seulement chercher la bonne âme, mais **savoir où frapper**. Deux raisons pour un même déplacement — signe que le système est bien noué.
+
+---
+
+## 10.9 La peinture
+
+### Règle de propagation
+
+> Une nappe s'étend sur le **sol neutre**. Elle **s'arrête net** contre une nappe ennemie.
+> **Seule la Cendre franchit cette frontière.**
+
+Deux peintures se **touchent sans se manger**. Il se forme des frontières stables et visibles, et le seul moyen de les faire bouger est d'aller chercher une Cendre. C'est ce qui donne à ce type sa valeur, et à la carte sa lisibilité stratégique.
+
+### Quand un autel change de mains
+
+> Une nappe **coupée de sa source se dessèche** et redevient neutre en une dizaine de secondes.
+
+La peinture ennemie ne bascule pas d'un coup (trop gratuit) et ne reste pas éternellement (la carte deviendrait un charnier de couleurs mortes) : elle **reflue vers l'autel et meurt**, pendant que la nouvelle nappe monte et la remplace.
+
+> **La leçon stratégique du jeu, en une phrase : on ne combat pas la peinture, on coupe sa source.**
+> La **Cendre** sert à percer un front tenu par un autel vivant ; la **capture** sert à effacer tout un territoire d'un coup. Deux outils, deux usages, aucun redondant.
+
+---
+
+## 10.10 La mort
+
+**Une seule règle de mort pour tout le jeu, identique dans les deux formes.**
+
+Touché → le joueur **explose en particules** → les particules refluent vers sa base → il s'y reforme, **bouclier plein**.
+
+Pas de cadavre, pas de camping sur le point de mort, pas d'écran de défaite. Ce qu'il portait, lui, **reste sur le terrain** (§10.5) : on ne tue pas pour tuer, **on tue pour ce que l'autre porte**.
+
+---
+
+## 10.11 Les bases
+
+Une par équipe. Ce n'est pas une forteresse à défendre, c'est une **ancre** :
+- source d'origine de la peinture de l'équipe ;
+- **annule le délai de retour en esprit** au contact ;
+- point de réapparition, bouclier rechargé.
+
+Elle n'est pas destructible. Ce qui se joue autour d'elle, c'est la peinture : un adversaire qui repeint tes abords t'étouffe sans avoir à t'assiéger.
+
+---
+
+## 10.12 Piliers de design (V3)
+
+1. **Le monde des esprits contient l'information ; le monde matériel contient l'action.** Toute nouvelle mécanique doit se ranger d'un côté ou de l'autre.
+2. **Un autel est son âme.** Pas de niveaux, pas d'empilement, pas de compteurs — un placement, relisible en permanence.
+3. **On cache ce qu'on porte, on montre ce qu'on encaisse.**
+4. **Chaque âme répond à une situation, pas à une statistique.** Si un type n'a pas de moment où l'on est *content* de le tirer, il ne doit pas exister.
+5. **Le hasard est dans le monde, pas dans la main.** Ce qui est aléatoire doit être visible avant qu'on s'engage.
+6. **Les objectifs sont émergents.** Un autel disputé ou un pilier qui se recharge crée le rendez-vous ; ne jamais scripter un événement pour forcer la rencontre.
+
+---
+
+## 10.13 Ordre d'implémentation
+
+Chaque étape est testable seule ; si l'une déçoit, on s'arrête avant d'avoir payé la suivante.
+
+1. **Le basculement de forme** — transformation, chrono 10 s / 5 s, déplacement identique dans les deux formes, mort en particules. *Test décisif : si l'aller-retour n'est pas agréable à faire cinquante fois par partie, rien d'autre ne sauvera le jeu.*
+2. **Piliers et portage** — ramassage en esprit, 4 emplacements, sélection à la croix, aura, perte à la mort.
+3. **Autel + âme** *(fait)* — dépôt, sacre modulé par la peinture alentour, statue et flamme, échange d'âme. L'ancienne économie élémentaire (compteurs `need`/`filled`, livraison par le cortège) a été démontée.
+4. **La peinture par source** — propagation depuis les autels (remplace la peinture au pas), blocage aux frontières, dessèchement des nappes orphelines.
+5. **Les quatre effets d'âme** — Fleuve, Cendre, Racine, Gardienne.
+6. **L'IA** *(fait)* — parité totale : les rivaux passent par les mêmes fonctions que le joueur (bascule de forme, ramassage, dépôt, mort), avec les mêmes chronos, les mêmes quatre emplacements et les mêmes pertes. Aucune valeur n'est trafiquée en leur faveur ; le seul écart est la qualité de la décision.
+
+   Leur boucle tient en quatre questions : *un butin au sol ? de quoi prendre un autel qui vaut le déplacement ? quel pilier vaut la course, et ai-je le chrono pour ? sinon, quel porteur chasser ?*
+

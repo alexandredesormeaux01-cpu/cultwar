@@ -25,7 +25,7 @@ import { openProgression, setPlayHandler, getGlobalStats, formatBelievers, getSp
 import { createPortalMesh, createCentralAltarMesh, createGreatPlanetPortalMesh, updatePortalsSystem, setPortalState,
   loadPortalFrame, onPortalFrameReady, applyPortalFrame } from './portals.js';
 import {
-  BIOMES, getBiomeForIso, randomBiomeKey, buildBiomeScenery, toonMaterial, patchToonOutline, attachCartoonOutline,
+  BIOMES, getBiomeForIso, randomBiomeKey, buildBiomeScenery, toonMaterial, modelMaterial, patchToonOutline, attachCartoonOutline, ALBEDO,
   loadGrass, onGrassReady, buildBiomeGrass,
   loadTrees, onTreesReady, buildBiomeTrees,
   loadNature, onNatureReady, buildBiomeNature,
@@ -37,7 +37,7 @@ import {
   HEX_R, STEP_H, nearestSolidPoint, canJumpToward, groundHeightAt, canStep, tileAt,
   buildRampStairs,
   buildPaintSurface, flatTiles,
-  reserveSanctuary, loadTileVariant, setGroundMaterial,
+  reserveSanctuary, loadTileVariant, setGroundMaterial, setGroundSunDir,
 } from './hexmap.js';
 import { initNative } from './cap.js';
 import { getSkillMods } from './skills.js';
@@ -46,7 +46,10 @@ import {
   resetCrystals,
 } from './crystals.js';
 import { IS_MOBILE, describeDevice } from './device.js';
-import { bakeVAT, makeVATMaterial, makeVATOutlineMaterial } from './vat.js';
+import { bakeVAT, makeVATMaterial, makeVATOutlineMaterial, CHAR_FILL_U } from './vat.js';
+import {
+  initFootprints, setFootprintBiome, clearFootprints, addFootprint, updateFootprints,
+} from './footprints.js';
 import { soundEngine } from './soundEngine.js';
 import {
   MAP_R, DENSITY, AGENT_CAP_MOBILE, AGENT_CAP_DESKTOP,
@@ -85,6 +88,21 @@ import {
 import { createNetClient } from './net/client.js';
 import { createRng, isoSeed } from './sim/rng.js';
 import { updateHeroCutout } from './heroCutout.js';
+import {
+  spirit, formOf, canEnterSpirit, resetSpirit, toggleSpirit, forceFlesh,
+  updateSpirit, spiritSpeedMul, TUNE_SPIRIT,
+} from './spiritform.js';
+import { updateFlames } from './flame.js';
+import { updateSoulEscort, clearSoulEscort, soulPosition } from './soulEscort.js';
+import {
+  setPillarModel, placePillars, clearPillars, updatePillars, getPillars,
+  TUNE_PILLARS, SOULS,
+} from './pillars.js';
+import {
+  addSoul, selectSlot, selectedSoul, hasSoul, takeSoul, carryingAnything,
+  loseAllOnDeath, resetSouls, dropSoulAt, updateDroppedSouls, initSoulsHud,
+  initAltarPanel, updateAltarPanel, bagOf, heldList, getDropped, TUNE_SOULS,
+} from './souls.js';
 import { createLobbyStage } from './lobbyStage.js';
 import { drawOrb, drawGlow } from './orb-texture.js';
 import {
@@ -169,12 +187,32 @@ const SHARED_PARTICLE_GEO = new THREE.DodecahedronGeometry(1, 0);
 const _particleMatCache = new Map();   // couleur d'instance neutre du paysan (corps non teinté)
 let currentDifficulty = localStorage.getItem('cultio_difficulty') || 'normal';
 
+/* ---- Focal ----
+   48° était un grand-angle : les tuiles du premier plan fuyaient beaucoup plus
+   vite que celles du fond, et cette divergence de perspective est ce qui donnait
+   l'impression de survoler une maquette posée sur une table plutôt que d'être
+   dans un paysage. Un focal long (34°) rapproche les fuyantes de l'orthographie
+   — les hexagones gardent presque la même taille du bas au haut de l'écran — et
+   c'est la lecture « terrain » qu'on cherche.
+
+   Mais un focal plus long rétrécit le champ : à distance égale on verrait
+   beaucoup moins de vallée. `CAM_FOV_COMP` est le facteur exact qui restitue la
+   même largeur cadrée en reculant la caméra, de sorte que le réglage soit
+   purement un changement de PERSPECTIVE et pas un changement de zoom. Il est
+   replié dans `camDistMul`, qui multiplie déjà hauteur et recul partout où la
+   caméra de jeu se positionne — un seul point d'application, donc rien à
+   corriger dans les formules de cadrage elles-mêmes. */
+const CAM_FOV = 34;
+const CAM_FOV_REF = 48;
+const CAM_FOV_COMP =
+  Math.tan(CAM_FOV_REF * Math.PI / 360) / Math.tan(CAM_FOV * Math.PI / 360);
+
 /* Distance caméra (menu) : multiplie hauteur + recul sans changer l'angle iso. */
 const CAM_DIST_MUL = { near: 0.78, mid: 1.0, far: 1.32 };
 const CAM_DIST_KEY = 'cultio_cam_dist';
 let currentCamDist = localStorage.getItem(CAM_DIST_KEY) || 'mid';
 if (!(currentCamDist in CAM_DIST_MUL)) currentCamDist = 'mid';
-let camDistMul = CAM_DIST_MUL[currentCamDist];
+let camDistMul = CAM_DIST_MUL[currentCamDist] * CAM_FOV_COMP;
 
 /* Qualité graphique (menu). Sur tactile : MSAA activé partout — c'est
    quasi-gratuit sur GPU mobiles tile-based (Adreno/Mali/Apple) et supprime
@@ -206,7 +244,12 @@ const renderer = new THREE.WebGLRenderer({
 /* L'antialias est figé au contexte WebGL : si l'utilisateur change de palier
    AA, on recharge pour recréer le renderer. */
 const _bootGfxAA = gfx().aa;
-renderer.shadowMap.type = isCoarse ? THREE.BasicShadowMap : THREE.PCFShadowMap;
+/* PCFSoft sur desktop : la pénombre douce est ce qui distingue une ombre
+   « posée » d'un aplat découpé au ciseau. Le surcoût est un noyau de 4 tapes au
+   lieu d'1 dans le fragment shader — invisible ici, l'ombre ne couvrant qu'une
+   fraction de l'écran. Tactile reste en Basic : le filtrage y coûte plus que ce
+   qu'il rapporte sur une carte d'ombre de 256. */
+renderer.shadowMap.type = isCoarse ? THREE.BasicShadowMap : THREE.PCFSoftShadowMap;
 /* Coupe locale : sans elle, les `clippingPlanes` posés sur un matériau sont
    purement et simplement ignorés. Seule la levée des statues de sanctuaire s'en
    sert (elles émergent du sol au lieu de le traverser), et la coupe est retirée
@@ -255,7 +298,35 @@ const GRADE = {
    intensités à chaque image : sans ces multiplicateurs, toute valeur posée à la
    main serait effacée à l'image suivante et le panneau d'ambiance ne servirait à
    rien. À 1, ils n'ont aucun effet — ils ne changent donc pas le rendu livré. */
-const TUNE = { exposure: 1, sun: 1, hemi: 1 };
+const TUNE = { exposure: 1, sun: 1, hemi: 1, env: 1, charFill: 1, charHemi: 1, altar: 1 };
+
+/* ---- Profondeur de champ ----
+   Le calque et son masque vivent dans style.css ; ici on ne fait que doser et
+   éteindre. Voir le commentaire du #dof dans index.html pour le pourquoi du
+   compositeur plutôt qu'une passe WebGL. */
+/* Flaque de lumière au sol sous le joueur. `size` est un rayon en unités de
+   l'échelle du disque, `opacity` son plancher de jour. Réglable en direct par
+   __grade.halo(). */
+const HALO = { size: 1.5, opacity: 0.22 };
+
+const DOF = {
+  blur: 3.5,          // px
+  topEnd: 34,         // %, fin du flou en partant du haut
+  bottomStart: 93,    // %, début du léger flou de premier plan
+};
+
+function applyDof() {
+  const el = document.getElementById('dof');
+  if (!el) return;
+  /* Éteint hors du palier « high » : le flou de fond oblige le compositeur à
+     garder une copie du canvas, ce qui est précisément le coût mémoire qu'on
+     évite sur tactile. */
+  el.classList.toggle('off', currentGraphics !== 'high');
+  const s = document.documentElement.style;
+  s.setProperty('--dof-blur', DOF.blur + 'px');
+  s.setProperty('--dof-top-end', DOF.topEnd + '%');
+  s.setProperty('--dof-bottom-start', DOF.bottomStart + '%');
+}
 
 function applyGrade() {
   const g = GRADE;
@@ -267,10 +338,18 @@ function applyGrade() {
   renderer.domElement.style.filter = parts.length ? parts.join(' ') : '';
 }
 applyGrade();
+applyDof();
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9fdcff);
 scene.fog = new THREE.Fog(0x9fdcff, 70, 165);
+/* Vivier des traces de pas : construit une fois, réutilisé d'une carte à
+   l'autre — seules la texture et la teinte changent avec le biome.
+   Ici, et surtout PAS auprès des autres initialisations plus haut : `scene` est
+   déclarée juste au-dessus, et un appel posé avant la lirait dans sa zone morte
+   temporelle. Ni le build ni check-scope ne détectent ce cas — la variable est
+   bien déclarée, simplement trop tard. */
+initFootprints(scene);
 
 // Poignée de debug console : window.__cult.info() → draw calls / triangles ;
 // window.__cult.toggleNature() → montre/cache le décor pour isoler son coût.
@@ -305,20 +384,139 @@ window.__cult = {
   },
 };
 
-const camera = new THREE.PerspectiveCamera(48, innerWidth / innerHeight, 0.5, 400);
+/* Le plan lointain suit le recul imposé par le focal long, sinon le fond du
+   décor serait tranché net. */
+const camera = new THREE.PerspectiveCamera(CAM_FOV, innerWidth / innerHeight, 0.5, 400 * CAM_FOV_COMP);
 
 const hemi = new THREE.HemisphereLight(0xcfefff, 0x4a7a4f, 0.95);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff2d8, 1.6);
 sun.castShadow = true;
-sun.shadow.bias = -0.0015;
+/* Décalage de profondeur : `bias` est un décalage CONSTANT, il devait donc être
+   assez gros pour couvrir le pire angle d'incidence — et à -0.0015 il décollait
+   visiblement l'ombre de son objet (« peter-panning »), ce qui est exactement ce
+   qui empêchait les rochers d'avoir l'air posés au sol. `normalBias` décale le
+   point échantillonné le long de la normale, donc proportionnellement au besoin
+   réel : on peut ramener le bias constant près de zéro et récupérer le contact. */
+sun.shadow.bias = -0.0002;
+sun.shadow.normalBias = 0.03;
 scene.add(sun, sun.target);
+
+/* ---- Course du soleil (voir le placement dans update()) ----
+   Élévations en DEGRÉS, pas en hauteur monde : c'est l'angle qui détermine la
+   longueur des ombres, et donc le relief perçu. Rester bas est le réglage
+   d'ambiance principal de la vallée.
+   Azimut : négatif = soleil à droite et DERRIÈRE la scène, donc ombres rabattues
+   vers le bas-gauche de l'écran, face à l'observateur.
+   Le rayon ne change rien à la direction d'une lumière directionnelle ; il doit
+   seulement rester en deçà du `far` de la caméra d'ombre (70 sur tactile). */
+/* ============================== Éclairage par image (IBL) ==============================
+   C'est le changement qui fait passer le rendu d'« aplats éclairés par une
+   lampe » à « objets dans un lieu ».
+
+   Une lumière directionnelle ne répond qu'à une question : cette face regarde-
+   t-elle le soleil ? Tout ce qui ne le regarde pas reçoit la même valeur plate,
+   d'où des faces à l'ombre uniformément mortes. Dans la réalité — et dans
+   l'image de référence — ces faces sont éclairées par le CIEL au-dessus et par
+   le SOL qui rebondit en dessous, chacun avec sa couleur. C'est cette lumière
+   indirecte colorée qui donne le modelé, et un HemisphereLight ne la simule que
+   très grossièrement : deux couleurs interpolées par la seule normale verticale,
+   sans aucune notion de ce qu'il y a réellement autour.
+
+   `scene.environment` remplace ça par le ciel réel du biome, préfiltré. Chaque
+   face reçoit alors la lumière de la portion de ciel qu'elle regarde vraiment.
+
+   Le coût est un préfiltrage GPU une fois par carte — pas par image. C'est
+   pourquoi tout est fait ici, au chargement, et jamais dans la boucle.
+--------------------------------------------------------------------------- */
+let pmrem = null;
+let envRT = null;
+
+/**
+ * Recalcule `scene.environment` depuis le ciel courant.
+ *
+ * Appelée après buildVoid, qui vient de poser le ciel du biome dans
+ * `scene.background`. Réutiliser le fond plutôt que charger une sonde séparée
+ * garantit que l'ambiance colle au décor : un ciel de désert éclaire chaud, un
+ * ciel nordique éclaire froid, sans qu'aucun réglage n'ait à être tenu en
+ * parallèle.
+ */
+function refreshEnvironment() {
+  const sky = scene.background;
+  /* Un fond de couleur unie n'est pas une texture : PMREM ne sait pas le
+     préfiltrer, et il n'y aurait de toute façon aucune information
+     directionnelle à en tirer. On retombe alors sur le seul HemisphereLight. */
+  if (!sky || !sky.isTexture) return;
+  if (!pmrem) {
+    pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+  }
+  /* La cible précédente doit être libérée à la main : c'est une texture GPU,
+     et une par carte fuirait à chaque changement d'île. */
+  if (envRT) envRT.dispose();
+  envRT = pmrem.fromEquirectangular(sky);
+  scene.environment = envRT.texture;
+}
+
+/* ---- Traces de pas ----
+   Une empreinte est posée tous les FOOT_STRIDE parcourus, et non toutes les N
+   images : à cadence d'image, un Leader rapide sèmerait deux fois plus de
+   traces qu'un lent, et sur un écran à 144 Hz la piste deviendrait une bande
+   continue. La distance est la seule mesure qui donne une foulée constante
+   quels que soient la vitesse et le framerate.
+
+   La position mémorisée par Leader est celle du DERNIER pas, pas celle de
+   l'image précédente : sans ça, une somme de petits déplacements ne
+   déclencherait jamais rien à force d'arrondis. */
+const FOOT_STRIDE = 1.55;
+const _footLast = new Map();   // faction → { x, z, side }
+
+function dropFootprints() {
+  for (const f of factions) {
+    if (!f.alive || !f.leader) continue;
+    const L = f.leader;
+    let st = _footLast.get(f);
+    if (!st) { st = { x: L.x, z: L.z, side: 1 }; _footLast.set(f, st); }
+    const dx = L.x - st.x, dz = L.z - st.z;
+    const d = Math.hypot(dx, dz);
+    if (d < FOOT_STRIDE) continue;
+    /* En vol (saut, renaissance) le pied ne touche pas le sol : on avance le
+       repère sans marquer, sinon une piste apparaîtrait en l'air puis
+       retomberait d'un bloc à l'atterrissage. */
+    const airborne = L.jmp != null || (L.y || 0) > 0.35;
+    if (!airborne) {
+      /* Cap pris sur le déplacement RÉEL et non sur `dx/dz` du pas de
+         simulation : celui-ci vaut zéro à l'arrêt, et l'empreinte prendrait
+         alors une orientation arbitraire. */
+      const ang = Math.atan2(dx, dz);
+      addFootprint(L.x, L.y || 0, L.z, ang, st.side, f.i === 0 ? 1 : 0.92);
+      st.side = -st.side;
+    }
+    st.x = L.x; st.z = L.z;
+  }
+}
+
+/* Réutilisé à chaque image pour transmettre la direction du soleil au sol. */
+const _sunDir = new THREE.Vector3();
+/* Élévation du soleil, en degrés — le seul réglage de la LONGUEUR des ombres,
+   et il ne dépend plus de l'heure (voir son point d'usage).
+   Repères : à 45° l'ombre fait la hauteur de l'objet, à 27° elle en fait deux,
+   à 18° presque trois. En dessous de ~15° elles s'étirent tellement qu'elles se
+   recouvrent et que le sol redevient illisible. */
+let SUN_ELEV_DEG = 26;
+const SUN_AZ_RAD = -40 * Math.PI / 180;
+const SUN_RADIUS = 52;
 
 /** Résolution + frustum d'ombre : 256 / serré sur tactile, 1024 / large sur desktop. */
 function configureSunShadow(enabled) {
   const mobile = isCoarse;
-  const size = mobile ? 256 : 1024;
-  const half = mobile ? 16 : 28;
+  const size = mobile ? 256 : 2048;
+  /* Le demi-côté du frustum est le VRAI réglage de netteté : la finesse d'une
+     ombre, c'est size/(2*half) texels par unité monde. Resserrer de 28 à 22
+     gagne autant que doubler la résolution, et gratuitement. La contrepartie
+     est un rayon couvert plus court — il reste très au-delà du champ visible à
+     ce focal. */
+  const half = mobile ? 16 : 22;
   if (sun.shadow.mapSize.x !== size) {
     sun.shadow.mapSize.set(size, size);
     if (sun.shadow.map) {
@@ -342,6 +540,7 @@ function applyGraphicsQuality() {
   renderer.setSize(innerWidth, innerHeight);
   renderer.shadowMap.enabled = g.shadows;
   configureSunShadow(g.shadows);
+  applyDof();
   scene.traverse((o) => {
     if (!o.isMesh && !o.isInstancedMesh) return;
     if (o.userData.forceNoShadow) return;
@@ -363,22 +562,132 @@ hemi.layers.set(LAYER_WORLD);
 sun.layers.set(LAYER_WORLD);
 sun.target.layers.set(LAYER_WORLD);
 
-/* Intensités de référence des lumières « personnages ». Le cycle du jour ne les
-   pilote pas — les persos restent lisibles quelle que soit l'heure — mais la
-   nuit noire les éteint, et il lui faut une valeur d'origine où revenir. */
-const CHAR_HEMI_I = 1.0;
+/* ---- Éclairage des personnages ----
+   Intensités de référence en PLEIN JOUR. Cette couche était totalement figée :
+   les persos restaient éclairés comme à midi quelle que soit l'heure, au nom de
+   la lisibilité. Tant que la vallée se jouait à midi, la fiction tenait.
+
+   À la brunante elle se voit — et elle se voit d'abord dans les CHEVEUX.
+   L'hémisphérique éclaire par le dessus avec une couleur de ciel diurne : sur
+   un personnage, c'est le sommet du crâne qui la reçoit en plein, et il en sort
+   un reflet clair et froid qui n'appartient à aucune lumière de la scène.
+
+   Les persos suivent donc maintenant le jour, mais partiellement : `CHAR_FOLLOW`
+   dose la part du cycle qu'ils encaissent, le reste tient la lisibilité. Et ils
+   la suivent INÉGALEMENT — l'hémisphérique descend plus bas que le soleil,
+   parce que c'est la composante venue du dessus qui trahit, pas la latérale. */
+/* L'hémisphérique descend de 1.0 à 0.35. Elle portait seule tout le
+   remplissage, faute d'une lumière de face — à une intensité qui n'avait de
+   sens que par défaut. Depuis que ses deux couleurs sont alignées (voir sa
+   construction), elle n'est plus qu'un niveau de base uniforme : elle empêche
+   le noir, elle ne modèle plus rien. */
+const CHAR_HEMI_I = 0.35;
 const CHAR_SUN_I = 1.55;
-const charHemi = new THREE.HemisphereLight(0xcfefff, 0x5a8a5f, CHAR_HEMI_I);
+/* Part du cycle du jour encaissée par les personnages. 0 = figé en plein jour
+   (l'ancien comportement), 1 = éclairés exactement comme le décor et donc
+   illisibles de nuit. */
+const CHAR_FOLLOW_SUN = 0.55;
+const CHAR_FOLLOW_HEMI = 0.80;
+/* Teinte de ciel d'origine de l'hémisphérique personnages, mémorisée : sa
+   couleur est réécrite à chaque image en la mélangeant vers celle du soleil, et
+   sans valeur d'origine où repartir elle dériverait vers l'orange puis y
+   resterait. */
+const CHAR_HEMI_SKY = new THREE.Color(0xcfefff);
+/* ---- Ambiant personnages : PLAT, et c'est le point ----
+   Une HemisphereLight interpole entre sa couleur de ciel et sa couleur de sol
+   SELON LA NORMALE VERTICALE. Le sommet du crâne reçoit donc le ciel en plein
+   et le bas du corps le sol — ici un vert sombre. C'est exactement ça, le
+   « spot de lumière au-dessus du perso » : un gradient inscrit dans le type de
+   lampe. Baisser son intensité ne le supprime pas, ça ne fait que l'assombrir,
+   et c'est pourquoi mes deux tentatives précédentes n'ont rien changé.
+
+   La couleur de sol est donc alignée sur celle du ciel, à peine plus sourde.
+   La lampe cesse alors d'être directionnelle : elle devient un ambiant uniforme,
+   sans haut ni bas. Elle garde son rôle — poser un niveau de base pour que
+   rien ne tombe au noir — et perd celui qu'elle n'aurait jamais dû avoir.
+
+   Le modelé, lui, est porté par les deux lampes qui SONT faites pour ça : le
+   soleil pour la clé, charFill pour la face. */
+const CHAR_HEMI_GND = new THREE.Color(0xa9bcd4);
+const charHemi = new THREE.HemisphereLight(CHAR_HEMI_SKY, CHAR_HEMI_GND, CHAR_HEMI_I);
 charHemi.layers.set(LAYER_CHARS);
 scene.add(charHemi);
 const charSun = new THREE.DirectionalLight(0xfff2d8, CHAR_SUN_I);
 charSun.layers.set(LAYER_CHARS);
 scene.add(charSun, charSun.target);
 
+/* ---- Matière des personnages ----
+   Le passage du toon au PBR leur a donné une SPÉCULAIRE, que le toon n'avait
+   pas du tout. Sur un crâne — une surface convexe et lisse — elle se concentre
+   en une tache très brillante qui suit la caméra : c'est le « reflet » qu'on
+   voit sur les persos et qui ne ressemble à rien de ce que le jeu montre par
+   ailleurs. Les personnages sont peints à la main, ils doivent rendre comme de
+   la gouache, pas comme du plastique.
+
+   Deux corrections, à la source :
+
+   `roughness = 1` supprime la spéculaire. C'est le bon réglage pour eux, et
+   seulement pour eux : sur le décor un reste de spéculaire est utile, c'est lui
+   qui pose un liseré de ciel sur les arêtes des rochers.
+
+   `envMapIntensity = 0` supprime l'éclairage par image sur les personnages, et
+   c'est la dernière source qui les éclairait PAR LE DESSUS.
+
+   L'IBL est dérivée du ciel : lumineuse en haut, sombre en bas. Sur une forme
+   convexe comme un crâne, elle produit un dôme clair au sommet — le « spot »
+   qu'on cherchait. Et elle est particulièrement sournoise ici parce qu'elle
+   IGNORE LES COUCHES : c'est une propriété de scène, pas une lumière, donc
+   `layers` n'a aucune prise dessus. Les personnages la recevaient en plus de
+   leur propre éclairage, sans qu'aucune ligne ne le dise.
+
+   Zéro et pas une petite valeur : la couche personnages a déjà un éclairage
+   complet à trois points — clé (charSun), face (charFill), base (charHemi).
+   L'ambiant du monde n'a rien à y ajouter, il ne fait que réintroduire une
+   direction dont on ne veut pas. */
+const CHAR_ENVMAP_I = 0;
+/* Masque de la couche personnages, pour tester l'appartenance d'un objet.
+   `layers.test` attend un autre Layers, pas un numéro. */
+const CHARS_MASK = new THREE.Layers();
+CHARS_MASK.set(LAYER_CHARS);
+
+/* ---- Lumière de FACE ----
+   Le troisième point d'un éclairage de personnage, et il manquait.
+
+   Il n'y avait que deux sources : le soleil, bas et venu de derrière-droite, et
+   une hémisphérique qui éclaire par le dessus. Résultat mécanique — le sommet
+   du crâne prend tout, et la face tournée vers la caméra ne reçoit RIEN. C'est
+   le « spot au-dessus » et le devant dans l'ombre : ce sont les deux symptômes
+   d'un même manque, et aucun réglage d'intensité sur les deux lampes existantes
+   ne pouvait le corriger. Baisser le dessus ne fait qu'assombrir le tout, il
+   n'ajoute pas de lumière là où il en faut.
+
+   Celle-ci suit la CAMÉRA et non la scène : elle éclaire toujours la face
+   qu'on regarde, quel que soit l'angle. C'est un éclairage de studio, pas de
+   simulation — et c'est exactement ce qu'on veut pour la seule chose que le
+   joueur doit lire à tout instant.
+
+   Volontairement froide et faible : elle déblaie l'ombre, elle ne doit pas
+   concurrencer le soleil, sinon le personnage s'aplatit. */
+/* Intensité de la lumière de face. Ce n'est plus une lampe de scène mais un
+   terme du shader des personnages — voir CHAR_FILL_U dans vat.js, et le
+   commentaire qui explique pourquoi une lampe ne pouvait pas convenir. */
+const CHAR_FILL_I = 0.95;
+
 function setCharLayer(root) {
   if (!root) return;
   root.layers.set(LAYER_CHARS);
-  root.traverse?.((o) => { o.layers.set(LAYER_CHARS); });
+  root.traverse?.((o) => {
+    o.layers.set(LAYER_CHARS);
+    if (!o.material) return;
+    for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+      /* Les contours et les effets additifs ne sont pas éclairés : ils n'ont ni
+         `roughness` ni `envMapIntensity`, et poser ces propriétés dessus serait
+         silencieusement ignoré — donc invisible au débogage. */
+      if (!m || !m.isMeshStandardMaterial) continue;
+      m.roughness = 1;
+      m.envMapIntensity = CHAR_ENVMAP_I;
+    }
+  });
 }
 
 /* Lanterne du joueur : halo chaud qui n'existe que dans la pénombre (petit
@@ -387,14 +696,31 @@ function setCharLayer(root) {
    Deux couches : une PointLight adoucie (éclaire les personnages/décor en 3D)
    et un disque-dégradé additif au sol — le rendu toon quantifie la lumière en
    paliers durs, le disque garantit un bord parfaitement diffus. */
-const playerLamp = new THREE.PointLight(0xffd9a0, 0, 30, 2.2);
+/* `decay` à 1 et non 2.2.
+   2.2 est plus raide que la décroissance physique en carré de la distance :
+   c'est un réglage de réalisme, et il ne convient pas ici. Une lampe posée à
+   35 cm du sol y devient un point de brûlure — tout est concentré sous les
+   pieds et il ne reste rien à un mètre. Or ce qu'on veut est l'inverse : une
+   flaque LARGE, sans centre marqué, qui dise « le sol est éclairé ici ».
+
+   À 1, la décroissance est assez douce pour que la lumière porte à plusieurs
+   unités. La hauteur devient alors un choix libre : on peut la garder au ras du
+   sol — là où elle ne peut plus prendre le personnage par le dessus — sans
+   payer la concentration que cette position imposait. */
+const playerLamp = new THREE.PointLight(0xffd9a0, 0, 30, 1);
 playerLamp.position.y = 2.4;
-/* Doit atteindre les DEUX couches. Les personnages vivent sur LAYER_CHARS et
-   `layers.set()` est exclusif : une lampe posée sur le seul LAYER_WORLD éclaire
-   le sol autour du joueur mais laisse le joueur lui-même dans le noir — soit
-   exactement l'inverse de ce qu'une lanterne doit faire. */
+/* SEULEMENT le décor, pas les personnages.
+   La lampe atteignait aussi LAYER_CHARS, au motif qu'une lanterne doit éclairer
+   celui qui la porte. En pratique c'est le contraire qui se produit : la source
+   est à 2,4 au-dessus du personnage, donc à moins d'un mètre de lui, et
+   l'atténuation quadratique lui envoie un ordre de grandeur de plus qu'au sol.
+   Le personnage se retrouve lavé d'orange pendant que la flaque au sol, elle,
+   reste invisible — l'effet demandé rendu exactement à l'envers.
+
+   Les personnages ont déjà leur propre couche d'éclairage constante (charSun /
+   charHemi) : ils sont lisibles sans elle. La lueur au sol est portée par le
+   disque peint ci-dessous, dont on maîtrise le rayon et le bord. */
 playerLamp.layers.set(LAYER_WORLD);
-playerLamp.layers.enable(LAYER_CHARS);
 scene.add(playerLamp);
 const lampGlowTex = (() => {
   const cv = document.createElement('canvas');
@@ -581,10 +907,18 @@ function buildMapInner(biomeKey) {
   // Matière du sol du biome (sable, herbe, neige…) — uniformes seuls, pas de
   // recompilation de shader, donc pas de saccade au changement de carte.
   setGroundMaterial(biomeKey);
+  /* Les traces de pas suivent la même matière : c'est le sol qui décide de ce
+     qu'un pas y laisse, pas le personnage qui marche. */
+  setFootprintBiome(B);
+  clearFootprints();
   // L'île : croûte hexagonale teintée + roche suspendue dessous
   mapObjects.push(...buildIslandMeshes(scene, island));
   // Le vide : dégradé d'abîme, éclats en suspension, poussière lumineuse
   mapObjects.push(...buildVoid(scene, island, biomeKey));
+  /* buildVoid vient de poser le ciel du biome dans scene.background ; on en
+     dérive l'éclairage ambiant. Ici et pas avant : l'environnement doit être
+     celui de CETTE carte. */
+  refreshEnvironment();
 
   /* Sanctuaires / maisons / bases : retirés pour l’instant (île nue). */
 
@@ -806,7 +1140,10 @@ trimCrowdCounts(0);   // rien à dessiner tant qu'aucun agent n'existe
 
 
 
-function makeLeaderGroup(cult, leaderKey = 'monk') {
+/** @param {object|null} assetOverride  modèle à utiliser au lieu de celui du
+ *  registre — sert à la forme d'esprit, qui reprend toute la mécanique du
+ *  Leader (gaits, mixer, cristal) avec le corps de l'élémentaire. */
+function makeLeaderGroup(cult, leaderKey = 'monk', assetOverride = null, targetH = 2.2) {
   const grp = new THREE.Group();
   grp.userData.leaderKey = leaderKey;
 
@@ -814,7 +1151,7 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
   // pas prêt (chargement asynchrone), fallback chibi si aucun n'est encore là.
   let body;
   let crystalRef = null;
-  const asset = leaderAssets[leaderKey] || leaderAssets.monk;
+  const asset = assetOverride || leaderAssets[leaderKey] || leaderAssets.monk;
 
   /* AUCUNE teinte de culte sur le Leader : on affiche la texture d'origine du
      modèle, telle que l'artiste l'a peinte.
@@ -871,7 +1208,7 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
     // deux passes : la hauteur rendue converge en une itération, la seconde vérifie
     for (let it = 0; it < 2; it++) {
       const bb = monkWorldBox();
-      inner.scale.multiplyScalar(2.2 / Math.max(0.001, bb.max.y - bb.min.y));
+      inner.scale.multiplyScalar(targetH / Math.max(0.001, bb.max.y - bb.min.y));
     }
     inner.position.y -= monkWorldBox().min.y;
     // décale la phase après la mesure, pour des Leaders de taille identique
@@ -883,10 +1220,12 @@ function makeLeaderGroup(cult, leaderKey = 'monk') {
     }
     body.add(inner);
     attachCartoonOutline(inner, 0.024);
-    // Cristal émissif au-dessus de la tête
-    crystalRef = new THREE.Mesh(new THREE.OctahedronGeometry(0.11, 0),
+    // Cristal émissif au-dessus de la tête — calé sur la taille du corps, pour
+    // qu'il coiffe aussi bien un Leader qu'un petit élémentaire.
+    const cs = targetH / 2.2;
+    crystalRef = new THREE.Mesh(new THREE.OctahedronGeometry(0.11 * cs, 0),
       toonMaterial({ color: cult.c, emissive: cult.c, emissiveIntensity: 0.8 }));
-    crystalRef.position.set(0, 2.6, 0);
+    crystalRef.position.set(0, 2.6 * cs, 0);
     body.add(crystalRef);
   } else {
     // Fallback : chibi procédural comme avant
@@ -1140,6 +1479,9 @@ const LEADER_ELEM_KEY = {
 };
 
 const leaderAssets = {};   // key → { model, texture, clips }
+/* Corps de la forme d'esprit : l'élémentaire du Leader, gardé riggé (§10.2).
+   Six persos, six élémentaires — la transformation est propre au personnage. */
+const spiritAssets = {};   // key → { model, texture, clips }
 const followerMeshes = {}; // leaderKey → { mesh, outline, freeSlots[], color[] }
 const FOLLOWER_MESH_CAP = 400;
 
@@ -1635,6 +1977,86 @@ function glowTexture() {
 const _boltPool = [];
 const _boltLive = new Map();     // projectile → { grp, body, glow, spin }
 
+/* ---- Lumières de projectile ----
+   L'orbe doit éclairer le décor qu'elle traverse. Le piège est dans la façon de
+   s'y prendre, et il est sévère.
+
+   Le nombre de lumières d'une scène est une constante de COMPILATION dans
+   Three.js : il est écrit en dur dans le préambule de chaque shader. Ajouter une
+   lumière à la naissance d'un projectile et la retirer à sa mort ferait donc
+   recompiler TOUS les matériaux de la scène à chaque tir et à chaque impact —
+   quelques dizaines de millisecondes à chaque fois, c'est-à-dire une saccade
+   sur exactement l'action la plus fréquente du jeu.
+
+   D'où un vivier de taille FIXE, créé une fois pour toutes et jamais retiré de
+   la scène. Une lumière libre n'est pas supprimée : son intensité tombe à zéro.
+   Le compte ne bouge jamais, aucun shader n'est recompilé, et le coût est
+   stable et prévisible.
+
+   La taille est arrêtée au démarrage, comme l'antialiasing : la changer en
+   cours de partie provoquerait précisément la recompilation qu'on évite. Zéro
+   sur tactile — trois lumières ponctuelles de plus évaluées sur chaque fragment
+   du sol, qui remplit l'écran, n'y sont pas payables.
+
+   Trois, et pas plus : au-delà, les orbes supplémentaires sont presque toujours
+   au même endroit que les trois premières, et on paierait un éclairage que
+   personne ne distingue. */
+const BOLT_LIGHT_COUNT = isCoarse ? 0 : 3;
+const BOLT_LIGHT_RANGE = 9;
+const BOLT_LIGHT_POWER = 14;
+const boltLights = [];
+for (let i = 0; i < BOLT_LIGHT_COUNT; i++) {
+  const l = new THREE.PointLight(0xffffff, 0, BOLT_LIGHT_RANGE, 2);
+  /* Le décor ET les personnages : une orbe qui passe devant un Leader sans
+     l'éclairer trahirait immédiatement l'astuce des deux couches. */
+  l.layers.set(LAYER_WORLD);
+  l.layers.enable(LAYER_CHARS);
+  scene.add(l);
+  boltLights.push(l);
+}
+
+/* Réutilisés chaque image pour classer les orbes sans allouer. */
+const _boltRank = [];
+const _boltPos = new THREE.Vector3();
+
+/**
+ * Attribue les lumières du vivier aux projectiles les plus visibles.
+ *
+ * Le critère est la distance à la caméra : une orbe hors champ ou très loin
+ * n'apporte rien, et c'est celle qu'on sacrifie quand il y a plus de tirs que
+ * de lumières — le cas normal dès que la mêlée s'anime.
+ */
+function updateBoltLights() {
+  if (!BOLT_LIGHT_COUNT) return;
+  _boltRank.length = 0;
+  for (const p of projectiles) {
+    const bolt = _boltLive.get(p);
+    if (!bolt) continue;
+    /* Distance prise sur le PROJECTILE et non sur son groupe de sprites : le
+       groupe n'est déplacé que plus bas dans l'image, il traînerait donc d'une
+       frame — d'autant plus visible que l'orbe va vite. */
+    _boltPos.set(p.x, (p.y || 0) + 0.55, p.z);
+    _boltRank.push({
+      p,
+      d2: camera.position.distanceToSquared(_boltPos),
+      col: bolt.lightColor,
+    });
+  }
+  _boltRank.sort((a, b) => a.d2 - b.d2);
+  for (let i = 0; i < boltLights.length; i++) {
+    const l = boltLights[i];
+    const r = _boltRank[i];
+    if (!r) { l.intensity = 0; continue; }
+    l.position.set(r.p.x, (r.p.y || 0) + 0.55, r.p.z);
+    if (r.col) l.color.copy(r.col);
+    /* Extinction douce avec la distance plutôt que franche : sans elle, une
+       orbe qui sort du champ éteindrait sa lumière d'un coup, et la coupure se
+       verrait sur le décor resté à l'écran. */
+    const d = Math.sqrt(r.d2);
+    l.intensity = BOLT_LIGHT_POWER * Math.max(0, 1 - d / 95);
+  }
+}
+
 function elementKeyOf(f) { return LEADER_ELEM_KEY[f?.leaderKey] || 'ether'; }
 function elementColorOf(f) {
   const e = ELEMENTS.find((x) => x.key === elementKeyOf(f)) || ELEMENTS[5];
@@ -1655,12 +2077,18 @@ function acquireBolt(p) {
     }));
     body.scale.setScalar(1.5);
     grp.add(glow, body);
-    b = { grp, body, glow, spin: 0 };
+    /* `lightColor` appartient à l'orbe recyclée, pas à la lumière : le vivier
+       de lumières est partagé et réattribué à chaque image, il ne peut donc pas
+       retenir la teinte d'un tir en particulier. */
+    b = { grp, body, glow, spin: 0, lightColor: new THREE.Color() };
   }
   const key = elementKeyOf(factions[p.from]);
   b.body.material.map = orbTexture(key);
   b.body.material.needsUpdate = true;
   b.glow.material.color.set(elementColorOf(factions[p.from]));
+  /* La lumière portée reprend la couleur d'élément du tireur : c'est ce qui
+     rend un tir adverse lisible sur le décor avant même qu'on voie l'orbe. */
+  b.lightColor.set(elementColorOf(factions[p.from]));
   b.spin = Math.random() * Math.PI * 2;
   b.grp.position.set(p.x, p.y, p.z);
   b.grp.visible = true;
@@ -1888,10 +2316,23 @@ const _atkCtx = {
     spawnSparks(a.x, (a.y || 0) + 0.6, a.z, f.color, 8, { spread: 2.4, lift: 2.6, size: 0.4 });
     if (f.i === 0) shake = Math.max(shake, 0.16);
   },
+  /* -- Un Leader touché MEURT (GDD §10.10) --
+     Il ne s'effondre plus. L'effondrement venait de l'ancien jeu, où l'on
+     perdait un esprit du cortège et où l'on se relevait sur place ; la règle
+     V3 est unique et sans exception : touché, on éclate en particules, on
+     lâche ses âmes, on se reforme à sa base — sauf si le bouclier encaisse,
+     et c'est toute la valeur de Gardienne.
+
+     `downT` est remis à zéro tout de suite : `knockDownLeader` vient de le
+     poser juste avant d'appeler ce retour, et le laisser courir figerait un
+     Leader déjà reformé chez lui, face contre terre pendant une seconde. */
   onLeaderDown: (o, by) => {
-    spawnShock(o.leader.x, o.leader.z, o.color, 3.4, 0.4);
-    if (o.i === 0) banner('✖ Vous êtes à terre — un esprit vous échappe !');
-    else if (by && by.i === 0) banner('✦ Rival mis à terre !');
+    o.downT = 0;
+    if (by && by.i === 0 && ownsGuardianAltar(o.i) && guardOf(o.i).hits > 0) {
+      banner('◇ Son bouclier a tenu');
+    }
+    explodeToBase(o);
+    if (o.i !== 0 && by && by.i === 0) banner('✦ Rival dispersé !');
   },
 };
 
@@ -1971,7 +2412,850 @@ function updateAttacks(dt) {
         1, { spread: 0.5, lift: 0.35, size: 0.3 });
     }
   }
+
+  /* Ici et pas plus haut : la boucle ci-dessus vient de créer les orbes nées
+     dans cette image. Appelé avant, un tir tout juste parti resterait sans
+     lumière pendant sa première frame — soit précisément l'instant du départ,
+     celui qu'on regarde. */
+  updateBoltLights();
 }
+
+/* -- Chair / Esprit (GDD §10.2) --
+   Le module src/spiritform.js tient l'état et l'ambiance ; main.js lui fournit
+   le contexte de la frame et exécute ce qui touche à la scène. */
+const _spiritCtx = {
+  scene: null, sun: null, hemi: null, renderer: null,
+  elapsed: 0, onForcedOut: null,
+};
+
+/* Prétendants aux âmes — piliers et butin au sol. Reconstruit une fois par
+   frame et partagé par les deux systèmes : ils posent la même question, il n'y
+   a aucune raison de balayer les factions deux fois. */
+const _claimants = [];
+function collectClaimants() {
+  _claimants.length = 0;
+  for (const g of factions) {
+    if (!g || !g.alive || !g.leader) continue;
+    _claimants.push({
+      fi: g.i, x: g.leader.x, z: g.leader.z, inSpirit: formOf(g.i).active,
+    });
+  }
+  return _claimants;
+}
+
+function tickSpiritForm(dt) {
+  const f = factions[0];
+  if (!f || !f.leader) return;
+  _spiritCtx.scene = scene;
+  _spiritCtx.sun = sun;
+  _spiritCtx.hemi = hemi;
+  _spiritCtx.renderer = renderer;
+  _spiritCtx.elapsed = elapsed;
+  _spiritCtx.count = factions.length;
+  _spiritCtx.onForcedOut = onSpiritForcedOut;
+  updateSpirit(dt, _spiritCtx);
+
+  /* La base annule le délai de retour (§10.11), pour TOUT LE MONDE : c'est ce
+     qui donne au repli un intérêt autre que la peur, et ce qui fait de la base
+     une ancre plutôt qu'un simple point d'apparition. */
+  for (const g of factions) {
+    if (!g || !g.alive || !g.leader) continue;
+    const sf = formOf(g.i);
+    if (sf.active || sf.cd <= 0) continue;
+    const t = teams[g.team];
+    if (t && Math.hypot(g.leader.x - t.baseX, g.leader.z - t.baseZ) < BASE_ZONE_R) {
+      sf.cd = 0;
+    }
+  }
+  /* Le bouton reflète l'état quelle que soit la source de la bascule (touche,
+     pad, ou éjection par chrono épuisé). Grisé pendant le délai de retour :
+     un bouton qui refuse en silence est pire que pas de bouton. */
+  if (spiritBtn) {
+    if (spirit.active) {
+      // DÉCHARGEMENT : de 10s à 0s (durée restante d'esprit)
+      const ratio = Math.max(0, Math.min(1, spirit.t / TUNE_SPIRIT.duration));
+      const deg = Math.round(ratio * 360) + 'deg';
+      if (spiritOverlay) spiritOverlay.style.setProperty('--spirit-deg', deg);
+      spiritBtn.classList.add('on');
+      spiritBtn.classList.remove('off', 'charging');
+      spiritBtn.classList.toggle('warning', spirit.t <= TUNE_SPIRIT.warnAt);
+    } else if (spirit.cd > 0) {
+      // CHARGEMENT : de 0s à 5s (délai de recharge avant retour possible)
+      const ratio = Math.max(0, Math.min(1, 1 - (spirit.cd / TUNE_SPIRIT.cooldown)));
+      const deg = Math.round(ratio * 360) + 'deg';
+      if (spiritOverlay) spiritOverlay.style.setProperty('--spirit-deg', deg);
+      spiritBtn.classList.remove('on', 'warning');
+      spiritBtn.classList.add('off', 'charging');
+    } else {
+      // PRÊT : charge complète
+      if (spiritOverlay) spiritOverlay.style.setProperty('--spirit-deg', '360deg');
+      spiritBtn.classList.remove('on', 'off', 'charging', 'warning');
+      spiritBtn.classList.add('ready');
+    }
+  }
+
+  /* Halo des esprits : il respire, et son intensité suit le fondu de forme de
+     SA faction — sinon la lampe éclairerait encore la vallée une demi-seconde
+     après le retour en chair.
+
+     Un rival en esprit brille exactement comme toi (§10.2) : il appartient au
+     même monde, deux esprits qui se croisent ne peuvent pas se rater. */
+  const puls = 0.88 + 0.12 * Math.sin(elapsed * 2.1);
+  for (const g of factions) {
+    if (!g || !g.spiritGrp) continue;
+    const ud = g.spiritGrp.userData;
+    const b = formOf(g.i).blend;
+    if (ud.spiritHalo) {
+      ud.spiritHalo.material.opacity = 0.3 * b * puls;
+      ud.spiritHalo.scale.setScalar(puls);
+    }
+    if (ud.spiritAura) {
+      ud.spiritAura.material.opacity = 0.24 * b * puls;
+      ud.spiritAura.scale.setScalar(0.95 + 0.1 * puls);
+    }
+    if (ud.spiritLamp) ud.spiritLamp.intensity = 6.5 * b * puls;
+  }
+
+  /* Horloge des flammes. Un seul appel pour TOUTES les flammes de la scène :
+     leur animation vit dans le vertex shader et ne dépend que de ce temps
+     partagé (src/flame.js). Posé ici plutôt que dans pillars.js pour couvrir
+     aussi les flammes qui n'appartiennent à aucun pilier. */
+  updateFlames(dt);
+
+  /* Piliers d'âmes : leur visibilité suit la transition de forme, donc ils
+     apparaissent et s'effacent en même temps que le monde des esprits. */
+  _pillarState.spiritBlend = spirit.blend;   // visibilité = point de vue local
+  _pillarState.elapsed = elapsed;
+  _pillarState.claimants = collectClaimants();
+  updatePillars(dt, _pillarState);
+
+  /* Escorte : les âmes portées trottent derrière le joueur, dans le seul monde
+     des esprits. Elle lit l'inventaire elle-même, on ne lui passe que le
+     joueur et le sol. */
+  _escortState.scene = scene;
+  _escortState.px = f.leader.x;
+  _escortState.pz = f.leader.z;
+  _escortState.py = f.leader.y || 0;
+  _escortState.spiritBlend = spirit.blend;
+  updateSoulEscort(dt, _escortState);
+
+  /* Âmes tombées au sol : matérielles, donc ramassables dans les deux formes.
+     Sans ça, un rival resté en chair ne pourrait jamais toucher son butin. */
+  _dropState.elapsed = elapsed;
+  _dropState.claimants = _claimants;   // rempli par collectClaimants()
+  updateDroppedSouls(dt, _dropState);
+
+  /* Aura de portage et bouclier : pour TOUTES les factions. Ce sont les deux
+     seules choses qu'un rival laisse voir de son état. */
+  for (const g of factions) {
+    if (!g || !g.alive || !g.leader) continue;
+    updateCarryAura(g, dt);
+    updateGuardianShield(g, dt);
+  }
+
+  /* Panneau de dépôt : il n'existe qu'à portée d'un autel, et ne montre que
+     les âmes réellement posables sur CELUI-LÀ. */
+  const near = nearbyAltar();
+  updateAltarPanel(near ? (i) => canDeposit(f, near, i) : null);
+}
+
+const _dropState = {
+  claimants: null, elapsed: 0,
+  onPick: (i, fi) => {
+    if (fi !== 0) return;   // le butin d'un rival ne s'annonce pas
+    const s = SOULS[i];
+    banner(`${s.sym} ${s.nom} récupérée`);
+    soundEngine.playSFX('paint_stamp');
+  },
+  onExpire: () => {},
+};
+
+/* -- Aura de portage (§10.5) --
+   Elle dit « il a quelque chose », JAMAIS combien. Son intensité ne varie donc
+   pas avec le nombre d'âmes : un joueur qui rentre avec quatre âmes et un qui
+   en a ramassé une bricole se ressemblent exactement. C'est ce qui donne une
+   raison de poursuivre quelqu'un sans savoir ce qu'on va gagner. */
+/* Une aura par faction : un rival qui porte des âmes doit se voir, c'est ce
+   qui donne une raison de le poursuivre sans savoir ce qu'on va gagner. */
+const _carryAuras = [];
+function updateCarryAura(f, dt) {
+  const on = carryingAnything(f.i);
+  let aura = _carryAuras[f.i];
+  if (!aura) {
+    if (!on) return;
+    aura = new THREE.Mesh(
+      new THREE.RingGeometry(1.05, 1.5, 28),
+      new THREE.MeshBasicMaterial({
+        color: 0xffe6a8, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        toneMapped: false, fog: false, side: THREE.DoubleSide,
+      }),
+    );
+    aura.rotation.x = -Math.PI / 2;
+    scene.add(aura);
+    _carryAuras[f.i] = aura;
+  }
+  const target = on ? 1 : 0;
+  aura.userData.k = (aura.userData.k || 0)
+    + (target - (aura.userData.k || 0)) * Math.min(1, dt * 6);
+  const k = aura.userData.k;
+  aura.visible = k > 0.01;
+  if (!aura.visible) return;
+  const puls = 0.85 + 0.15 * Math.sin(elapsed * 3.4);
+  aura.position.set(f.leader.x, (f.leader.y || 0) + 0.08, f.leader.z);
+  aura.scale.setScalar(puls);
+  aura.material.opacity = 0.55 * k * puls;
+}
+
+const _pillarState = {
+  spiritBlend: 0, elapsed: 0, claimants: null,
+  onPick: onSoulPicked,
+};
+
+const _escortState = {
+  scene: null, px: 0, pz: 0, py: 0, spiritBlend: 0, groundY,
+};
+
+/** Ramassage d'une âme : la flamme entre dans le joueur, le pilier s'enfonce.
+ *  Retourne false si l'on porte déjà ce type — le pilier reste alors debout. */
+function onSoulPicked(soul, p, fi) {
+  const f = factions[fi];
+  if (!f || !f.leader) return false;
+  const idx = SOULS.indexOf(soul);
+  if (!addSoul(fi, idx)) {
+    /* Déjà porteur de ce type : on le dit une fois, sans spammer à chaque
+       image où l'on reste dans le rayon. Et seulement au joueur — ce qu'un bot
+       n'a pas pu prendre ne le regarde pas. */
+    if (fi === 0 && elapsed - (onSoulPicked._lastRefus || -9) > 1.5) {
+      onSoulPicked._lastRefus = elapsed;
+      banner(`${soul.sym} Déjà porteur de ${soul.nom}`);
+    }
+    return false;
+  }
+  const col = new THREE.Color(soul.col);
+  /* La flamme « entre » dans le joueur : gerbe tirée du pilier vers lui, puis
+     éclat au point d'arrivée. Sans le second, le ramassage se perdrait dans le
+     mouvement — c'est lui qui dit « c'est à toi maintenant ». */
+  const dx = f.leader.x - p.x, dz = f.leader.z - p.z;
+  const d = Math.max(0.001, Math.hypot(dx, dz));
+  spawnSparks(p.x, TUNE_PILLARS.height, p.z, col, 26,
+    { spread: 1.4, lift: 1.2, dirX: dx / d, dirZ: dz / d, push: 7.5, size: 0.42 });
+  spawnSparks(f.leader.x, 1.3, f.leader.z, col, 14, { spread: 2.2, lift: 2.4 });
+  spawnShock(p.x, p.z, col, 5, 0.45);
+  if (fi === 0) {
+    soundEngine.playSFX('paint_stamp');
+    banner(`${soul.sym} Âme de ${soul.nom}`);
+  }
+  return true;
+}
+
+function onSpiritForcedOut(fi) {
+  const f = factions[fi];
+  if (!f || !f.leader) return;
+  /* Retomber en chair faute de temps doit se voir : c'est une punition, pas
+     une transition. Gerbe blanche + secousse courte. */
+  setBodyForm(f, false);
+  spawnSparks(f.leader.x, 1.1, f.leader.z, new THREE.Color(0xbfe4ff), 16, { spread: 3.4, lift: 2.2 });
+  if (fi === 0) {
+    soundEngine.playSFX('paint_stamp');
+    banner('✦ L\'esprit se disperse');
+  }
+}
+
+/* -- Corps de la forme d'esprit --
+   Le joueur ne devient pas un fantôme générique : il prend la forme de SON
+   élémentaire, celui de son personnage (§10.2). Six persos, six esprits.
+
+   Le corps est un groupe de Leader complet, bâti sur le modèle de l'élémentaire.
+   On échange donc simplement la référence `f.grp` : position, orientation,
+   gaits, bruits de pas et cristal de culte suivent tout seuls, puisque toute la
+   boucle visuelle lit `f.grp` à chaque image. */
+function ensureSpiritBody(f) {
+  if (f.spiritGrp) return f.spiritGrp;
+  const asset = spiritAssets[f.leaderKey];
+  if (!asset) return null;   // .glb pas encore arrivé
+  const cultObj = CULTS[f.cultIdx] || CULTS[0];
+  /* Taille de l'esprit sauvage d'avant : VILLAGER_H × 0.6. Petit et vif — c'est
+     la silhouette qu'on avait déjà à l'œil, et elle dit « ce n'est plus ton
+     corps » mieux qu'aucun effet. */
+  const g = makeLeaderGroup(cultObj, f.leaderKey, asset, VILLAGER_H * 0.6);
+  makeLuminousSpirit(g);
+  g.visible = false;
+  scene.add(g);
+  f.spiritGrp = g;
+  return g;
+}
+
+/* -- L'esprit est sa propre lumière (§10.2) --
+   Le monde des esprits est très sombre : sans ça, on perdait le personnage et
+   le halo de lecture. Deux moyens, complémentaires :
+
+   1. Le corps devient auto-illuminé — sa TEXTURE passe en émissif, donc il
+      garde exactement sa couleur d'élément au lieu de virer au blanc. Aucun
+      éclairage ne le touche plus : il reste net quelle que soit la nuit.
+   2. Une lampe et un disque au sol l'accompagnent, qui révèlent les alentours
+      immédiats. C'est ce halo qui rend la carte lisible en esprit.
+
+   Écrit ici plutôt que dans spiritform.js parce que c'est du rendu de scène :
+   le module de forme ne connaît pas les matériaux du jeu. */
+const SPIRIT_HALO_R = 13;
+function makeLuminousSpirit(grp) {
+  grp.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!('emissive' in m)) continue;
+      /* emissiveMap = la carte de couleur : le personnage s'affiche à pleine
+         intensité dans sa propre teinte, texture comprise. */
+      if (m.map) { m.emissiveMap = m.map; m.emissive.setHex(0xffffff); }
+      else m.emissive.copy(m.color);
+      m.emissiveIntensity = 1.15;
+      /* Les TROIS sorties, et il en fallait bien trois — chacune récupérait à
+         elle seule le personnage dans le noir :
+         - `toneMapped` : sinon l'émissif repasse par l'exposition, divisée par
+           deux dans le monde des esprits ;
+         - `fog` : le brouillard s'applique en toute fin de shader, par-dessus
+           l'émissif. À 3–46 unités de portée, il repeignait le personnage en
+           bleu nuit avant même qu'on le voie ;
+         - l'éclairage n'a déjà plus de prise, puisque tout passe par l'émissif.
+         Résultat : l'esprit s'affiche exactement comme en plein jour, quoi que
+         fasse le monde autour.
+         Le contour cartoon n'a pas de canal `emissive` : la boucle l'ignore et
+         il reste noir, ce qui garde la silhouette lisible. */
+      m.toneMapped = false;
+      m.fog = false;
+      m.needsUpdate = true;
+    }
+  });
+
+  /* Aura : sphère additive autour du corps. C'est elle qui fait « lanterne »
+     et détache l'esprit du décor même à contre-jour. */
+  const aura = new THREE.Mesh(
+    new THREE.SphereGeometry(0.85, 16, 12),
+    new THREE.MeshBasicMaterial({
+      color: 0xaad4ff, transparent: true, opacity: 0.22,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      toneMapped: false, fog: false,
+    }),
+  );
+  aura.position.y = 0.55;
+  grp.add(aura);
+  grp.userData.spiritAura = aura;
+
+  const lamp = new THREE.PointLight(0xbcd8ff, 6.5, SPIRIT_HALO_R * 1.5, 1.25);
+  lamp.position.y = 1.0;
+  grp.add(lamp);
+
+  /* Disque au sol : la lampe éclaire le relief, le disque dit jusqu'où porte
+     le regard. Additif et sans écriture de profondeur — il se pose sur le
+     terrain sans jamais le masquer. */
+  const halo = new THREE.Mesh(
+    new THREE.CircleGeometry(SPIRIT_HALO_R * 0.62, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0x8fc4ff, transparent: true, opacity: 0.3,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      toneMapped: false, fog: false,
+    }),
+  );
+  halo.rotation.x = -Math.PI / 2;
+  halo.position.y = 0.06;
+  grp.add(halo);
+  grp.userData.spiritHalo = halo;
+  grp.userData.spiritLamp = lamp;
+}
+
+/** Échange le corps affiché. Retourne false si l'élémentaire n'est pas prêt. */
+function setBodyForm(f, toSpirit) {
+  if (!f) return false;
+  const from = f.grp;
+  let to;
+  if (toSpirit) {
+    to = ensureSpiritBody(f);
+    if (!to) return false;
+    f.fleshGrp = from;
+  } else {
+    to = f.fleshGrp;
+    if (!to) return false;
+    f.fleshGrp = null;
+  }
+  if (to === from) return true;
+  /* Reprise exacte de la pose : sans ça, le nouveau corps apparaît face au nord
+     le temps d'une image, et la bascule « claque ». */
+  to.position.copy(from.position);
+  if (to.userData.body && from.userData.body) {
+    to.userData.body.rotation.y = from.userData.body.rotation.y;
+  }
+  from.visible = false;
+  to.visible = true;
+  f.grp = to;
+  return true;
+}
+
+/** Bascule Chair <-> Esprit d'une faction — joueur ou bot, même chemin.
+ *  Un seul point d'entrée : ce qui vaut pour l'un vaut pour l'autre, et il n'y
+ *  a jamais deux versions de la règle à tenir à jour. */
+function factionToggleSpirit(f) {
+  if (!f || !f.alive || state !== 'play') return false;
+  if (f.i === 0 && (paused || _flight.active)) return false;
+  /* On ne bascule que si le corps d'esprit peut suivre : basculer sans corps
+     donnerait un Leader invisible. */
+  if (!formOf(f.i).active && !ensureSpiritBody(f)) {
+    if (f.i === 0) banner('✦ Esprit indisponible');
+    return false;
+  }
+  return toggleSpirit(f.i, {
+    onEnter: () => {
+      setBodyForm(f, true);
+      /* La gerbe couvre l'échange de corps : c'est elle qui fait lire la
+         transformation comme un événement plutôt que comme un remplacement. */
+      spawnSparks(f.leader.x, 1.1, f.leader.z, new THREE.Color(0x9fd8ff), 30, { spread: 4.6, lift: 3.4 });
+      spawnShock(f.leader.x, f.leader.z, new THREE.Color(0x9fd8ff), 6, 0.5);
+      if (f.i === 0) soundEngine.playSFX('paint_stamp');
+    },
+    onExit: () => {
+      setBodyForm(f, false);
+      spawnSparks(f.leader.x, 1.1, f.leader.z, new THREE.Color(0xffe6b8), 20, { spread: 3.4, lift: 2.8 });
+      spawnShock(f.leader.x, f.leader.z, new THREE.Color(0xffe6b8), 5, 0.45);
+    },
+  });
+}
+
+function playerToggleSpirit() { factionToggleSpirit(factions[0]); }
+
+/* -- La Base (GDD §10.11) --
+   Il n'y en avait tout simplement AUCUNE : `teams[]` ne portait qu'un point
+   d'apparition invisible, hérité des anciennes cours de départ démontées. On
+   réapparaissait donc « à côté d'un rocher », sans rien qui dise que c'était
+   chez soi.
+
+   Ce n'est pas une forteresse — rien ici n'est destructible. C'est une ANCRE,
+   et elle doit se reconnaître de l'autre bout de la vallée : c'est le point de
+   reformation, et le seul endroit qui annule le délai de retour en esprit. */
+/* Estrade volontairement RASE. Rien ici n'a de collision — le joueur traverse
+   la géométrie — donc une vraie plateforme surélevée lui aurait enfoncé les
+   pieds dans la pierre à chaque passage. Un dallage affleurant lit tout aussi
+   bien « lieu construit » sans jamais trahir l'absence de volume. */
+const BASE_DAIS_H = 0.13;
+/* Rayon de la base tel qu'on le VOIT et tel qu'il fait règle : cercle de
+   pierres, anneau au sol et annulation du délai de retour en esprit partagent
+   ce seul chiffre. `BASE_WALL_R` (7,2) reste ce qu'il était — le rayon
+   d'apparition des membres — et n'a jamais été une dimension d'affichage. */
+const BASE_ZONE_R = 4.6;
+const baseMeshes = [];
+let baseModel = null;   // cercle de pierres, pièce centrale retirée
+
+/* -- Retrait de la pièce centrale --
+   Le .glb ne contient qu'UNE mesh : la pièce du centre et les quatre formes
+   sont la même géométrie, il n'y a donc aucun nœud à supprimer. On découpe
+   dans les triangles.
+
+   Le relevé du modèle donne une séparation nette : le bloc central s'arrête à
+   0,35 du rayon, l'anneau des quatre formes commence à 0,80. Le seuil se pose
+   donc au milieu du vide, où il ne risque de couper aucune des deux parts. */
+const BASE_CENTER_CUT = 0.55;
+
+function stripCenterPiece(root, cutFrac) {
+  /* Tout se juge en ESPACE MONDE. Le .glb empile une rotation Sketchfab, une
+     contre-rotation, une échelle et un décalage en Y : mesurer le rayon sur la
+     scène entière et le comparer à des sommets restés en coordonnées locales
+     donnerait un seuil faux. */
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root);
+  const cx = (box.min.x + box.max.x) / 2;
+  const cz = (box.min.z + box.max.z) / 2;
+  const R = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 2;
+  const cut = R * cutFrac;
+  const _v = new THREE.Vector3();
+
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry) return;
+    const geo = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry;
+    const pos = geo.attributes.position;
+    const keep = [];
+    for (let t = 0; t < pos.count; t += 3) {
+      /* Centroïde du triangle : juger sommet par sommet couperait en deux les
+         faces qui enjambent le seuil et laisserait des trous. */
+      let mx = 0, mz = 0;
+      for (let k = 0; k < 3; k++) {
+        _v.fromBufferAttribute(pos, t + k).applyMatrix4(o.matrixWorld);
+        mx += _v.x; mz += _v.z;
+      }
+      if (Math.hypot(mx / 3 - cx, mz / 3 - cz) >= cut) keep.push(t);
+    }
+    if (keep.length === pos.count / 3) { o.geometry = geo; return; }
+
+    const src = geo.attributes;
+    const out = new THREE.BufferGeometry();
+    for (const name of Object.keys(src)) {
+      const a = src[name];
+      const it = a.itemSize;
+      const arr = new Float32Array(keep.length * 3 * it);
+      let w = 0;
+      for (const t of keep) {
+        for (let k = 0; k < 3; k++) {
+          for (let c = 0; c < it; c++) arr[w++] = a.array[(t + k) * it + c];
+        }
+      }
+      out.setAttribute(name, new THREE.BufferAttribute(arr, it));
+    }
+    out.computeBoundingBox();
+    out.computeBoundingSphere();
+    if (geo !== o.geometry) geo.dispose();
+    o.geometry.dispose();
+    o.geometry = out;
+  });
+}
+
+gltfLoader.load('assets/models/base_circle.glb', (gltf) => {
+  mobileDownscaleTextures(gltf);
+  const g = gltf.scene;
+  stripCenterPiece(g, BASE_CENTER_CUT);
+  g.traverse((c) => {
+    if (!c.isMesh) return;
+    c.castShadow = true;
+    c.receiveShadow = true;
+    c.material = modelMaterial(c);
+  });
+  /* Diamètre calé sur BASE_ZONE_R. Le premier essai visait BASE_WALL_R (7,2 de
+     rayon) : les trilithons montaient alors à près de sept unités, soit trois
+     fois la taille du Leader — un Stonehenge, pas une base. Le cercle porte
+     désormais le rayon de la zone, et c'est cette zone qui fait règle. */
+  const box = new THREE.Box3().setFromObject(g);
+  const w = Math.max(box.max.x - box.min.x, box.max.z - box.min.z);
+  g.scale.multiplyScalar((BASE_ZONE_R * 2) / Math.max(0.001, w));
+  g.updateMatrixWorld(true);
+  const box2 = new THREE.Box3().setFromObject(g);
+  g.position.y -= box2.min.y;
+  /* Contour noir, comme tout le reste du jeu. Posé APRÈS la mise à l'échelle :
+     la coque se construit dans l'espace du modèle mis à l'échelle, donc le
+     trait garde la même épaisseur que sur les autels et les personnages. */
+  attachCartoonOutline(g, 0.02);
+  const wrap = new THREE.Group();
+  wrap.add(g);
+  baseModel = wrap;
+  /* Les bases déjà posées échangent leur socle de repli. */
+  for (const bm of baseMeshes) swapBaseBody(bm);
+}, undefined, (err) => console.warn('[base] chargement échoué', err));
+
+/** Remplace le socle provisoire d'une base par le vrai cercle de pierres. */
+function swapBaseBody(g) {
+  if (!baseModel || g.userData.hasModel) return;
+  if (g.userData.fallback) {
+    g.remove(g.userData.fallback);
+    g.userData.fallback.geometry?.dispose();
+    g.userData.fallback.material?.dispose();
+  }
+  const body = baseModel.clone(true);
+  g.add(body);
+  g.userData.fallback = body;
+  g.userData.hasModel = true;
+}
+
+function makeBaseMesh(team) {
+  const col = team.color || new THREE.Color(0xffffff);
+  const g = new THREE.Group();
+
+  /* Corps : le cercle de pierres, privé de sa pièce centrale — les quatre
+     formes seules, et le vide au milieu où flotte l'orbe. Socle de repli tant
+     que le .glb n'est pas arrivé. */
+  if (baseModel) {
+    const body = baseModel.clone(true);
+    g.add(body);
+    g.userData.fallback = body;
+    g.userData.hasModel = true;
+  } else {
+    const dais = new THREE.Mesh(
+      new THREE.CylinderGeometry(BASE_ZONE_R, BASE_ZONE_R * 1.04, BASE_DAIS_H, 6),
+      toonMaterial({ color: 0x9aa2b4 }),
+    );
+    dais.position.y = BASE_DAIS_H / 2;
+    dais.receiveShadow = true;
+    g.add(dais);
+    g.userData.fallback = dais;
+    g.userData.hasModel = false;
+  }
+
+  /* Orbe centrale : le repère. Hors brume et hors exposition, donc visible
+     même depuis le monde des esprits — c'est là qu'on rentre se réarmer. */
+  const orb = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(0.85, 1),
+    new THREE.MeshBasicMaterial({ color: col, toneMapped: false, fog: false }),
+  );
+  /* Haute au-dessus de la tête : hors de portée du corps, donc jamais
+     traversée elle non plus. */
+  orb.position.y = BASE_DAIS_H + 3.6;
+  g.add(orb);
+
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(1.5, 14, 10),
+    new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: 0.22,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      toneMapped: false, fog: false,
+    }),
+  );
+  halo.position.copy(orb.position);
+  g.add(halo);
+
+  /* Disque au sol : il matérialise EXACTEMENT le rayon qui annule le délai de
+     retour en esprit. L'affordance doit coller à la règle, sinon le joueur
+     apprend une mauvaise distance. */
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(BASE_ZONE_R * 0.97, BASE_ZONE_R * 1.1, 40),
+    new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: 0.35,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      toneMapped: false, fog: false, side: THREE.DoubleSide,
+    }),
+  );
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.y = 0.07;
+  g.add(ring);
+
+  g.userData.orb = orb;
+  g.userData.halo = halo;
+  g.userData.ring = ring;
+  return g;
+}
+
+function placeBases() {
+  clearBases();
+  for (const t of teams) {
+    const g = makeBaseMesh(t);
+    g.position.set(t.baseX, groundY(t.baseX, t.baseZ) || 0, t.baseZ);
+    scene.add(g);
+    baseMeshes.push(g);
+  }
+}
+
+function clearBases() {
+  for (const g of baseMeshes) { scene.remove(g); disposeGroup(g); }
+  baseMeshes.length = 0;
+}
+
+function updateBases(dt) {
+  for (const g of baseMeshes) {
+    const ud = g.userData;
+    const bob = Math.sin(elapsed * 1.4 + g.position.x) * 0.18;
+    if (ud.orb) { ud.orb.position.y = BASE_DAIS_H + 3.6 + bob; ud.orb.rotation.y = elapsed * 0.6; }
+    if (ud.halo) {
+      ud.halo.position.y = BASE_DAIS_H + 3.6 + bob;
+      ud.halo.scale.setScalar(1 + 0.09 * Math.sin(elapsed * 2.2));
+    }
+    if (ud.ring) ud.ring.material.opacity = 0.28 + 0.12 * Math.sin(elapsed * 1.8);
+  }
+}
+
+/* -- Le vol de retour (§10.10) --
+   Le joueur éclate en une nuée lumineuse qui REJOINT sa base à vitesse fixe.
+   La caméra la suit, et il se reforme dans la nuée à l'arrivée.
+
+   Astuce qui évite tout code de caméra : on déplace le Leader lui-même le long
+   du trajet, corps caché et commandes coupées. La caméra le suit déjà — elle
+   n'a donc rien de spécial à faire, et on arrive à destination sans téléport
+   final à recoller. */
+const RESPAWN = {
+  speed: 34,        // unités/s — la distance décide donc de la durée
+  minDur: 0.75,
+  maxDur: 2.6,
+  motes: 54,
+  arc: 7.5,         // hauteur de la voûte au milieu du trajet
+  spread: 5.5,      // dispersion au départ, résorbée à l'arrivée
+};
+const _flight = {
+  active: false, t: 0, dur: 1, motes: [],
+  from: new THREE.Vector3(), to: new THREE.Vector3(), col: new THREE.Color(),
+};
+const MOTE_GEO = new THREE.SphereGeometry(0.17, 6, 5);
+
+function isRespawning() { return _flight.active; }
+window.__isRespawning = isRespawning;
+
+/** Coupe net un vol en cours et nettoie sa nuée (fin ou relance de partie). */
+function clearRespawnFlight() {
+  for (const m of _flight.motes) { scene.remove(m.mesh); m.mesh.material.dispose(); }
+  _flight.motes.length = 0;
+  _flight.active = false;
+}
+
+function startRespawnFlight(f, fromX, fromZ, toX, toZ) {
+  const d = Math.hypot(toX - fromX, toZ - fromZ);
+  _flight.active = true;
+  _flight.t = 0;
+  _flight.dur = Math.min(RESPAWN.maxDur, Math.max(RESPAWN.minDur, d / RESPAWN.speed));
+  _flight.from.set(fromX, groundY(fromX, fromZ) || 0, fromZ);
+  _flight.to.set(toX, groundY(toX, toZ) || 0, toZ);
+  _flight.col.copy(f.color);
+
+  /* Nuée : additive, hors brume et hors exposition — elle doit rester le point
+     le plus lumineux de l'écran d'un bout à l'autre du trajet, y compris en
+     traversant le monde des esprits. */
+  for (const m of _flight.motes) scene.remove(m.mesh);
+  _flight.motes.length = 0;
+  for (let i = 0; i < RESPAWN.motes; i++) {
+    const mesh = new THREE.Mesh(MOTE_GEO, new THREE.MeshBasicMaterial({
+      color: _flight.col, transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      toneMapped: false, fog: false,
+    }));
+    scene.add(mesh);
+    _flight.motes.push({
+      mesh,
+      /* Chaque grain a son propre retard et sa propre orbite : une nuée qui
+         se déplace d'un bloc ressemble à un objet, pas à une dispersion. */
+      lag: Math.random() * 0.22,
+      ax: (Math.random() - 0.5) * 2, ay: Math.random() * 1.4 + 0.2, az: (Math.random() - 0.5) * 2,
+      phase: Math.random() * Math.PI * 2,
+      spin: 2.5 + Math.random() * 4,
+      sc: 0.6 + Math.random() * 0.9,
+    });
+  }
+  if (f.grp) f.grp.visible = false;
+  shake = Math.max(shake, 0.5);
+}
+
+function updateRespawnFlight(dt) {
+  if (!_flight.active) return;
+  const f = factions[0];
+  _flight.t += dt;
+  const k = Math.min(1, _flight.t / _flight.dur);
+  /* Départ vif, arrivée qui se pose : la nuée jaillit puis se rassemble. */
+  const ease = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+
+  const cx = _flight.from.x + (_flight.to.x - _flight.from.x) * ease;
+  const cz = _flight.from.z + (_flight.to.z - _flight.from.z) * ease;
+  const cy = _flight.from.y + (_flight.to.y - _flight.from.y) * ease
+    + Math.sin(Math.PI * ease) * RESPAWN.arc;
+
+  /* Le Leader voyage avec la nuée : c'est ce qui emmène la caméra. */
+  if (f && f.leader) {
+    f.leader.x = cx; f.leader.z = cz;
+    f.leader.dx = 0; f.leader.dz = 0;
+  }
+
+  /* Dispersion maximale au décollage, nulle à l'arrivée — les grains se
+     resserrent au moment précis où le corps réapparaît. */
+  const spread = RESPAWN.spread * Math.sin(Math.PI * Math.min(1, k * 1.05)) * (1 - k * 0.55);
+  for (const m of _flight.motes) {
+    const kk = Math.max(0, Math.min(1, (k - m.lag) / Math.max(0.05, 1 - m.lag)));
+    const e2 = kk < 0.5 ? 2 * kk * kk : 1 - Math.pow(-2 * kk + 2, 2) / 2;
+    const px = _flight.from.x + (_flight.to.x - _flight.from.x) * e2;
+    const pz = _flight.from.z + (_flight.to.z - _flight.from.z) * e2;
+    const py = _flight.from.y + (_flight.to.y - _flight.from.y) * e2
+      + Math.sin(Math.PI * e2) * RESPAWN.arc;
+    const w = elapsed * m.spin + m.phase;
+    m.mesh.position.set(
+      px + m.ax * spread * Math.cos(w),
+      py + 0.6 + m.ay * spread * 0.35 * Math.sin(w * 0.8),
+      pz + m.az * spread * Math.sin(w),
+    );
+    const s = m.sc * (0.7 + 0.5 * Math.sin(w * 1.7));
+    m.mesh.scale.setScalar(s * (1 - 0.35 * k));
+    m.mesh.material.opacity = k > 0.9 ? (1 - k) * 10 : 1;
+  }
+
+  if (k < 1) return;
+
+  /* Arrivée : la nuée se referme, le corps réapparaît dedans. */
+  for (const m of _flight.motes) { scene.remove(m.mesh); m.mesh.material.dispose(); }
+  _flight.motes.length = 0;
+  _flight.active = false;
+  if (f) {
+    if (f.grp) {
+      f.grp.visible = true;
+      f.grp.position.set(_flight.to.x, _flight.to.y, _flight.to.z);
+    }
+    spawnSparks(_flight.to.x, 1.2, _flight.to.z, f.color, 30, { spread: 5.5, lift: 3.6, size: 0.55 });
+    spawnShock(_flight.to.x, _flight.to.z, f.color, 8, 0.55);
+  }
+  shake = Math.max(shake, 0.35);
+  soundEngine.playSFX('boost');
+}
+
+/** Mort en particules : le joueur éclate, la nuée rejoint sa base, il se
+ *  reforme dedans. Règle unique, en chair comme en esprit (§10.10). */
+function explodeToBase(f = factions[0]) {
+  if (!f || !f.leader) return;
+  if (f.i === 0 && _flight.active) return;
+  /* Le bouclier passe AVANT tout : tant qu'il tient, on n'éclate pas et on ne
+     lâche rien. C'est tout l'intérêt de Gardienne. */
+  if (guardianAbsorb(f)) return;
+  const t = teams[f.team];
+  const dx0 = f.leader.x, dz0 = f.leader.z;
+  spawnSparks(dx0, 1.2, dz0, f.color, 42, { spread: 7.5, lift: 4.5, size: 0.62 });
+  spawnShock(dx0, dz0, f.color, 7, 0.5);
+
+  /* Ce qu'il portait reste sur le terrain (§10.5) : UNE âme tirée au sort tombe
+     là où il a éclaté, les autres éclatent en lumière. On ne tue pas pour tuer,
+     on tue pour ce que l'autre porte.
+
+     Les positions de l'escorte sont relevées AVANT loseAllOnDeath() : celui-ci
+     vide l'inventaire, et l'escorte le suit à l'image suivante — après, il n'y
+     a plus rien dont relever la position. */
+  const where = SOULS.map((_, i) => soulPosition(i));
+  /* Compteur de morts : c'est lui qui fait qu'un bot qui se fait démonter en
+     boucle finit par juger une Gardienne utile (voir botSoulFit). */
+  f._deaths = (f._deaths || 0) + 1;
+  const lost = loseAllOnDeath(f.i);
+  if (lost.drop >= 0) {
+    /* Celle qui tombe atterrit sur le CORPS, et pas là où elle gambadait : elle
+       devient un butin, et un butin doit se trouver à l'endroit que tout le
+       monde a regardé — le point de la mise à mort. */
+    dropSoulAt(scene, lost.drop, dx0, groundY(dx0, dz0) || 0, dz0, f.i);
+    const dc = new THREE.Color(SOULS[lost.drop].col);
+    spawnSparks(dx0, 1.0, dz0, dc, 18, { spread: 2.6, lift: 2.0 });
+  }
+  for (const i of lost.scattered) {
+    const sc = new THREE.Color(SOULS[i].col);
+    const w = where[i];
+    const ex = w ? w.x : dx0, ez = w ? w.z : dz0;
+    /* Y MONDE, pas une hauteur au-dessus du sol : spawnSparks pose la particule
+       à cette altitude telle quelle. soulPosition() rend déjà du monde ; le
+       repli, lui, doit ajouter le sol, sans quoi l'éclat partirait sous une
+       tuile surélevée. */
+    const ey = w ? w.y + 0.5 : (groundY(dx0, dz0) || 0) + 1.4;
+    /* Éclat de lumière : une gerbe dense et large, puis l'onde plate qui en
+       marque le point. Les deux ensemble se lisent comme une dissipation ;
+       la gerbe seule se confondrait avec les étincelles de la mort. */
+    spawnSparks(ex, ey, ez, sc, 26, { spread: 3.4, lift: 5.5, size: 0.5 });
+    spawnShock(ex, ez, sc, 3.4, 0.34);
+  }
+  if (lost.scattered.length) {
+    banner(`✦ ${lost.scattered.length} âme(s) dispersée(s)`);
+  }
+  /* La forme d'esprit ne survit pas à la dispersion : on se reforme toujours
+     en chair, à la base. Remis AVANT le vol — c'est le corps de chair qui doit
+     être caché puis réapparaître, pas l'élémentaire. */
+  forceFlesh(f.i);
+  setBodyForm(f, false);
+
+  /* Le bouclier ne se recharge QUE là (§10.7) : pas de régénération en jeu,
+     donc pousser à un coup restant est une vraie décision. */
+  guardOf(f.i).hits = GUARD_HITS;
+
+  /* Le retour à la base : même RÈGLE pour tous, mise en scène différente.
+
+     Le joueur voyage avec sa nuée, caméra comprise — c'est un moment, et il ne
+     coûte rien puisqu'on le regarde. Un bot, lui, est replacé sèchement : on
+     n'allait pas suspendre trois adversaires deux secondes chacun pour une
+     chorégraphie qui se joue le plus souvent hors champ. Ce qui compte est
+     identique de part et d'autre : il perd ses âmes, il rentre chez lui. */
+  if (!t) {
+    if (f.grp) f.grp.visible = true;
+  } else if (f.i === 0) {
+    startRespawnFlight(f, dx0, dz0, t.baseX, t.baseZ);
+    banner('✦ Dispersé — retour à la base');
+  } else {
+    f.leader.x = t.baseX; f.leader.z = t.baseZ;
+    f.leader.dx = 0; f.leader.dz = 0;
+    if (f.grp) {
+      f.grp.visible = true;
+      f.grp.position.set(t.baseX, groundY(t.baseX, t.baseZ) || 0, t.baseZ);
+    }
+    spawnSparks(t.baseX, 1.2, t.baseZ, f.color, 22, { spread: 4.5, lift: 3.4 });
+  }
+}
+window.__explodeToBase = explodeToBase;
 
 /** Tir du joueur. Retourne true si le coup est parti (bouton à animer). */
 function playerAttack() {
@@ -2404,6 +3688,61 @@ const ALTAR_GROW_T = 45;     // temps pour atteindre cette portée
 
 const altars = [];
 
+/* ---- Lumières de sanctuaire ----
+   Le cercle gravé au sol doit ÉCLAIRER les pierres qui l'entourent, pas
+   seulement briller sur lui-même. Sans lumière portée, le disque reste un
+   autocollant lumineux posé sur un décor éteint — d'autant plus visible depuis
+   que la vallée se joue à la brunante.
+
+   Même contrainte que pour les orbes, et pour la même raison : le nombre de
+   lumières est une constante de compilation des shaders. Le nombre de
+   sanctuaires varie d'une carte à l'autre, donc une lumière par autel ferait
+   recompiler tous les matériaux à chaque chargement de carte — et surtout, sur
+   une carte à huit sanctuaires, huit ponctuelles de plus seraient évaluées sur
+   chaque fragment du sol qui remplit l'écran.
+
+   Vivier fixe, attribué aux sanctuaires les plus proches de la caméra. Deux
+   suffisent : les autels sont espacés d'au moins ALTAR_MIN_GAP, on n'en a
+   jamais trois à portée de lecture en même temps.
+
+   Le rayon est court, à peine plus que le cercle : c'est une lueur qui monte du
+   sol sur les pierres du cromlech, pas un lampadaire. */
+/* Teinte d'un sanctuaire vide : blanc à peine bleuté, et non plus vert.
+   Un vert franc donnait à la lueur une couleur d'appartenance, alors que le
+   lieu n'appartient encore à personne. Presque blanc, il se lit comme de la
+   lumière pure — et il laisse toute la place aux couleurs d'âme, qui prennent
+   le relais dès que le sanctuaire est habité. */
+const ALTAR_IDLE_COLOR = new THREE.Color(0xdff2ff);
+/* Rayon du cercle gravé. Sans rapport avec ALTAR_R (7,2), qui est le rayon de
+   la ZONE DE LIVRAISON et couvre plusieurs tuiles : une lueur à cette taille
+   noyait le sanctuaire entier sous une nappe. Le cercle doit tenir À
+   L'INTÉRIEUR du cromlech, c'est là qu'il se lit comme une source. */
+const ALTAR_GLOW_R = 2.4;
+/* Trois plutôt que deux. Chaque lampe de plus espace les réattributions, donc
+   les fondus : à deux, se déplacer entre trois sanctuaires proches en
+   déclenchait un en permanence. Trois couvre les configurations réelles de la
+   carte — les autels sont espacés d'au moins ALTAR_MIN_GAP, on en a rarement
+   plus de trois à portée de lecture. */
+const ALTAR_LIGHT_COUNT = isCoarse ? 0 : 3;
+/* Vitesse du fondu, en unités par seconde : 1/3 de seconde pour éteindre ou
+   rallumer. Assez lent pour ne pas se lire comme une coupure, assez vif pour
+   qu'un sanctuaire vers lequel on marche soit allumé avant qu'on y arrive. */
+const ALTAR_FADE_SPEED = 3;
+/* Portée juste au-delà des pierres : la lumière doit les prendre, et s'arrêter
+   là. Au-delà, elle éclaire le sol alentour et redevient le halo qu'on ne veut
+   pas — l'effet cherché est un cercle qui éclaire SES pierres, pas un
+   lampadaire posé au milieu du décor. */
+const ALTAR_LIGHT_RANGE = 8;
+/* Montée de 5,5 à 18. À 5,5 la lumière existait mais ne se voyait que sur le
+   sol : les menhirs sont à ~2,5 unités du centre et présentent à la lumière une
+   face presque VERTICALE, donc rasante — l'angle d'incidence y mange presque
+   tout. Il faut nettement plus de puissance pour qu'une surface prise de biais
+   renvoie autant qu'une surface prise de face. C'est aussi pour ça que monter
+   la portée n'aurait rien donné : le problème n'était pas la distance. */
+const ALTAR_LIGHT_POWER = 18;
+const altarLights = [];
+const _altarRank = [];
+
 /* ---- Construction visuelle ----
    Socle procédural plutôt que le .glb de sanctuaire : celui-ci pèse 74 k
    triangles, soit 740 k pour dix autels. Un piédestal cel-shadé coûte mille
@@ -2420,7 +3759,7 @@ gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
   g.traverse((c) => {
     if (!c.isMesh) return;
     c.castShadow = true;
-    c.material = toonMaterial({ map: c.material && c.material.map });
+    c.material = modelMaterial(c);
   });
   const box = new THREE.Box3().setFromObject(g);
   const h = Math.max(0.001, box.max.y - box.min.y);
@@ -2435,6 +3774,12 @@ gltfLoader.load('assets/models/sanctuary_base.glb', (gltf) => {
   /* Les autels déjà posés (partie en cours) échangent leur socle de repli. */
   for (const a of altars) swapAltarBody(a);
 }, undefined, (err) => console.warn('[autel] chargement échoué', err));
+
+/* Pilier d'âme — source unique des âmes, visible en esprit seul (§10.4). */
+gltfLoader.load('assets/models/soul_pillar.glb', (gltf) => {
+  mobileDownscaleTextures(gltf);
+  setPillarModel(gltf.scene, toonMaterial);
+}, undefined, (err) => console.warn('[pilier] chargement échoué', err));
 
 /** Remplace le socle provisoire d'un autel par le vrai modèle, une fois chargé. */
 function swapAltarBody(a) {
@@ -2475,7 +3820,37 @@ function makeAltarMesh() {
   pad.renderOrder = 2;
   g.add(pad);
 
-  g.userData = { ring, pad, body, hasModel: !!altarModel };
+  /* ---- Le cercle gravé : L'ÉMETTEUR ----
+     Ce que la lumière du sanctuaire doit sembler quitter. Distinct du `pad` :
+     celui-ci fait 7,2 de rayon et couvre plusieurs tuiles — il informe sur la
+     zone de livraison. Le cercle, lui, tient à l'intérieur du cromlech.
+
+     Dégradé radial additif plutôt qu'un disque uni : un aplat a un bord franc,
+     et un bord franc se lit comme une décalcomanie posée sur le sol. Le
+     dégradé n'a pas de bord du tout — c'est ce qui le fait lire comme de la
+     lumière et non comme une texture.
+
+     `toneMapped: false` : c'est une source, elle doit rester au blanc éclatant
+     que le tone mapping ramènerait sinon dans la plage du décor. */
+  const core = new THREE.Mesh(
+    new THREE.PlaneGeometry(ALTAR_GLOW_R * 2, ALTAR_GLOW_R * 2).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({
+      map: lampGlowTex,
+      color: ALTAR_IDLE_COLOR,
+      transparent: true,
+      opacity: 1,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    }),
+  );
+  /* Au ras du dallage, mais au-dessus du `pad` : les deux sont additifs et sans
+     écriture de profondeur, c'est donc leur hauteur qui décide de l'ordre. */
+  core.position.y = 0.09;
+  core.renderOrder = 3;
+  g.add(core);
+
+  g.userData = { ring, pad, core, body, hasModel: !!altarModel };
   return g;
 }
 
@@ -2515,10 +3890,17 @@ function makeAltarLabel() {
 /* L'étiquette montre l'ESPRIT demandé puis sa quantité — pas un pictogramme
    d'élément. Le joueur compare directement ce qu'il voit sur l'autel à ce qu'il
    voit dans sa barre de cortège, sans traduction mentale. */
-function drawAltarLabel(spr, variant, reste, css, sub) {
+/** Étiquette flottante d'un sanctuaire : l'âme qui l'habite, et à qui il est.
+ *  Plus de compteur d'esprits à livrer — il n'y a plus rien à compter. */
+function drawAltarLabel(spr, soulIdx, owner, soul) {
   const { cv, tex } = spr.userData;
   const g = cv.getContext('2d');
   g.clearRect(0, 0, cv.width, cv.height);
+
+  const css = soul ? `#${soul.col.toString(16).padStart(6, '0')}` : '#9aa2ad';
+  const sub = soul
+    ? (owner === 0 ? `${soul.nom} · à vous` : soul.nom)
+    : 'sanctuaire vide';
 
   const w = cv.width - 14, h = 84, x = 7, y = 6, r = 24;
   g.fillStyle = 'rgba(8, 12, 26, 0.84)';
@@ -2534,24 +3916,13 @@ function drawAltarLabel(spr, variant, reste, css, sub) {
   g.fill();
   g.stroke();
 
-  /* Portrait à gauche, chiffre à droite. Si l'image n'est pas encore chargée on
-     retombe sur le symbole : l'autel reste lisible dès la première frame. */
-  const im = elemImages[variant];
-  const pad = 10, ph = h - pad * 2;
-  if (im) {
-    g.drawImage(im, x + pad, y + pad, ph, ph);
-  } else {
-    g.textAlign = 'center';
-    g.textBaseline = 'middle';
-    g.font = 'bold 52px system-ui, sans-serif';
-    g.fillText(elemOf(variant).sym, x + pad + ph / 2, y + h / 2);
-  }
-
-  g.textAlign = 'left';
+  /* Le symbole de l'âme, seul et centré. Un autel vide affiche un point
+     d'interrogation : il attend qu'on lui en donne une. */
+  g.textAlign = 'center';
   g.textBaseline = 'middle';
   g.fillStyle = css;
-  g.font = 'bold 54px Cinzel, Georgia, serif';
-  g.fillText('×' + reste, x + pad + ph + 8, y + h / 2 + 2);
+  g.font = 'bold 56px system-ui, sans-serif';
+  g.fillText(soul ? soul.sym : '·', cv.width / 2, y + h / 2 + 2);
 
   if (sub) {
     g.textAlign = 'center';
@@ -2652,6 +4023,7 @@ function clearAltars() {
     scene.remove(a.grp);
     if (a.label) scene.remove(a.label);
     if (a.statue) scene.remove(a.statue);
+    if (a.flame) scene.remove(a.flame);
   }
   altars.length = 0;
 }
@@ -2720,10 +4092,24 @@ function placeAltars() {
   for (let n = 0; n < sites.length; n++) spawnAltar(sites[n].x, sites[n].z, bag[n]);
 
   /* Filet : une île minuscule peut ne rien offrir de conforme. Mieux vaut des
-     sanctuaires serrés que pas de partie du tout. */
+     sanctuaires serrés que pas de partie du tout.
+
+     Ces places-là ne passent PAS par les réservations de buildMap : elles ne
+     sont donc connues de personne, et rien n'empêchait l'une d'elles de tomber
+     sur une base — les bases sont posées juste avant. On écarte explicitement. */
   for (let k = altars.length; k < 4; k++) {
-    const p = islandRandomPoint(island, 6, Infinity);
-    if (p) spawnAltar(p.x, p.z ?? p.y, bag[k]);
+    let p = null;
+    for (let tries = 0; tries < 40 && !p; tries++) {
+      const c = islandRandomPoint(island, 6, Infinity);
+      if (!c) continue;
+      const cx = c.x, cz = c.z ?? c.y;
+      let clear = true;
+      for (const t of teams) {
+        if (Math.hypot(t.baseX - cx, t.baseZ - cz) < ALTAR_R + BASE_ZONE_R + 4) { clear = false; break; }
+      }
+      if (clear) p = { x: cx, z: cz };
+    }
+    if (p) spawnAltar(p.x, p.z, bag[k]);
   }
 }
 
@@ -2738,13 +4124,15 @@ function spawnAltar(x, z, variant) {
 
   altars.push({
     x, z, y,
-    variant,             // élément réclamé actuellement
-    need: ALTAR_NEED_START,
-    filled: 0,
+    /* UN AUTEL EST SON ÂME (GDD §10.8).
+       -1 = neutre : aucune âme, il ne produit rien. Sinon un index dans SOULS,
+       et c'est cette âme seule qui définit tout son comportement. Plus de
+       compteurs, plus de niveaux, plus d'élément réclamé : un placement, et il
+       se relit d'un coup d'œil. */
+    soul: -1,
     owner: -1,           // -1 = dormant
     grp, label,
     statue: null,        // statue de pierre du Leader qui contrôle le lieu
-    feedAcc: 0,
     paintAcc: 0,
     age: 0,
     activeT: 0,
@@ -2753,24 +4141,28 @@ function spawnAltar(x, z, variant) {
 }
 
 function refreshAltarVisual(a) {
-  const e = elemOf(a.variant);
-  a.grp.userData.ring.material.color.setHex(e.col);
+  const soul = a.soul >= 0 ? SOULS[a.soul] : null;
   const owner = a.owner >= 0 ? factions[a.owner] : null;
-  a.grp.userData.pad.material.color.set(owner ? owner.css : e.css);
-  a.grp.userData.pad.material.opacity = owner ? 0.22 : 0.14;
+  /* Anneau et dallage prennent la couleur de l'âme installée. Un autel neutre
+     reste gris : il ne produit rien, il ne doit rien promettre.
 
-  /* La signature inclut la présence de l'image : l'étiquette doit se redessiner
-     une fois la vignette chargée, sinon elle garde son symbole de repli. */
-  const sig = `${a.variant}:${a.filled}:${a.owner}:${elemImages[a.variant] ? 1 : 0}`;
+     Le `pad` est le marqueur de la ZONE DE LIVRAISON, au rayon ALTAR_R (7,2) —
+     il couvre plusieurs tuiles. Ce n'est pas une source de lumière, et le
+     colorer vif en faisait une nappe qui noyait tout le sanctuaire. La lumière
+     est portée par le disque central (userData.core), au rayon ALTAR_GLOW_R. */
+  a.grp.userData.ring.material.color.setHex(soul ? soul.col : 0x9aa2ad);
+  a.grp.userData.pad.material.color.set(owner ? owner.css : '#9aa2ad');
+  a.grp.userData.pad.material.opacity = owner ? 0.22 : 0.12;
+
+  /* Le disque central, lui, EST la source : blanc tant que le lieu est vide,
+     couleur de l'âme une fois habité. */
+  const core = a.grp.userData.core;
+  if (core) core.material.color.set(soul ? new THREE.Color(soul.col) : ALTAR_IDLE_COLOR);
+
+  const sig = `${a.soul}:${a.owner}`;
   if (a.label.userData.sig === sig) return;
   a.label.userData.sig = sig;
-  drawAltarLabel(
-    a.label,
-    a.variant,
-    Math.max(0, a.need - a.filled),
-    e.css,
-    a.owner >= 0 ? `briser · ${e.nom}` : e.nom,
-  );
+  drawAltarLabel(a.label, a.soul, a.owner, soul);
 }
 
 /**
@@ -2786,45 +4178,91 @@ function refreshAltarVisual(a) {
  * d'être dangereux. On peut traverser la vallée en portant sa cargaison sans
  * craindre de la voir grignotée en chemin, ce qui rend le trajet jouable.
  */
-function feedAltar(a, dt) {
-  /* Qui peut livrer MAINTENANT : présent dans l'emprise ET porteur du compte
-     exact. On cherche d'abord, on agit ensuite — sans ça le temps de pose
-     s'accumulerait pendant qu'un culte trop léger campe sur place, et la
-     livraison partirait dès qu'il complète son cortège, sans temps de pose. */
-  let deliverer = null, held = null;
-  for (const f of factions) {
-    if (!f || !f.alive || !f.leader) continue;
-    if (f.i === a.owner) continue;           // on ne brise pas son propre autel
-    if (Math.hypot(f.leader.x - a.x, f.leader.z - a.z) > ALTAR_R) continue;
-
-    const mine = [];
-    for (const s of agents) {
-      if (!s || s.dead) continue;
-      if ((s.followerOf ?? -1) !== f.i) continue;
-      if (variantOf(s.id) !== a.variant) continue;
-      mine.push(s);
-      if (mine.length >= a.need) break;
-    }
-    if (mine.length < a.need) continue;      // pas de quoi : on ne touche à rien
-    deliverer = f; held = mine;
-    break;                                   // un seul culte livre par frame
-  }
-
-  if (!deliverer) { a.feedAcc = 0; return; }
-
-  a.feedAcc += dt;
-  if (a.feedAcc < ALTAR_DELIVER_DELAY) return;
-  a.feedAcc = 0;
-
-  for (const s of held) {
-    consumeFollower(s, deliverer);
-    a.filled++;
-  }
-  spawnShock(a.x, a.z, elemOf(a.variant).col, 3.2, 0.4);
-  if (deliverer.i === 0) soundEngine.playSFX('convert', { volume: 0.6 });
-  activateAltar(a, deliverer);
-  refreshAltarVisual(a);
+/* -- Flamme de l'autel (GDD §10.8) --
+   Elle dit quelle âme habite le lieu. Règle de visibilité, et c'est la première
+   information cachée de la carte :
+     - en CHAIR, on ne voit que la flamme de SES propres autels ;
+     - en ESPRIT, on les voit toutes, adverses comprises.
+   Attaquer un autel rival à l'aveugle devient donc un pari, et la reconnaissance
+   en esprit gagne un second motif : savoir où frapper. */
+function ensureAltarFlame(a) {
+  if (a.flame) return a.flame;
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+    toneMapped: false, fog: false, side: THREE.DoubleSide,
+  });
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(0.4, 1.4, 7, 1, true), mat);
+  cone.position.y = 0.7;
+  g.add(cone);
+  g.position.set(a.x, (a.y || 0) + ALTAR_H + 1.5, a.z);
+  g.userData = { cone, mat };
+  scene.add(g);
+  a.flame = g;
+  return g;
 }
+
+function updateAltarFlame(a) {
+  if (a.soul < 0) { if (a.flame) a.flame.visible = false; return; }
+  const g = ensureAltarFlame(a);
+  const mine = a.owner === 0;
+  const vis = mine ? 1 : spirit.blend;   // adverse : visible en esprit seul
+  g.visible = vis > 0.01;
+  if (!g.visible) return;
+  const s = SOULS[a.soul];
+  g.userData.mat.color.setHex(s.col);
+  g.userData.mat.opacity = 0.9 * vis;
+  const puls = 0.86 + 0.14 * Math.sin(elapsed * 5.2 + a.x);
+  g.userData.cone.scale.set(puls, 0.9 + 0.2 * Math.sin(elapsed * 7 + a.z), puls);
+  g.userData.cone.rotation.y = elapsed * 1.6;
+}
+
+/* -- Le dépôt d'âme (GDD §10.8) --
+   Aucune notion de temps : à portée d'un autel, on CHOISIT l'âme à y mettre, et
+   elle y est. Le choix est tout le geste.
+
+   Une version précédente imposait un rituel chronométré (rester immobile
+   plusieurs secondes, durée modulée par la peinture alentour). Retiré : le jeu
+   se joue au placement des âmes, pas à l'attente. La profondeur vient de quelle
+   âme on met où, pas du temps qu'on met à la poser. */
+
+/** L'autel à portée d'une faction, en chair. La chair seule consacre (§10.2). */
+function nearbyAltarOf(f) {
+  if (!f || !f.alive || !f.leader) return null;
+  if (formOf(f.i).active) return null;
+  if (f.i === 0 && _flight.active) return null;
+  let best = null, bestD = ALTAR_R;
+  for (const a of altars) {
+    const d = Math.hypot(f.leader.x - a.x, f.leader.z - a.z);
+    if (d <= bestD) { bestD = d; best = a; }
+  }
+  return best;
+}
+function nearbyAltar() { return nearbyAltarOf(factions[0]); }
+
+/** Cette faction peut-elle poser l'âme du slot `i` sur cet autel ? */
+function canDeposit(f, a, i) {
+  if (!a || !f || !hasSoul(f.i, i)) return false;
+  /* Reposer la MÊME âme sur son propre autel ne changerait rien : on refuse,
+     sinon on gaspille une âme sans s'en rendre compte.
+     Rien d'autre n'est interdit — empiler les Gardienne est permis, simplement
+     sans effet cumulé : le bouclier est le même avec un autel ou avec quatre. */
+  if (a.owner === f.i && a.soul === i) return false;
+  return true;
+}
+
+/** Pose l'âme du slot `i` sur l'autel à portée de `f`. Joueur et bots passent
+ *  par ici : une seule écriture de la règle, donc aucun risque de divergence. */
+function depositSoulFor(f, i) {
+  const a = nearbyAltarOf(f);
+  if (!canDeposit(f, a, i)) return false;
+  takeSoul(f.i, i);
+  activateAltar(a, f, i);
+  refreshAltarVisual(a);
+  return true;
+}
+function depositSoul(i) { return depositSoulFor(factions[0], i); }
 
 /** Retire un suivant du cortège : il est absorbé par l'autel. */
 function consumeFollower(s, f) {
@@ -2845,6 +4283,16 @@ function consumeFollower(s, f) {
    Le plan de coupe (`clippingPlanes`) évite de voir la statue traverser le
    dallage par en dessous : tout ce qui est sous le niveau du sanctuaire est
    simplement découpé, donc elle émerge vraiment du sol au lieu de le percer. */
+/* Blanc-bleuté : c'est la teinte qui dit « pierre habitée » sans appartenir à
+   aucun culte — toutes les couleurs de faction sont franchement saturées, celle
+   -ci reste presque blanche et ne peut donc pas se lire comme une appartenance. */
+const STATUE_GLOW = new THREE.Color(0xbfd8ff);
+/* Vif à l'arrachement, presque éteint une fois posée. La statue ne doit pas
+   rester une lampe pour le reste de la partie : la lueur est l'événement, pas
+   l'état. Le résidu suffit à la détacher du décor à la brunante. */
+const STATUE_GLOW_RISE = 1.5;
+const STATUE_GLOW_IDLE = 0.12;
+
 const _statueRises = [];   // { a, t, dur, y0, plane }
 
 function beginStatueRise(a, dur) {
@@ -2858,6 +4306,19 @@ function beginStatueRise(a, dur) {
       c.material = c.material.clone();
       c.material.clippingPlanes = [plane];
       c.material.clipShadows = true;
+      /* Lueur d'émergence. L'émissif est le bon canal ici, et pas une lumière :
+         il n'ajoute AUCUNE lumière à la scène — donc aucune recompilation de
+         shader, aucun coût par fragment ailleurs — et il rend la pierre
+         lumineuse par elle-même, ce qui est précisément l'effet voulu. Elle
+         sort du sol en brillant, pas éclairée par quelque chose.
+
+         Les matériaux non éclairés (MeshBasic) n'ont pas d'émissif : on les
+         laisse tels quels plutôt que de poser une propriété que Three.js
+         ignorerait en silence. */
+      if (c.material.emissive) {
+        c.material.emissive.copy(STATUE_GLOW);
+        c.material.emissiveIntensity = STATUE_GLOW_RISE;
+      }
     }
   });
   a.statue.position.y = y - drop;
@@ -2887,6 +4348,18 @@ function updateStatueRises(dt) {
       y + (Math.random() - 0.5) * amp * 0.7,
       r.a.z + (Math.random() - 0.5) * amp,
     );
+    /* La lueur s'éteint à mesure que la statue se pose : vive tant que la
+       pierre s'arrache, résiduelle une fois immobile. Courbe au carré pour que
+       l'extinction se fasse surtout sur la fin — une décroissance linéaire
+       éteindrait la statue alors qu'elle monte encore, au moment où on la
+       regarde le plus. */
+    const glow = STATUE_GLOW_IDLE
+      + (STATUE_GLOW_RISE - STATUE_GLOW_IDLE) * (1 - u) * (1 - u);
+    r.a.statue.traverse((c) => {
+      if ((c.isMesh || c.isSkinnedMesh) && c.material.emissive) {
+        c.material.emissiveIntensity = glow;
+      }
+    });
     /* Le plan de coupe suit le sol, pas la statue : il reste fixe, c'est la
        statue qui le franchit. */
     if (u >= 1) {
@@ -2938,17 +4411,19 @@ function shatterStatue(a, wasOwner) {
   shake = Math.max(shake, wasOwner === 0 ? 0.45 : 0.25);
 }
 
-function activateAltar(a, f) {
+/** Installe une âme dans un autel et le donne à `f`. Capturer, c'est remplacer :
+ *  l'âme précédente retourne au monde des esprits (GDD §10.8). */
+function activateAltar(a, f, soulIdx = -1) {
   const wasOwner = a.owner;
+  const wasSoul = a.soul;
+  if (soulIdx < 0) soulIdx = (Math.random() * SOULS.length) | 0;   // cartes hasard
   /* Mémoire du dépossédé : c'est ce qui permet à une IA de distinguer
      « prendre un sanctuaire » de « REPRENDRE le mien ». Les deux ne valent pas
      la même chose — le second efface le gain de celui qui l'avait pris. */
   if (wasOwner >= 0 && wasOwner !== f.i) a.lastOwner = wasOwner;
   a.owner = f.i;
-  a.filled = 0;
-  /* Chaque prise renchérit la suivante — pour tout le monde, y compris celui
-     qui vient de prendre l'autel. L'escalade appartient au lieu, pas au culte. */
-  a.need += ALTAR_NEED_STEP;
+  a.soul = soulIdx;
+
   a.activeT = 0;
   /* L'ANCIENNE statue vole en éclats. Elle ne disparaît pas : une prise se lit
      comme un renversement, il faut voir tomber ce qui était là avant. */
@@ -2978,11 +4453,19 @@ function activateAltar(a, f) {
      terre une éternité. */
   const rise = Math.min(2.6, Math.max(0.8, soundEngine.sfxDuration(sfx, 1.4)));
   beginStatueRise(a, rise);
-  a.variant = ELEM_OPPOSITE[a.variant];
+  /* L'âme précédente retourne au monde des esprits : gerbe verticale de sa
+     couleur, pour qu'on voie partir ce qu'on vient de remplacer. */
+  if (wasSoul >= 0) {
+    spawnSparks(a.x, ALTAR_H, a.z, new THREE.Color(SOULS[wasSoul].col), 16,
+      { spread: 1.0, lift: 7.0 });
+  }
 
   spawnShock(a.x, a.z, f.color, 9, 1.2);
+  const nom = SOULS[soulIdx].nom;
   if (f.i === 0) {
-    banner(wasOwner >= 0 ? '🏛 Sanctuaire repris !' : '🏛 Sanctuaire éveillé !');
+    banner(wasOwner >= 0 && wasOwner !== 0
+      ? `🏛 Sanctuaire repris — ${nom}`
+      : (wasOwner === 0 ? `🏛 Âme échangée — ${nom}` : `🏛 Sanctuaire éveillé — ${nom}`));
     sfxRankUp();
   } else if (wasOwner === 0) {
     banner('⚠ Un rival vous prend un sanctuaire !');
@@ -2990,39 +4473,233 @@ function activateAltar(a, f) {
   refreshAltarVisual(a);
 }
 
+/**
+ * Attribue le vivier de lumières aux sanctuaires les plus proches de la caméra.
+ *
+ * Créé paresseusement : `scene` et `camera` existent bien avant les autels,
+ * mais concentrer ici la création et l'attribution garde tout ce qui concerne
+ * ces lumières au même endroit.
+ */
+function updateAltarLights(dt) {
+  if (!ALTAR_LIGHT_COUNT) return;
+  if (!altarLights.length) {
+    for (let i = 0; i < ALTAR_LIGHT_COUNT; i++) {
+      const l = new THREE.PointLight(0xffffff, 0, ALTAR_LIGHT_RANGE, 2);
+      l.layers.set(LAYER_WORLD);
+      /* `level` est le fondu propre à CETTE lampe, indépendant de l'autel
+         qu'elle sert. Voir le changement d'affectation plus bas. */
+      l.userData.altar = null;
+      l.userData.level = 0;
+      scene.add(l);
+      altarLights.push(l);
+    }
+  }
+  _altarRank.length = 0;
+  for (const a of altars) {
+    _altarRank.push({ a, d2: camera.position.distanceToSquared(a.grp.position) });
+  }
+  _altarRank.sort((x, y) => x.d2 - y.d2);
+
+  for (let i = 0; i < altarLights.length; i++) {
+    const l = altarLights[i];
+    const want = _altarRank[i] ? _altarRank[i].a : null;
+    const st = l.userData;
+
+    /* ---- Changement d'affectation en FONDU ----
+       Le défaut était ici. Le vivier suit les autels les plus proches, et le
+       classement change dès que la caméra bouge : une lampe passait d'un autel
+       à l'autre d'une image à la suivante, pleine puissance des deux côtés. Vu
+       de l'écran, un sanctuaire s'éteignait net pendant qu'un autre s'allumait
+       net — l'allumage-extinction selon la distance.
+
+       Une lampe ne change donc plus d'autel tant qu'elle éclaire : elle
+       s'éteint d'abord, bascule à zéro, puis se rallume sur le nouveau. Le
+       vivier reste de taille fixe (aucune recompilation), mais la
+       réattribution cesse d'être visible. */
+    if (st.altar !== want) {
+      st.level = Math.max(0, st.level - dt * ALTAR_FADE_SPEED);
+      if (st.level <= 0.001) st.altar = want;
+    } else if (want) {
+      st.level = Math.min(1, st.level + dt * ALTAR_FADE_SPEED);
+    }
+
+    const a = st.altar;
+    if (!a || st.level <= 0.001) { l.intensity = 0; continue; }
+    /* Basse, mais plus au ras du sol. À 0,5 elle éclairait surtout la dalle :
+       les menhirs ne recevaient qu'un liseré à leur pied, parce qu'une lampe
+       posée au sol envoie ses rayons presque parallèlement à leur face. À 1,4
+       elle les prend encore par en dessous — ce qui reste la lecture voulue,
+       une lueur qui MONTE du cercle — mais avec un angle qui accroche
+       réellement la pierre.
+       Au-delà de ~2, elle éclairerait leur sommet et se lirait comme une lune
+       suspendue au-dessus du sanctuaire. */
+    l.position.set(a.x, (a.y || 0) + 1.4, a.z);
+    /* La lumière reprend la couleur du disque central, jamais celle de l'anneau
+       flottant : le disque est la source, et lui seul passe du blanc neutre à
+       la couleur de l'âme quand le lieu est habité. */
+    const core = a.grp.userData.core;
+    l.color.copy(core ? core.material.color : ALTAR_IDLE_COLOR);
+    /* Même respiration que l'anneau, pour que les deux se lisent comme une
+       seule source et non comme deux effets superposés. */
+    const breath = 0.85 + 0.15 * Math.sin(a.age * 1.6);
+    /* Atténuation avec la distance à la caméra, recalculée depuis l'autel
+       RÉELLEMENT servi — et non depuis le classement, dont l'entrée `i` peut
+       désigner un autre autel pendant un fondu.
+
+       Elle s'éteint à 55 et non plus à 85 : au-delà, l'autel occupe quelques
+       pixels et sa lueur ne se lit plus, mais il gardait une lampe du vivier
+       pour rien — et surtout, une lampe encore vive au moment d'être réattribuée
+       est précisément ce qui rendait le saut visible. Une extinction plus courte
+       fait que la plupart des réattributions ont lieu alors que la lampe est
+       déjà proche de zéro. */
+    const dCam = camera.position.distanceTo(a.grp.position);
+    const far = Math.max(0, Math.min(1, 1 - dCam / 55));
+    l.intensity = ALTAR_LIGHT_POWER * breath * TUNE.altar * st.level * far;
+  }
+}
+
 function updateAltars(dt) {
   updateStatueRises(dt);
+  updateAltarLights(dt);
   for (const a of altars) {
     a.age += dt;
     a.grp.userData.ring.rotation.z += dt * 0.8;
     a.grp.userData.ring.position.y = ALTAR_H + 0.55 + Math.sin(a.age * 1.6) * 0.09;
     a.label.position.y = (a.y || 0) + ALTAR_H + 2.0 + Math.sin(a.age * 1.3) * 0.12;
 
-    /* Bon marché : la signature coupe court dès que rien n a changé. Nécessaire
-       pour que l étiquette se redessine quand la vignette finit de charger. */
+    /* Bon marché : la signature coupe court dès que rien n'a changé. */
     refreshAltarVisual(a);
-    feedAltar(a, dt);
+    updateAltarFlame(a);
 
-    if (a.owner < 0) continue;
+    /* Un autel neutre n'a pas d'âme et ne produit RIEN (§10.8). */
+    if (a.owner < 0 || a.soul < 0) continue;
     const f = factions[a.owner];
     if (!f || !f.alive) continue;
 
     a.activeT += dt;
     /* La statue ne bouge pas : c'est de la pierre. */
-
-    /* Peinture : le sanctuaire tache autour de lui, sur un disque qui s'élargit
-       avec le temps. On sème des éclaboussures au hasard plutôt que de peindre
-       un cercle net — la frontière reste organique, comme le reste du jeu. */
-    a.paintAcc += dt;
-    if (a.paintAcc >= ALTAR_PAINT_PERIOD) {
-      a.paintAcc = 0;
-      const grow = Math.min(1, a.activeT / ALTAR_GROW_T);
-      const r = ALTAR_PAINT_R * (0.28 + 0.72 * grow);
-      const ang = Math.random() * Math.PI * 2;
-      const d = Math.sqrt(Math.random()) * r;
-      stampPaintAt(f, a.x + Math.cos(ang) * d, a.z + Math.sin(ang) * d, 1.15);
-    }
+    tickAltarSoul(a, f, dt);
   }
+}
+
+/* -- Les quatre comportements d'autel (GDD §10.6) --
+
+   Chaque âme répond à une SITUATION, pas à une statistique. Trois agissent sur
+   la peinture, la quatrième sur le joueur — c'est ce déséquilibre voulu qui les
+   empêche de se ressembler.
+
+     Fleuve    étendre     nappe rapide et large, sol neutre seulement
+     Cendre    percer      la seule qui AVANCE sur la peinture adverse
+     Racine    verrouiller nappe lente mais DURCIE : la Cendre n'y peut rien
+     Gardienne protéger    aucune peinture — un bouclier pour le porteur
+
+   Le contrepoids de chacune est dans son manque, pas dans un malus caché :
+   Fleuve ne perce pas, Cendre ne tient rien, Racine n'avance guère, Gardienne
+   ne rapporte aucun territoire. */
+const SOUL_ALTAR = {
+  /* Fleuve : la portée grandit vite et loin, mais elle s'arrête à la frontière. */
+  fleuve: { period: 0.16, radius: 1.35, growT: 30, scale: 1.25, pierce: false, hard: false },
+  /* Cendre : courte portée et cadence lente — elle ne sert qu'au contact d'un
+     front, et c'est bien là son unique métier. */
+  cendre: { period: 0.30, radius: 0.62, growT: 26, scale: 1.05, pierce: true, hard: false },
+  /* Racine : la plus lente et la plus courte, mais ce qu'elle prend est acquis. */
+  racine: { period: 0.44, radius: 0.55, growT: 60, scale: 1.0, pierce: false, hard: true },
+  /* Gardienne : rien. Son effet est sur le joueur (voir updateGuardianShield). */
+  gardienne: null,
+};
+
+function tickAltarSoul(a, f, dt) {
+  const rule = SOUL_ALTAR[SOULS[a.soul].key];
+  if (!rule) return;   // Gardienne : cet autel ne produit aucune peinture
+
+  a.paintAcc += dt;
+  if (a.paintAcc < rule.period) return;
+  a.paintAcc = 0;
+
+  /* La nappe s'élargit avec l'ancienneté de la prise : un autel fraîchement
+     sacré ne repeint pas un quartier d'un coup, il gagne du terrain. */
+  const grow = Math.min(1, a.activeT / rule.growT);
+  const r = ALTAR_PAINT_R * rule.radius * (0.28 + 0.72 * grow);
+  const ang = Math.random() * Math.PI * 2;
+  const d = Math.sqrt(Math.random()) * r;
+  _altarPaintOpts.overwriteEnemy = rule.pierce;
+  _altarPaintOpts.hard = rule.hard;
+  stampPaintAt(f, a.x + Math.cos(ang) * d, a.z + Math.sin(ang) * d,
+    rule.scale, _altarPaintOpts);
+}
+const _altarPaintOpts = { overwriteEnemy: false, hard: false };
+
+/* -- Gardienne : le bouclier (GDD §10.7) --
+   Un seul autel Gardienne à la fois. Tant qu'on le tient, une bulle alvéolée
+   blanche encaisse trois coups, et c'est la DENSITÉ des alvéoles qui dit ce
+   qu'il en reste — pas une couleur, qui se serait battue avec les teintes de
+   culte. Aucune recharge en jeu : elle ne revient qu'à la réapparition.
+
+   Le perdre retire la bulle à l'instant. Et comme un autel Gardienne ne produit
+   aucune peinture, il forme un trou de sol neutre au milieu du territoire :
+   impossible à cacher, et volontairement. Tout le monde sait où frapper pour
+   te dénuder. */
+const GUARD_HITS = 3;
+/* Un bouclier par faction : un bot qui tient un autel Gardienne encaisse ses
+   trois coups comme le joueur. Seule la BULLE n'existe que pour ceux qu'on
+   affiche — la règle, elle, vaut pour tous. */
+const guardians = [];
+function guardOf(fi) {
+  if (!guardians[fi]) guardians[fi] = { hits: GUARD_HITS, mesh: null };
+  return guardians[fi];
+}
+
+function ownsGuardianAltar(fi) {
+  for (const a of altars) {
+    if (a.owner === fi && a.soul >= 0 && SOULS[a.soul].key === 'gardienne') return true;
+  }
+  return false;
+}
+
+/* Trois maillages de finesse décroissante : dense à trois coups, large et
+   clairsemé à un seul. Le détail de l'icosaèdre EST la densité d'alvéoles. */
+const GUARD_GEOS = [null, null, null];
+function guardGeo(hits) {
+  const i = Math.max(0, Math.min(2, hits - 1));
+  if (!GUARD_GEOS[i]) GUARD_GEOS[i] = new THREE.IcosahedronGeometry(1.35, i);
+  return GUARD_GEOS[i];
+}
+
+function updateGuardianShield(f, dt) {
+  const gd = guardOf(f.i);
+  const on = ownsGuardianAltar(f.i) && gd.hits > 0;
+  if (on && !gd.mesh) {
+    gd.mesh = new THREE.Mesh(guardGeo(gd.hits), new THREE.MeshBasicMaterial({
+      color: 0xf2f6ff, wireframe: true, transparent: true, opacity: 0.55,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      toneMapped: false, fog: false,
+    }));
+    scene.add(gd.mesh);
+  }
+  if (!gd.mesh) return;
+  gd.mesh.visible = on;
+  if (!on) return;
+  if (gd.mesh.geometry !== guardGeo(gd.hits)) gd.mesh.geometry = guardGeo(gd.hits);
+  gd.mesh.position.set(f.leader.x, (f.leader.y || 0) + 1.05, f.leader.z);
+  gd.mesh.rotation.y += dt * 0.5;
+  /* Au dernier coup, la bulle clignote : l'alerte arrive AVANT la panne. */
+  const blink = gd.hits <= 1 ? (0.35 + 0.4 * (Math.sin(elapsed * 9) > 0 ? 1 : 0)) : 1;
+  gd.mesh.material.opacity = 0.5 * blink;
+}
+
+/** Encaisse un coup. Retourne true si le bouclier a absorbé (donc pas de mort). */
+function guardianAbsorb(f) {
+  const gd = guardOf(f.i);
+  if (!ownsGuardianAltar(f.i) || gd.hits <= 0) return false;
+  gd.hits--;
+  spawnSparks(f.leader.x, 1.2, f.leader.z, new THREE.Color(0xf2f6ff), 20,
+    { spread: 4.0, lift: 2.6 });
+  spawnShock(f.leader.x, f.leader.z, new THREE.Color(0xf2f6ff), 5, 0.4);
+  if (f.i === 0) {
+    shake = Math.max(shake, 0.3);
+    banner(gd.hits > 0 ? `◇ Bouclier — ${gd.hits} coup(s)` : '◇ Bouclier brisé !');
+  }
+  return true;
 }
 
 function updateBurrowEvents(dt) {
@@ -3092,6 +4769,14 @@ for (const [key, def] of Object.entries(LEADERS)) {
     mobileDownscaleTextures(elGltf);
     let elTex = null;
     elGltf.scene.traverse((c) => { if (c.isMesh && c.material?.map && !elTex) elTex = c.material.map; });
+    /* Copie riggée mise de côté AVANT bakeVAT, qui fige la scène et la rend
+       inutilisable comme squelette. C'est elle qui sert de corps à la forme
+       d'esprit du joueur (§10.2) — même élémentaire que son cortège. */
+    spiritAssets[key] = {
+      model: SkeletonUtils.clone(elGltf.scene),
+      texture: elTex,
+      clips: elGltf.animations,
+    };
     /* Portrait AVANT bakeVAT : la cuisson laisse la scène figée sur la dernière
        frame de course, bras en pleine foulée — mauvaise pose de portrait. */
     renderSpiritPortrait(renderer, elGltf.scene, key);
@@ -3191,14 +4876,33 @@ function influenceRadius(n, factionI = -1) {
 /* Contexte des helpers sim : évite les globales cachées dans src/sim/*.
    Recréé une seule fois — pointe sur les valeurs vivantes de main.js. */
 const _simCtx = { skillMods, paintOwnerAt: null };
-function leaderSpeed(f) { _simCtx.skillMods = skillMods; return _leaderSpeed(f, _simCtx); }
+function leaderSpeed(f) {
+  _simCtx.skillMods = skillMods;
+  const v = _leaderSpeed(f, _simCtx);
+  /* Forme d'esprit : la vivacité est sa contrepartie à la fragilité. Appliquée
+     ici plutôt que dans sim/leader.js — la forme est un état de session du
+     joueur local, pas une donnée de simulation partagée. */
+  return v * spiritSpeedMul(f.i);
+}
 /* Emplacements d'agents libérés par une absorption. Un agent absorbé n'est pas
    retiré du tableau : son `id` indexe sa place dans les InstancedMesh, et tout
    décaler à chaque conversion ferait sauter l'apparence de la moitié de la carte.
    On le marque mort, on le cache, et le prochain spawn reprend sa place. */
 const freeAgentIds = [];
 
+/* -- Esprits sauvages : retirés de la carte (V3, GDD §10) --
+   Le joueur PREND désormais la forme de l'élémentaire de son personnage ; en
+   laisser errer des copies sur le sol brouillait la lecture et faisait doublon
+   avec la transformation. Les âmes ne viennent plus que des piliers (§10.4).
+
+   Le verrou est posé sur spawnAgent lui-même plutôt que sur chaque appelant :
+   tous savent déjà gérer un retour nul (grappes de départ, respawn, brèches,
+   revenu de sanctuaire), et un seul point de bascule se remet à true en une
+   ligne si on veut les récupérer. */
+const WILD_SPIRITS = false;
+
 function spawnAgent(x, z) {
+  if (!WILD_SPIRITS) return null;
   /* Un sceptique ne naît jamais au-dessus du vide : les appelants raisonnent en
      coordonnées libres (autour d'un Leader, d'une maison…), c'est ici qu'on
      ramène le point sur la tuile la plus proche. */
@@ -3867,11 +5571,7 @@ function findBaseSite(ang) {
       /* Les places de sanctuaire sont réservées avant tout le reste : c'est
          donc au point d'apparition de s'en écarter. Naître sur une place
          reviendrait à la prendre à la première seconde. */
-      let onAltar = false;
-      for (const s of (island.altarSites || [])) {
-        if (Math.hypot(s.x - x, s.z - z) < ALTAR_R + 10) { onAltar = true; break; }
-      }
-      if (onAltar) continue;
+      if (!baseSpotClear(x, z)) continue;
       let ok = 0, flat = 0;
       const y0 = groundY(x, z);
       for (let a = 0; a < 8; a++) {
@@ -3886,7 +5586,38 @@ function findBaseSite(ang) {
       if (ok >= 6 && (!needGate || (flat >= 7 && gateApproachSolid(x, z)))) return { x, z };
     }
   }
+  /* Repli : les deux passes ont échoué. Il ne renvoyait qu'un point calculé,
+     SANS aucune vérification de sanctuaire — c'est par là qu'une base pouvait
+     se poser sur un autel. On balaie donc en spirale autour de la direction
+     demandée avant d'abandonner, et on ne cède sur le sanctuaire qu'en tout
+     dernier recours. */
+  for (let spread = 0; spread <= 1.4; spread += 0.14) {
+    for (const side of (spread === 0 ? [0] : [-1, 1])) {
+      const a = ang + side * spread;
+      for (let k = 0.86; k >= 0.42; k -= 0.04) {
+        const x = Math.cos(a) * MAP_R * k;
+        const z = Math.sin(a) * MAP_R * k;
+        if (!isSolid(island, x, z)) continue;
+        if (!baseSpotClear(x, z)) continue;
+        return { x, z };
+      }
+    }
+  }
   return onIsland(Math.cos(ang) * MAP_R * 0.7, Math.sin(ang) * MAP_R * 0.7);
+}
+
+/** Le point est-il assez loin de tout sanctuaire — réservé OU déjà posé ?
+ *  On lit les DEUX listes : `island.altarSites` porte les places réservées par
+ *  buildMap, mais placeAltars peut en semer d'autres hors réservation quand
+ *  l'île est ingrate, et celles-là n'apparaissent que dans `altars`. */
+function baseSpotClear(x, z, margin = ALTAR_R + BASE_ZONE_R + 4) {
+  for (const s of (island && island.altarSites) || []) {
+    if (Math.hypot(s.x - x, s.z - z) < margin) return false;
+  }
+  for (const a of altars) {
+    if (Math.hypot(a.x - x, a.z - z) < margin) return false;
+  }
+  return true;
 }
 
 
@@ -4351,7 +6082,20 @@ function stampIcon(f) {
   paintDirty = true;
 }
 
-function stampPaintAt(f, x, z, radiusScale = 1) {
+/* -- Cellules durcies (âme de Racine, GDD §10.6) --
+   Une nappe nourrie par un autel de Racine ne se laisse pas ronger : la Cendre
+   adverse s'y casse les dents. Un octet par cellule, remis à zéro dès que la
+   cellule change de camp par un autre chemin. */
+const paintHard = new Uint8Array(PAINT_N * PAINT_N);
+
+/** Pose de la peinture.
+ *  @param {{overwriteEnemy?:boolean, hard?:boolean}} opts
+ *    overwriteEnemy — franchir la frontière adverse. FAUX par défaut : deux
+ *      nappes se touchent sans se manger (§10.9), et seule la Cendre passe.
+ *    hard — durcir les cellules gagnées (Racine). */
+function stampPaintAt(f, x, z, radiusScale = 1, opts = _noPaintOpts) {
+  const overwriteEnemy = !!opts.overwriteEnemy;
+  const hard = !!opts.hard;
   const half = PAINT_N / 2, k = PAINT_N / PAINT_SPAN;
   // Ruban liquide — Amazone / combo uniquement pour le Leader (radiusScale gère le reste)
   const rMult = (f.leaderKey === 'amazon' && radiusScale >= 1) ? 1.18 : 1.0;
@@ -4370,40 +6114,61 @@ function stampPaintAt(f, x, z, radiusScale = 1) {
      escaladait les plateaux et le relief ne pesait sur rien. */
   const srcY = groundY(x, z);
 
+  /* Le dessin se fait CELLULE PAR CELLULE, et non plus par une éclaboussure
+     posée d'un bloc sur tout le rayon.
+
+     C'est devenu obligatoire avec le blocage aux frontières : la grille peut
+     désormais refuser une cellule (nappe adverse, cellule durcie) alors que
+     l'éclaboussure, elle, l'aurait peinte quand même. Image et règle se
+     seraient contredites, et le joueur aurait vu du territoire qu'il ne
+     possédait pas.
+
+     Le bord reste organique : le rayon est perturbé par un bruit de position,
+     donc la frontière ondule au lieu de dessiner un disque net. */
   let gridChanged = false;
+  paintCtx.save();
+  /* Même coupe que la grille : on n'éclabousse que son niveau et en dessous. */
+  if (paintClipAtY(srcY)) paintCtx.clip(paintClipAtY(srcY));
+  paintCtx.fillStyle = f.css;
+  paintCtx.globalAlpha = 1;
+
   for (let gz = gz0; gz <= gz1; gz++) {
     for (let gx = gx0; gx <= gx1; gx++) {
       const dx = gx + 0.5 - cx, dz = gz + 0.5 - cz;
-      if (dx * dx + dz * dz > r2 * 1.15) continue;
+      /* Bord ondulant : ±12 % de rayon selon la position, stable dans le temps
+         (ce n'est pas du bruit par frame, sinon le bord grésillerait). */
+      const wob = 1 + 0.12 * Math.sin(gx * 1.7 + gz * 2.3) * Math.cos(gx * 0.9 - gz * 1.3);
+      if (dx * dx + dz * dz > r2 * 1.15 * wob) continue;
       const wx = (gx + 0.5 - half) * kw, wz = (gz + 0.5 - half) * kw;
       if (!isSolid(island, wx, wz)) continue;
       if (groundY(wx, wz) > srcY + 0.01) continue;
       const idx = gz * PAINT_N + gx;
-      if (paintGrid[idx] === f.team) continue;
       const old = paintGrid[idx];
+      if (old === f.team) continue;
+      /* Frontière : une nappe s'arrête net contre une nappe adverse. */
+      if (old >= 0 && !overwriteEnemy) continue;
+      /* Racine : même la Cendre ne passe pas. */
+      if (old >= 0 && paintHard[idx]) continue;
       if (old >= 0) paintCounts[old]--;
       paintGrid[idx] = f.team;
       paintCounts[f.team]++;
+      paintHard[idx] = hard ? 1 : 0;
       gridChanged = true;
+      paintCtx.fillRect(gx, gz, 1, 1);
     }
   }
+  paintCtx.restore();
+
   if (gridChanged && f.i === 0 && radiusScale >= 1 && Math.random() < 0.25) {
     soundEngine.playSFX('paint_stamp');
   }
-
   if (gridChanged) {
-    paintCtx.save();
-    /* Même coupe que la grille : on n'éclabousse que son niveau et en dessous. */
-    if (paintClipAtY(srcY)) paintCtx.clip(paintClipAtY(srcY));
-    paintCtx.fillStyle = f.css;
-    paintCtx.globalAlpha = 1;
-    drawOrganicSplat(paintCtx, cx, cz, r);
-    paintCtx.restore();
     paintNeedsClip = true;
     paintDirty = true;
   }
   return gridChanged;
 }
+const _noPaintOpts = {};
 
 function stampPaint(f) {
   return stampPaintAt(f, f.leader.x, f.leader.z, 1);
@@ -4473,6 +6238,7 @@ const _crowdTickCtx = {
 };
 function clearPaint() {
   paintGrid.fill(-1);
+  paintHard.fill(0);
   paintCounts.fill(0);
   paintCtx.clearRect(0, 0, PAINT_N, PAINT_N);
   paintTex.needsUpdate = true;
@@ -4539,6 +6305,16 @@ const timeValEl = $('time-val');
 const netBtnEl = $('net-btn');
 const netCdEl = netBtnEl && netBtnEl.querySelector('.net-cd');
 const boostBtn = $('boost-btn'), boostOverlay = $('boost-cooldown-overlay');
+/* Bouton mobile de bascule Chair <-> Esprit — équivalent tactile de Maj. */
+const spiritBtn = $('spirit-btn'), spiritOverlay = $('spirit-cooldown-overlay');
+if (spiritBtn) {
+  spiritBtn.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    audioInit();
+    playerToggleSpirit();
+    spiritBtn.classList.toggle('on', spirit.active);
+  });
+}
 /* Boule de verre : niveau de peinture. N'écrit dans le DOM que si le % change. */
 let fervorPct = -1;
 
@@ -4641,17 +6417,80 @@ const DAY_KEYS = [
 const fogBase = new THREE.Color(0x9fdcff);
 let fogBaseNear = 70;
 let fogBaseFar = 165;
+/* ---- Surcharge globale du brouillard ----
+   Le brouillard est une donnée DE BIOME : `buildVoid` remplace `scene.fog` à
+   chaque chargement de carte, avec la teinte et les distances du biome, et
+   `captureDayBase` s'aligne dessus. Un réglage trouvé dans le désert était donc
+   perdu en arrivant dans la prairie — non pas parce qu'il n'était pas
+   enregistré, mais parce que la carte suivante réécrivait par-dessus.
+
+   Ces trois champs, quand ils ne valent pas `null`, l'emportent sur le biome et
+   survivent aux changements de carte. C'est ce qui permet de chercher un
+   réglage global au lieu d'en retrouver un par biome. Remis à `null`, chaque
+   biome reprend le sien. */
+const FOG_OVR = { color: null, near: null, far: null };
+
+function applyFogOverride() {
+  if (FOG_OVR.color !== null) fogBase.set(FOG_OVR.color);
+  if (FOG_OVR.near !== null) fogBaseNear = FOG_OVR.near;
+  if (FOG_OVR.far !== null) fogBaseFar = FOG_OVR.far;
+}
+
 function captureDayBase() {
   if (scene.fog) {
     fogBase.copy(scene.fog.color);
     fogBaseNear = scene.fog.near;
     fogBaseFar = scene.fog.far;
   }
+  /* Après la capture, jamais avant : la surcharge doit écraser ce que le biome
+     vient de poser, pas l'inverse. */
+  applyFogOverride();
 }
+/* ---- Rapport clé / remplissage ----
+   Le réglage le plus important de tout le fichier, et celui que le premier
+   passage en IBL avait raté : de la lumière indirecte avait été AJOUTÉE sans que
+   l'ancienne soit retirée. Ambiant total ~1.1 contre un soleil à 1.65, soit un
+   rapport proche de 1:1 — à ce niveau, une face à l'ombre reçoit presque autant
+   qu'une face au soleil, il n'y a plus d'ombre du tout et l'image devient
+   laiteuse. C'est le contraire de ce que l'IBL était censée apporter.
+
+   Un extérieur ensoleillé se tient entre 3:1 et 5:1. Les deux facteurs ci-
+   dessous ramènent l'ambiant total autour de 0.45 pour un soleil à 1.65, soit
+   ~3.7:1 : assez d'indirect pour que les faces à l'ombre gardent leur couleur,
+   assez peu pour que le soleil reste le sujet.
+
+   À régler en direct par __grade.lights({ env, hemi }) plutôt qu'ici : ces deux
+   valeurs ne se jugent qu'à l'œil, et jamais séparément. */
+const HEMI_IBL_SCALE = 0.18;
+const ENV_IBL_SCALE = 0.38;
+/* `hemiI` de plein jour dans DAY_KEYS. Sert de référence pour ramener
+   l'intensité de l'environnement à ENV_IBL_SCALE en plein jour. */
+const HEMI_DAY_REF = 0.98;
 const _dayCol = new THREE.Color();
 let nightK = 0;   // 0 = plein jour, 1 = obscurité maximale
-/* Heure figée de la vallée : plein jour légèrement décalé vers l'après-midi. */
-const DAY_FIXED = 0.42;
+/* ---- Heure de la vallée : la brunante ----
+   Toutes les cartes se jouent à la tombée du jour, et c'est un choix de
+   direction, pas un réglage parmi d'autres. Trois choses en découlent
+   ensemble, ce qui est précisément l'intérêt :
+     · le soleil est bas, donc les ombres sont longues — c'est ce qui sculpte le
+       relief du terrain plutôt que de l'aplatir ;
+     · sa couleur vire au doré-orangé, ce qui réchauffe la roche et fait ressortir
+       le bleu des runes et des orbes par contraste de température ;
+     · `nightK` monte, donc la lanterne du joueur et les feux prennent le relais
+       et deviennent des sources qui comptent vraiment dans l'image.
+
+   0.68 est l'« après-midi » de DAY_KEYS : lumière franche et déjà chaude, sans
+   la perte d'exposition du couchant. C'est un RETOUR en arrière assumé depuis
+   0.86 — la brunante donnait la bonne couleur mais assombrissait tout, et ce
+   qu'on cherche est une vallée lumineuse aux ombres longues.
+
+   Ce compromis n'existe plus, justement : la longueur des ombres est passée
+   sous SUN_ELEV_DEG et ne dépend plus d'ici. On peut donc prendre la lumière
+   qu'on veut sans rien sacrifier des ombres.
+
+   `let` et non `const` : c'est le réglage le plus expressif du jeu, il se
+   cherche en le balayant en direct (__grade.time) et pas en recompilant. */
+let DAY_FIXED = 0.68;
 
 function applyDayCycle(t) {
   t = Math.min(1, Math.max(0, t));
@@ -4706,8 +6545,22 @@ function applyDayCycle(t) {
      une seule fois serait perdue au chargement de la carte suivante. */
   scene.backgroundIntensity = 1 - 0.93 * bo;
   setVoidDim(0.95 * bo);
-  charSun.intensity = CHAR_SUN_I * (1 - 0.93 * bo);
-  charHemi.intensity = CHAR_HEMI_I * (1 - 0.9 * bo);
+  /* Les persos suivent le jour, partiellement (voir CHAR_FOLLOW_*). `dayK` vaut
+     1 en plein jour et descend avec l'heure ; interpolé depuis 1, il ne fait
+     donc qu'atténuer, jamais surexposer. */
+  const dayK = hemiI / HEMI_DAY_REF;
+  charSun.intensity = CHAR_SUN_I * (1 - CHAR_FOLLOW_SUN * (1 - dayK)) * (1 - 0.93 * bo);
+  charHemi.intensity = CHAR_HEMI_I * (1 - CHAR_FOLLOW_HEMI * (1 - dayK)) * (1 - 0.9 * bo) * TUNE.charHemi;
+  /* La lumière de face suit le jour BEAUCOUP moins que les deux autres : c'est
+     elle qui garantit qu'on voit le personnage, et c'est justement quand la
+     scène s'assombrit qu'on en a le plus besoin. Elle s'éteint en revanche avec
+     la nuit noire comme tout le reste — cette carte-là est faite pour qu'on ne
+     voie plus rien. */
+  /* Lumière de face : un uniforme du shader des personnages, pas une lampe.
+     Elle suit le jour BEAUCOUP moins que les autres — c'est elle qui garantit
+     qu'on voit le personnage, et c'est quand la scène s'assombrit qu'on en a le
+     plus besoin. Elle s'éteint quand même sous la nuit noire. */
+  CHAR_FILL_U.value = CHAR_FILL_I * (1 - 0.25 * (1 - dayK)) * (1 - 0.93 * bo) * TUNE.charFill;
 
   renderer.toneMappingExposure = exp * TUNE.exposure;
   /* Bornes calées sur DAY_KEYS : plein jour 0.78, plus sombre 0.31. Elles ont
@@ -4717,7 +6570,39 @@ function applyDayCycle(t) {
   nightK = Math.min(1, Math.max(0, (0.78 - exp) / (0.78 - 0.31)));
   sun.intensity = sunI * TUNE.sun;
   sun.color.set(a.sun).lerp(_dayCol.set(b.sun), k);
-  hemi.intensity = hemiI * TUNE.hemi;
+  /* Températures des persos, alignées sur celle de la scène — et écrites ICI,
+     après `sun.color`, sinon elles reprendraient la couleur de l'image
+     précédente.
+
+     La couleur suit le jour en ENTIER, contrairement à l'intensité : un
+     personnage éclairé blanc au milieu d'un couchant orangé se détache comme un
+     autocollant. Découpler les deux est ce qui permet de le garder lisible sans
+     le sortir de la scène — l'intensité porte la lisibilité, la température
+     porte l'appartenance.
+
+     Le ciel de l'hémisphérique n'est réchauffé qu'à moitié : c'est la lumière
+     du ciel, elle doit rester plus froide que le soleil, sinon les persos
+     perdent le modelé qui vient du contraste entre les deux. */
+  charSun.color.copy(sun.color);
+  charHemi.color.copy(CHAR_HEMI_SKY).lerp(sun.color, 0.5);
+  /* Le sol suit le ciel, à peine plus sourd. Les DEUX doivent être réécrits
+     ensemble : ne réchauffer que le ciel rouvrirait l'écart entre haut et bas,
+     donc rétablirait le gradient vertical qu'on vient de supprimer. */
+  charHemi.groundColor.copy(charHemi.color).multiplyScalar(0.88);
+  /* L'hémisphérique fait désormais DOUBLE EMPLOI avec l'IBL : les deux
+     apportent de la lumière ambiante, et laissés tous deux à pleine intensité
+     ils délavent la scène — le côté ombre remonte si haut qu'il n'y a plus de
+     contraste, ce qui annule précisément ce qu'on est venu chercher.
+
+     L'hémisphérique n'est pas supprimé pour autant : c'est le seul ambiant qui
+     subsiste quand le ciel est une couleur unie (menu, cartes sans texture de
+     fond), cas où `refreshEnvironment` renonce. Il est donc conservé en appoint,
+     au tiers de sa valeur. */
+  hemi.intensity = hemiI * HEMI_IBL_SCALE * TUNE.hemi;
+  /* L'ambiant issu du ciel suit la même courbe que le reste du jour, sans quoi
+     une nuit noire laisserait tout le décor éclairé par un ciel de plein midi.
+     Rapporté à `HEMI_DAY_REF` pour partir de 1 en plein jour. */
+  scene.environmentIntensity = (hemiI / HEMI_DAY_REF) * ENV_IBL_SCALE * (1 - 0.93 * bo) * TUNE.env;
   if (scene.fog) scene.fog.color.copy(fogBase).multiplyScalar(fogK);
 }
 
@@ -4733,11 +6618,11 @@ let playerBoostCharge = 1.0;
 let lastAtkPct = -1;
 function updateAttackUI() {
   if (!boostBtn || !boostOverlay) return;
-  const pct = Math.round(playerBoostCharge * 100);
-  if (pct === lastAtkPct) return;
-  lastAtkPct = pct;
-  boostOverlay.style.setProperty('--cooldown-deg', Math.round((1 - playerBoostCharge) * 360) + 'deg');
-  boostBtn.classList.toggle('ready', pct >= 100);
+  const charge = Math.max(0, Math.min(1, playerBoostCharge));
+  const deg = Math.round(charge * 360) + 'deg';
+  boostOverlay.style.setProperty('--cooldown-deg', deg);
+  boostBtn.classList.toggle('ready', charge >= 1.0);
+  boostBtn.classList.toggle('charging', charge < 1.0);
 }
 
 /* Sprint. Aucun coût en croyants et aucun palier de compétence : juste une
@@ -4983,7 +6868,29 @@ function drawMinimap() {
 /* ============================== Contrôles ============================== */
 const input = { x: 0, z: 0 };
 const keys = {};
+
+/**
+ * Vrai si l'événement vient d'un ÉLÉMENT D'INTERFACE et non du terrain de jeu.
+ *
+ * Le jeu écoute clavier et pointeur sur `window`. Sans ce filtre, toute
+ * interaction avec un contrôle DOM traverse jusqu'au personnage : tirer une
+ * glissière du panneau de réglage fait apparaître le joystick et le fait
+ * marcher, et les flèches du clavier dans un champ de saisie le déplacent
+ * pendant qu'on tape.
+ *
+ * Le test porte sur le TYPE de l'élément, pas sur une liste de panneaux :
+ * n'importe quel champ ajouté plus tard est couvert d'office, alors qu'une
+ * liste devrait être tenue à jour — et ne le serait pas.
+ */
+function isUiInput(e) {
+  const t = e.target;
+  if (!t || !t.closest) return false;
+  return !!t.closest('input, select, textarea, button, [contenteditable="true"], .devp');
+}
+
 addEventListener('keydown', e => {
+  /* Une touche destinée à un champ de saisie ne doit pas atteindre le jeu. */
+  if (isUiInput(e)) return;
   if (e.code === 'Space') {
     e.preventDefault();
     // Espace = boost, en partie COMME dans le Hub. L'interaction du Hub est sur
@@ -4997,12 +6904,34 @@ addEventListener('keydown', e => {
     e.preventDefault();
     togglePauseModal();
   }
+  /* Maj = bascule Chair <-> Esprit. Touche large et libre en partie (le Hub
+     s'en sert pour son boost, mais jamais dans l'état 'play'). */
+  if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight')
+      && !keys.ShiftLeft && !keys.ShiftRight && state === 'play') {
+    e.preventDefault();
+    playerToggleSpirit();
+  }
+  /* Test de la mort en particules tant que le combat V3 n'existe pas. */
+  if (e.code === 'KeyK' && !keys.KeyK && state === 'play') explodeToBase();
+  /* 1-4 : l'emplacement d'âme. À portée d'un autel c'est un DÉPÔT, sinon une
+     simple sélection — même touche, le contexte décide. Un joueur devant un
+     autel veut poser, jamais sélectionner pour rien. */
+  if (state === 'play' && /^Digit[1-4]$/.test(e.code)) {
+    e.preventDefault();
+    const i = Number(e.code.slice(5)) - 1;
+    if (!depositSoul(i)) selectSlot(0, i);
+  }
   if (e.code === 'KeyQ' && !keys.KeyQ && state === 'play') {
     playerAttack();
   }
   keys[e.code] = true;
 });
 addEventListener('keyup', (e) => {
+  /* Pas de garde `isUiInput` ici, et c'est délibéré : une touche enfoncée sur
+     le terrain puis relâchée après un clic dans un champ doit quand même être
+     relevée, sinon le personnage part en marche continue sans qu'on puisse
+     l'arrêter. Un relâchement de trop est sans conséquence ; un relâchement
+     manquant bloque le jeu. */
   keys[e.code] = false;
 });
 
@@ -5013,7 +6942,9 @@ function onDown(e) {
   audioInit();
   // Le Hub se pilote comme une partie : même joystick, même double-tap.
   if (state !== 'play' && state !== 'overworld') return;
-  if (e.target.closest('button') || e.target.closest('#hud-top-bar')) return;
+  /* `isUiInput` couvre déjà les boutons ; la barre du HUD s'y ajoute parce
+     qu'elle est faite d'éléments qui ne sont pas des contrôles de formulaire. */
+  if (isUiInput(e) || e.target.closest('#hud-top-bar')) return;
 
   // double-tap sur l'écran = sprint, sans occuper de bouton au pouce
   const now = performance.now();
@@ -5066,6 +6997,14 @@ initGamepad({
   onBoost: () => {
     audioInit();
     if (state === 'play' || state === 'overworld') doBoost(factions[0]);
+  },
+  onSpirit: () => {
+    audioInit();
+    playerToggleSpirit();
+  },
+  onSoulSlot: (i) => {
+    if (state !== 'play') return;
+    if (!depositSoul(i)) selectSlot(0, i);
   },
   /* Le Hub valide portails et autel en lisant keys.KeyE : on passe par la même
      porte plutôt que d'appeler les branches d'ouverture d'écran une à une,
@@ -5174,8 +7113,10 @@ function altarThreat(al, exceptFaction) {
   for (const o of factions) {
     if (!o || !o.alive || o === exceptFaction || !o.leader) continue;
     if (o.i === 0 && !o.alive) continue;
-    const need = al.need - al.filled;
-    const ready = carryOf(o.i)[al.variant] >= need;
+    /* « Prêt » = capable de sacrer maintenant. Le joueur l'est s'il porte une
+       âme ; les bots ne portent pas encore d'âme (étape IA à venir), on les
+       considère donc jamais prêts plutôt que de leur inventer une cargaison. */
+    const ready = selectedSoul(o.i) >= 0;
     const d = leaderDist(o, al.x, al.z);
     /* Un porteur prêt compte double : il lui suffit d'arriver. */
     const rank = ready ? d : d + 60;
@@ -5184,17 +7125,221 @@ function altarThreat(al, exceptFaction) {
   return worst ? { f: worst, d: leaderDist(worst, al.x, al.z), ready: worstReady } : null;
 }
 
+/* ====================== Le cerveau V3 des rivaux ======================
+
+   Les bots jouent au MÊME jeu, avec les mêmes contraintes : dix secondes
+   d'esprit, cinq de délai, quatre emplacements, une âme par type, tout perdu à
+   la mort. Aucune valeur n'est trafiquée en leur faveur — le seul écart entre
+   un bot et un joueur est la qualité de la décision.
+
+   La boucle qu'ils comprennent tient en quatre questions, dans cet ordre :
+
+     1. Y a-t-il un butin à ramasser tout de suite ? (âme au sol, elle expire)
+     2. Est-ce que je porte de quoi prendre un autel qui vaut le déplacement ?
+     3. Sinon, quel pilier vaut la course — et ai-je le temps d'y aller ?
+     4. À défaut, où me poster pour être utile ?
+
+   Le plan est mémorisé sur la faction (`f.v3`) et relu chaque frame par
+   tickBotActions, qui exécute les gestes que le système de but ne sait pas
+   exprimer : basculer de forme, et déposer.                                  */
+
+/** Les GESTES des bots, joués chaque frame plutôt qu'au rythme lent de la
+ *  réflexion : basculer de forme et déposer demandent d'être faits à l'instant
+ *  précis où c'est possible, pas une demi-seconde plus tard.
+ *
+ *  Ils passent par exactement les mêmes fonctions que le joueur —
+ *  `factionToggleSpirit` et `depositSoulFor` — donc par les mêmes refus, les
+ *  mêmes chronos et les mêmes coûts. */
+function tickBotActions() {
+  for (const f of factions) {
+    if (!f || !f.isBot || !f.alive || !f.leader || !f.v3) continue;
+    const v = f.v3;
+    const sf = formOf(f.i);
+
+    if (v.plan === 'pillar' && v.pillar) {
+      /* Le ramassage exige la forme d'esprit. On ne bascule qu'une fois assez
+         près pour que le chrono tienne : basculer au départ gaspillerait la
+         moitié des dix secondes en trajet. */
+      const d = leaderDist(f, v.pillar.x, v.pillar.z);
+      const speed = Math.max(1, leaderSpeed(f) * TUNE_SPIRIT.speedMul);
+      if (!sf.active && canEnterSpirit(f.i) && d / speed < TUNE_SPIRIT.duration - 1.2) {
+        factionToggleSpirit(f);
+      }
+      continue;
+    }
+
+    if (v.plan === 'deposit' && v.altar && v.soul >= 0) {
+      /* La chair seule consacre : on repasse de l'autre côté avant d'arriver,
+         sinon on tourne autour de l'autel sans pouvoir rien y mettre. */
+      if (sf.active) {
+        const d = leaderDist(f, v.altar.x, v.altar.z);
+        if (d < ALTAR_R * 2) factionToggleSpirit(f);
+        continue;
+      }
+      depositSoulFor(f, v.soul);
+      continue;
+    }
+
+    /* Butin au sol et chasse se jouent en chair comme en esprit : rien à
+       basculer, le contact suffit. Mais un esprit dont le chrono file pour
+       rien vaut mieux dépensé — on rentre pour relancer le délai plus tôt. */
+    if (sf.active && v.plan === 'idle' && sf.t < 2.5) factionToggleSpirit(f);
+  }
+}
+
+/** Une âme au sol dans un rayon utile, en priorité absolue : elle disparaît
+ *  toute seule en quelques secondes, c'est maintenant ou jamais. */
+function botLoot(f) {
+  let best = null, bestD = 34;
+  for (const d of getDropped()) {
+    if (hasSoul(f.i, d.soulIdx)) continue;          // on porte déjà ce type
+    if (d.owner === f.i && d.t < TUNE_SOULS.dropSelfLock) continue;
+    const dist = leaderDist(f, d.x, d.z);
+    if (dist < bestD) { bestD = dist; best = d; }
+  }
+  return best;
+}
+
+/** Ce que vaut l'âme `si` posée sur l'autel `al`, pour la faction `f`.
+ *  Négatif = à éviter. C'est ici que vit la compréhension des quatre âmes. */
+function botSoulFit(f, al, si) {
+  const key = SOULS[si].key;
+  const mix = paintMixAround(al.x, al.z, ALTAR_PAINT_R, f.team);
+  const mine = mix ? mix.mine : 0;
+  const neutral = mix ? mix.neutral : 1;
+  const enemy = Math.max(0, 1 - mine - neutral);
+  const owned = al.owner === f.i;
+
+  switch (key) {
+    /* Fleuve étend : il ne vaut que s'il reste du vide à prendre autour. */
+    case 'fleuve': return 20 + neutral * 90 - enemy * 30;
+    /* Cendre perce : elle n'a de sens qu'au contact d'un front adverse, et
+       n'en a aucun au milieu d'un pré. */
+    case 'cendre': return -10 + enemy * 150;
+    /* Racine verrouille : sur un autel à soi que l'adversaire lèche déjà. */
+    case 'racine': return (owned ? 25 : 0) + enemy * 60 + mine * 25;
+    /* Gardienne protège : elle ne rapporte aucun territoire, donc elle ne vaut
+       que si l'on meurt vraiment trop, et jamais deux fois. */
+    case 'gardienne':
+      if (ownsGuardianAltar(f.i)) return -100;
+      return (f._deaths || 0) >= 2 ? 55 : -40;
+    default: return 0;
+  }
+}
+
+/** Meilleur couple (autel, âme portée) à jouer maintenant. */
+function botBestPlacement(f) {
+  const held = heldList(f.i);
+  if (!held.length) return null;
+  let best = null, bestScore = -1e9;
+  for (const al of altars) {
+    for (const si of held) {
+      if (!canDeposit(f, al, si)) continue;
+      let s = botSoulFit(f, al, si);
+      /* Prendre à un rival vaut double : ça lui en retire un et ça m'en donne
+         un. Reprendre celui qu'il m'a pris vaut encore plus. */
+      if (al.owner >= 0 && al.owner !== f.i) s += 35;
+      if (al.lastOwner === f.i) s += 20;
+      /* La distance est un coût, pas un critère : un excellent placement à
+         l'autre bout de la carte reste meilleur qu'un médiocre sous le nez. */
+      s -= leaderDist(f, al.x, al.z) * 0.7;
+      if (s > bestScore) { bestScore = s; best = { al, si, score: s }; }
+    }
+  }
+  return best && best.score > -30 ? best : null;
+}
+
+/** Le pilier qui vaut la course, en tenant compte du chrono d'esprit. */
+function botBestPillar(f) {
+  const sf = formOf(f.i);
+  const speed = Math.max(1, leaderSpeed(f) * TUNE_SPIRIT.speedMul);
+  /* Temps d'esprit dont on disposera en arrivant : si l'on est déjà dedans,
+     ce qu'il en reste ; sinon les dix secondes pleines, mais seulement une
+     fois le délai écoulé. */
+  const budget = sf.active ? sf.t : TUNE_SPIRIT.duration;
+
+  let best = null, bestScore = -1e9;
+  for (const p of getPillars()) {
+    if (p.state !== 'idle') continue;
+    const si = SOULS.indexOf(p.soul);
+    if (hasSoul(f.i, si)) continue;               // déjà ce type en poche
+    const d = leaderDist(f, p.x, p.z);
+    /* Le chrono est une contrainte dure : partir pour un pilier qu'on ne peut
+       pas atteindre, c'est se faire éjecter en terrain découvert pour rien. */
+    if (d / speed > budget - 1.2) continue;
+    /* Ce que l'âme vaudra une fois en main : on ne court pas après n'importe
+       quelle flamme, on court après celle qui sert. */
+    let want = -1e9;
+    for (const al of altars) want = Math.max(want, botSoulFit(f, al, si));
+    const s = want * 0.5 - d * 1.1;
+    if (s > bestScore) { bestScore = s; best = p; }
+  }
+  return best;
+}
+
+/** Un porteur adverse à portée raisonnable : la cible la plus rentable de la
+ *  carte, puisqu'il lâche ce qu'il porte. On ne voit son aura que s'il porte
+ *  quelque chose — donc l'information est légitime, pas de la triche. */
+function botPrey(f) {
+  let best = null, bestD = 26;
+  for (const o of factions) {
+    if (!o || !o.alive || o === f || !o.leader) continue;
+    if (!carryingAnything(o.i)) continue;
+    /* Un esprit n'est visible que d'un autre esprit (§10.2). */
+    if (formOf(o.i).active && !formOf(f.i).active) continue;
+    const d = leaderDist(f, o.leader.x, o.leader.z);
+    if (d < bestD) { bestD = d; best = o; }
+  }
+  return best;
+}
+
 function botAltarGoal(f) {
   if (!f || !altars.length) return null;
-
+  if (!f.v3) f.v3 = { plan: 'idle', pillar: null, altar: null, soul: -1 };
+  const v = f.v3;
+  /* Profil de difficulté : encore lu par les branches de repli plus bas. */
   const B = brainOf(f.aiDifficulty || currentDifficulty);
-  _botCarry.set(carryOf(f.i));
 
-  /* a) Un sanctuaire à portée de bourse : on livre. */
+  /* 1) Butin au sol — il expire, donc il passe avant tout. */
+  const loot = botLoot(f);
+  if (loot) {
+    v.plan = 'loot'; v.pillar = null; v.altar = null; v.soul = -1;
+    return { mode: 'altar', pt: { x: loot.x, z: loot.z } };
+  }
+
+  /* 2) Poser ce qu'on porte, si ça vaut le coup. */
+  const place = botBestPlacement(f);
+
+  /* 3) Chasser une âme. On y va aussi quand on porte déjà quelque chose mais
+        qu'aucun placement ne vaut le déplacement — mieux vaut compléter sa
+        main que poser une Cendre au milieu d'un pré. */
+  const pillar = (heldList(f.i).length < SOULS.length) ? botBestPillar(f) : null;
+
+  if (place && (!pillar || place.score > 25)) {
+    v.plan = 'deposit'; v.altar = place.al; v.soul = place.si; v.pillar = null;
+    return { mode: 'altar', pt: { x: place.al.x, z: place.al.z } };
+  }
+  if (pillar) {
+    v.plan = 'pillar'; v.pillar = pillar; v.altar = null; v.soul = -1;
+    return { mode: 'altar', pt: { x: pillar.x, z: pillar.z } };
+  }
+  if (place) {
+    v.plan = 'deposit'; v.altar = place.al; v.soul = place.si; v.pillar = null;
+    return { mode: 'altar', pt: { x: place.al.x, z: place.al.z } };
+  }
+
+  /* 4) Rien à porter, rien à prendre : on chasse un porteur, sinon on se poste
+        sur le sanctuaire le plus disputé — un bot n'est jamais sans objectif. */
+  const prey = botPrey(f);
+  if (prey) {
+    v.plan = 'hunt'; v.pillar = null; v.altar = null; v.soul = -1;
+    return { mode: 'hunt', pt: { x: prey.leader.x, z: prey.leader.z } };
+  }
+  v.plan = 'idle'; v.pillar = null; v.altar = null; v.soul = -1;
+
   let goAltar = null, goD = Infinity;
   for (const al of altars) {
     if (al.owner === f.i) continue;
-    if (_botCarry[al.variant] < al.need - al.filled) continue;
     const d = leaderDist(f, al.x, al.z);
     if (d < goD) { goD = d; goAltar = al; }
   }
@@ -5261,9 +7406,7 @@ function botAltarGoal(f) {
   const plans = [];
   for (const al of altars) {
     if (al.owner === f.i) continue;
-    const manque = (al.need - al.filled) - _botCarry[al.variant];
-    if (manque <= 0) continue;
-    let cost = manque * 12 + leaderDist(f, al.x, al.z);
+    let cost = leaderDist(f, al.x, al.z);
     /* Prendre un sanctuaire à un rival vaut double : ça lui en retire un et ça
        m'en donne un. Reprendre celui qu'il m'a pris vaut encore plus — c'est
        une remise à zéro de son gain, et les niveaux profonds le voient. */
@@ -5290,7 +7433,13 @@ function botAltarGoal(f) {
       }
       pool.sort((p, q) => p.cost - q.cost);
     }
-    wantVar = pool[0].al.variant;
+    /* Le plan aboutit maintenant DIRECTEMENT à un cap sur le sanctuaire.
+       Avant, il servait à choisir quel élément aller chasser (`wantVar`) ; les
+       esprits sauvages ayant quitté la carte, cette chasse n'a plus d'objet et
+       la suite de la fonction ne trouverait rien. Le bot va donc au sanctuaire
+       visé — comportement pauvre mais lisible, en attendant l'étape IA qui lui
+       apprendra les piliers et la bascule de forme. */
+    return { mode: 'altar', pt: { x: pool[0].al.x, z: pool[0].al.z } };
   }
 
   /* c) Cap sur l'esprit voulu. À défaut, n'importe quel esprit libre fera
@@ -5372,7 +7521,7 @@ function botAltarGoal(f) {
   let post = null, postCost = Infinity;
   for (const al of altars) {
     if (al.owner === f.i) continue;
-    const c = (al.need - al.filled) * 8 + Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
+    const c = Math.hypot(al.x - f.leader.x, al.z - f.leader.z);
     if (c < postCost) { postCost = c; post = al; }
   }
   if (!post) return null;
@@ -5699,6 +7848,11 @@ function openOverworldHub(ctx) {
   if (pLeader.grp.userData.ring) pLeader.grp.userData.ring.visible = false;
   if (pLeader.grp.userData.shield) pLeader.grp.userData.shield.visible = false;
   scene.add(pLeader.grp);
+  /* Corps d'esprit bâti TOUT DE SUITE, pas à la première bascule. Le clonage du
+     squelette, la création des matériaux et la coque de contour coûtent une
+     dizaine d'images : payées ici elles passent inaperçues, payées au premier
+     appui elles faisaient décrocher la transformation. */
+  ensureSpiritBody(pLeader);
   factions = [pLeader];
   agents = [pLeader.leader];
 
@@ -5834,7 +7988,7 @@ function openOverworldHub(ctx) {
     }
   }
 
-  camera.position.set(leader.x, 18, leader.z + 24);
+  camera.position.set(leader.x, 18 * CAM_FOV_COMP, leader.z + 24 * CAM_FOV_COMP);
   camera.lookAt(leader.x, 1, leader.z);
 
   updateOverworldHud(iso);
@@ -5991,7 +8145,7 @@ function updateOverworld(dt) {
   }
 
   // Caméra suit le personnage en 3D
-  camera.position.set(leader.x, 18, leader.z + 22);
+  camera.position.set(leader.x, 18 * CAM_FOV_COMP, leader.z + 22 * CAM_FOV_COMP);
   camera.lookAt(leader.x, 1.2, leader.z);
 
   // Villageois pacifiques : marche vers un point, pause, puis nouveau point.
@@ -6203,8 +8357,42 @@ function closeOverworldHud() {
 
 function resetGame() {
   skillMods = getSkillMods();
+  /* La forme et les chronos sont propres à une partie : sans ça, on démarrerait
+     la suivante en esprit, chrono épuisé, mesh encore spectral. */
+  resetSpirit();
+  clearRespawnFlight();
+  clearBases();
+  clearPillars(scene);
+  resetSouls();
+  /* Bouclier neuf : sans ça, une partie perdue à un coup restant démarrerait la
+     suivante avec un bouclier déjà entamé. */
+  for (const au of _carryAuras) if (au) scene.remove(au);
+  _carryAuras.length = 0;
+  for (const gd of guardians) {
+    if (!gd) continue;
+    gd.hits = GUARD_HITS;
+    if (gd.mesh) { scene.remove(gd.mesh); gd.mesh = null; }
+  }
+  guardians.length = 0;
+  /* L'escorte suit l'inventaire, mais elle garde le cap et les positions de la
+     partie précédente : sans purge, les âmes de la prochaine partie
+     réapparaîtraient là où celles-ci gambadaient. */
+  clearSoulEscort(scene);
+  initSoulsHud((i) => { if (!depositSoul(i)) selectSlot(0, i); });
+  initAltarPanel((i) => depositSoul(i));
+  /* Ancien cortège des six élémentaires : plus rien ne l'alimente depuis que
+     les esprits sauvages ont quitté la carte. La barre des quatre âmes prend
+     sa place. */
+  if (spiritBarEl) spiritBarEl.style.display = 'none';
   // purge
-  for (const f of factions) if (f.grp) scene.remove(f.grp);
+  for (const f of factions) {
+    if (f.grp) scene.remove(f.grp);
+    /* Corps d'esprit et corps de chair mis de côté par la bascule : sans ça,
+       l'élémentaire de la partie précédente reste planté dans la vallée. */
+    if (f.spiritGrp && f.spiritGrp !== f.grp) scene.remove(f.spiritGrp);
+    if (f.fleshGrp && f.fleshGrp !== f.grp) scene.remove(f.fleshGrp);
+    f.spiritGrp = null; f.fleshGrp = null;
+  }
   agents = []; factions = []; grayCount = 0;
   freeAgentIds.length = 0;
   resetCrystals();
@@ -6395,9 +8583,18 @@ function resetGame() {
     team.iconStamp = makeIconStamp(picks[t].sym);
     teams.push(team);
   }
+  /* Une base visible par équipe, sur son point d'apparition. */
+  placeBases();
 
   /* Sanctuaires : semés une fois l'île et les points d'apparition en place. */
   placeAltars();
+  /* Piliers d'âmes : après les autels, dont ils lisent les positions pour ne
+     jamais tomber dans leur cour (§10.4). */
+  placePillars(scene, {
+    groundY,
+    randomPoint: () => islandRandomPoint(island, 6, Infinity),
+    altarsOf: () => altars,
+  });
 
   const rosterPool = Object.keys(LEADERS).filter((k) => k !== playerLeaderKey);
   for (let s = rosterPool.length - 1; s > 0; s--) {
@@ -6439,6 +8636,20 @@ function resetGame() {
         botAiT = Math.random() * 0.3;
       }
     }
+
+    /* Force du défenseur (campagne solo) : la faction qui TIENT déjà la zone se
+       bat d'autant mieux qu'elle y est implantée. Une province saturée, une
+       capitale ou un siège sacré doivent se sentir. Sans ça, la saturation —
+       qui pilote toute l'économie de foi de la carte — n'avait aucun effet
+       perceptible dans le match lui-même. */
+    if (isLocalBot && !multiMode && conquest?.defense?.strength > 0 && conquest.owner) {
+      const myColor = '#' + picks[teamIdx].c.toString(16).padStart(6, '0');
+      if (myColor.toLowerCase() === String(conquest.owner).toLowerCase()) {
+        const s = Math.max(0, Math.min(1, conquest.defense.strength));
+        botAggr = Math.min(1, botAggr + s * 0.35);   // plus mordant
+        botAiT = Math.max(0, botAiT * (1 - s * 0.6)); // et plus prompt à réagir
+      }
+    }
     const leaderKey = factionLeaderKey(i);
     const f = createFaction(i, teamIdx, picks[teamIdx], leaderKey, spawnPos.x, spawnPos.z, {
       // Solo : joueur en 0, IA locales ensuite.
@@ -6476,6 +8687,10 @@ function resetGame() {
     f.color = new THREE.Color(picks[teamIdx].c);
     f.grp = makeLeaderGroup(picks[teamIdx], leaderKey);
     f.grp.position.set(spawnPos.x, groundY(spawnPos.x, spawnPos.z), spawnPos.z);
+    /* Corps d'esprit des rivaux bâti d'avance, comme celui du joueur : le
+       clonage de squelette coûte une dizaine d'images, et un bot bascule sans
+       prévenir — payé ici, ça ne se voit pas ; payé en jeu, ça saccade. */
+    ensureSpiritBody(f);
     factions.push(f);
   }
 
@@ -6493,6 +8708,18 @@ function resetGame() {
   }
   updateHUD();
   snapCameraToPlayer();
+  /* Compilation des shaders avant la première image. Le corps d'esprit n'est
+     pas affiché au démarrage : sans ça, son programme GLSL se compilait au
+     moment exact où on le rendait visible — c'est ce qui faisait décrocher la
+     toute première transformation.
+
+     `renderer.compile` ne parcourt QUE les objets visibles : on le montre donc
+     le temps de l'appel, sans jamais l'afficher (aucun rendu entre les deux). */
+  const sg = factions[0] && factions[0].spiritGrp;
+  const wasVisible = sg ? sg.visible : false;
+  if (sg) sg.visible = true;
+  try { renderer.compile(scene, camera); } catch { /* pas bloquant */ }
+  if (sg) sg.visible = wasVisible;
 }
 
 /* ============================== Fin de partie ============================== */
@@ -6515,6 +8742,10 @@ function factionScore(f) {
 }
 
 let lastVictory = false;   // lu par le bouton « Rejouer » (fiable, pas le DOM)
+/* Rang S/A/B/C du dernier match. La campagne s'en sert pour décider de la
+   ferveur du pays conquis : bien jouer donne une nation plus convertie, donc
+   plus utile pour mobiliser au prochain assaut. */
+let lastRankGrade = 'B';
 
 /* Fin au gong (sans argument) ou abandon : endGame(false). Le classement se
    fait toujours au score total. */
@@ -6611,6 +8842,7 @@ function endGame(forced) {
   else if (playerPaintPct >= 25) { rankGrade = 'A'; rankColor = '#a855f7'; }
   else if (playerPaintPct >= 15) { rankGrade = 'B'; rankColor = '#38bdf8'; }
   else { rankGrade = 'C'; rankColor = '#94a3b8'; }
+  lastRankGrade = rankGrade;   // transmis à la campagne par onResult
 
   // Le badge de rang n'est affiché qu'en cas de Victoire
   const rankBadgeHtml = victory ? `<div class="cell full-width" style="text-align:center;padding:12px;background:rgba(15,23,42,0.95);border:2px solid ${rankColor};border-radius:10px;box-shadow:0 0 20px ${rankColor}66;">
@@ -7333,7 +9565,9 @@ const cardCtx = {
        change ici, c'est que personne ne la remplace. */
     if (a.statue) shatterStatue(a, a.owner);
     a.owner = -1;
-    a.filled = 0;
+    /* Il redevient vraiment neutre : sans âme, donc inerte. */
+    a.soul = -1;
+
     a.activeT = 0;
     spawnShock(a.x, a.z, new THREE.Color(0x9aa2ad), 9, 1.0);
     refreshAltarVisual(a);
@@ -7986,11 +10220,16 @@ function buildSpiritChips() {
     const el = document.createElement('div');
     el.className = 'spirit-chip vide';
     el.style.setProperty('--elem', e.css);
-    el.title = e.nom;
+    el.title = `${e.nom} — Âmes transportées`;
     const img = document.createElement('img');
-    img.alt = '';
+    img.alt = e.nom;
     img.draggable = false;
-    img.src = e.img;
+    try {
+      const orbCv = drawOrb(e.key);
+      img.src = orbCv ? orbCv.toDataURL('image/png') : e.img;
+    } catch (_) {
+      img.src = e.img;
+    }
     el.classList.add('has-img');
     const sym = document.createElement('span');
     sym.className = 'sym';
@@ -8027,9 +10266,9 @@ function updateSpiritsUI() {
     /* « Plein » = de quoi éveiller un autel d'un seul passage. */
     /* « Plein » = de quoi prendre le sanctuaire le moins cher qui réclame cet
        élément. Le seuil suit donc l'escalade au lieu d'être figé. */
-    let cheapest = Infinity;
-    for (const alt of altars) if (alt.variant === e.v) cheapest = Math.min(cheapest, alt.need - alt.filled);
-    chip.el.classList.toggle('plein', cheapest !== Infinity && n >= cheapest);
+    /* Les autels ne réclament plus d'élément : il n'y a plus de seuil « plein »
+       à calculer. Le cortège élémentaire lui-même est masqué (voir resetGame). */
+    chip.el.classList.remove('plein');
   }
 }
 
@@ -8072,7 +10311,11 @@ function update(dt) {
   _leaderTickState.island = island;
   _leaderTickState.judgeR = judgeR;
   _leaderTickState.elapsed = elapsed;
-  _leaderTickInput.x = input.x; _leaderTickInput.z = input.z;
+  /* Pendant le vol de retour, le joueur ne pilote plus : la nuée décide de la
+     trajectoire. On coupe l'entrée plutôt que de laisser le pas du Leader se
+     battre avec la position qu'on lui impose. */
+  _leaderTickInput.x = _flight.active ? 0 : input.x;
+  _leaderTickInput.z = _flight.active ? 0 : input.z;
   _leaderTickInput.keys = keys;
 
   /* -- Multi : plus de connexion P2P = plus de match. Sauf pendant une bascule
@@ -8104,6 +10347,13 @@ function update(dt) {
   }
 
   _stepLeaders(_leaderTickState, _leaderTickInput, dt, _leaderTickCtx);
+  dropFootprints();
+  /* Gestes des rivaux : après leur déplacement, pour qu'ils déposent à
+     l'instant même où ils entrent dans l'emprise d'un autel. */
+  tickBotActions();
+  /* Après le pas des Leaders : le vol réécrit la position du joueur, il doit
+     donc avoir le dernier mot sur la frame. */
+  updateRespawnFlight(dt);
 
   /* -- P2P : l'hôte diffuse toutes les positions à 20 Hz ; l'invité envoie
         sa propre position et ses stats à l'hôte. -- */
@@ -8187,6 +10437,10 @@ function update(dt) {
   /* Éclairage diurne agréable et fixe (le jour ne passe plus vers la nuit) —
      seule la carte « Nuit sans lune » vient l'assombrir temporairement. */
   applyDayCycle(DAY_FIXED);
+  /* Forme d'esprit : posée APRÈS le cycle du jour, qui réécrit brume et fond à
+     chaque image. L'ambiance du monde des esprits se mélange par-dessus. */
+  tickSpiritForm(dt);
+  updateBases(dt);
   soundEngine.setMusicIntensity(0.5);
   soundEngine.updateMusic(dt);
 
@@ -8386,15 +10640,59 @@ function update(dt) {
      il levait donc une ReferenceError à chaque frame, ce qui interrompait
      silencieusement la fin de update() — soleil, lanterne et tout ce qui suit
      ne s'exécutaient jamais. */
-  const az = Math.PI * (0.12 + 0.76 * DAY_FIXED);
-  const arc = Math.min(1, Math.max(0, (DAY_FIXED - 0.04) / 0.88));
-  const el = 5 + 42 * Math.sin(Math.PI * arc);
-  sun.position.set(me.leader.x + Math.cos(az) * 34, el, me.leader.z + 18);
+  /* ---- Placement du soleil ----
+     Deux défauts se cumulaient ici.
+
+     1. L'ÉLÉVATION. À l'heure figée de la vallée, l'ancien calcul montait à ~46
+        de haut pour un écart horizontal de ~19 : un soleil à 67°, quasi zénithal.
+        Une ombre y est aussi courte que l'objet est large, elle ne sort pas de
+        son empreinte au sol — donc aucun relief lu, tout à plat. On travaille
+        maintenant en ANGLE et non plus en hauteur brute : à 30°, l'ombre fait
+        1,7 fois la hauteur de l'objet, elle s'étale sur les dalles voisines et
+        c'est elle qui sculpte le terrain.
+
+     2. L'AZIMUT. Le soleil était placé à `z + 18`, c'est-à-dire DU CÔTÉ DE LA
+        CAMÉRA (qui regarde vers -z depuis +z). Les ombres partaient donc droit
+        derrière les objets, cachées par les objets eux-mêmes. En passant le
+        soleil de l'autre côté, elles reviennent vers l'observateur et deviennent
+        la principale information de volume de l'image. */
+  /* ---- Élévation DÉCOUPLÉE de l'heure ----
+     L'élévation suivait la course du jour, comme dans la réalité : soleil haut
+     à midi, rasant au couchant. Le problème est que l'image visée demande les
+     deux bouts à la fois — une lumière franche ET des ombres longues. C'est
+     physiquement contradictoire : un soleil bas traverse plus d'atmosphère,
+     donc il éclaire moins. Tant que les deux étaient liés, remonter la lumière
+     raccourcissait mécaniquement les ombres, et on tournait en rond.
+
+     Un jeu n'a pas à payer cette contrainte. L'élévation est donc fixée à part :
+     `DAY_FIXED` ne pilote plus que la LUMIÈRE (intensité, couleur, exposition),
+     `SUN_ELEV_DEG` ne pilote que la GÉOMÉTRIE des ombres. Les deux se règlent
+     alors indépendamment, ce qui est exactement ce qu'on cherchait. */
+  const elevRad = SUN_ELEV_DEG * Math.PI / 180;
+  /* L'azimut garde la dérive du cycle d'origine, recentrée derrière l'épaule
+     droite : les ombres tombent vers le bas-gauche de l'écran. */
+  const az = SUN_AZ_RAD + Math.PI * 0.10 * (DAY_FIXED - 0.5);
+  const hr = Math.cos(elevRad) * SUN_RADIUS;
+  sun.position.set(
+    me.leader.x + Math.cos(az) * hr,
+    Math.sin(elevRad) * SUN_RADIUS,
+    me.leader.z + Math.sin(az) * hr);
   sun.target.position.set(me.leader.x, 0, me.leader.z);
+  /* Le sol dessine son propre relief par hillshade, dans son shader : il lui faut
+     la direction de la lumière, sinon les bosses s'éclairent d'un côté et les
+     ombres portées tombent de l'autre. */
+  setGroundSunDir(_sunDir.subVectors(sun.position, sun.target.position));
   /* Même direction pour l'éclairage personnages (intensité fixe, hors pénombre). */
   charSun.position.copy(sun.position);
   charSun.target.position.copy(sun.target.position);
   charSun.target.updateMatrixWorld();
+
+  /* Lumière de face : posée sur la CAMÉRA, visant le joueur. Une directionnelle
+     ne retient que la direction, la distance est donc sans effet — mais partir
+     de la position réelle de la caméra donne la bonne direction sans calcul.
+     Légèrement rehaussée : à la hauteur exacte de la caméra elle aplatirait le
+     visage, alors qu'un rien au-dessus laisse le menton et le torse se
+     détacher. */
 
   /* ---- Lanterne du joueur ----
      Pilotée par `nightK`, la pénombre RÉELLE de l'image.
@@ -8408,26 +10706,78 @@ function update(dt) {
 
      `nightK` monte aussi bien au crépuscule que sous la carte « Nuit sans
      lune » : la lanterne sert donc les deux cas sans traitement particulier. */
-  /* Zone morte : l'heure figée de la vallée laisse `nightK` à ~0,05 en plein
-     jour. Sans ce seuil, un halo pâle traînerait en permanence sous le joueur
-     et l'effet de nuit n'aurait plus rien de remarquable quand il arrive. */
-  const lamp = Math.max(0, (nightK - 0.15) / 0.85);
-  playerLamp.position.set(me.leader.x, (me.leader.y || 0) + 2.4, me.leader.z);
-  playerLamp.intensity = lamp * 22;
-  /* Portée élargie dans le noir complet : c'est la « zone de lumière » dans
-     laquelle on joue, elle doit contenir le personnage et de quoi lire le sol
-     devant lui. */
-  playerLamp.distance = 18 + lamp * 16;
+  /* La zone morte d'origine coupait toute lueur en journée : le seuil de 0,15
+     sur `nightK` (~0,05 à l'heure de la vallée) rendait le halo strictement
+     invisible tant qu'il ne faisait pas nuit, pour que la nuit reste un
+     événement.
+
+     On garde cette montée, mais plus depuis zéro : `LAMP_DAY` est un socle
+     permanent. Le personnage est le seul élément mobile d'un décor immobile, et
+     depuis que le soleil est rasant il lui arrive de traverser de longues zones
+     d'ombre portée où plus rien ne le détache du sol. Un halo discret l'ancre
+     en permanence — c'est une aide à la lisibilité, pas un effet.
+
+     La nuit reste un événement : le socle vaut 0,18 quand la nuit pousse à 1,
+     soit plus de cinq fois moins. */
+  const LAMP_DAY = 0.18;
+  /* Opacité et rayon planchers du disque. Ce sont eux qui portent l'effet
+     désormais que la lampe ne touche plus les personnages : réglables par
+     __grade.halo(). */
+  const LAMP_GLOW_MIN = HALO.opacity;
+  const LAMP_GLOW_SIZE = HALO.size;
+  const lamp = Math.max(LAMP_DAY, (nightK - 0.15) / 0.85);
+  /* ---- LA lumière invisible au-dessus du joueur ----
+     Elle était à +2,4, c'est-à-dire suspendue juste au-dessus du crâne. Elle
+     était censée ne pas toucher les personnages : `playerLamp.layers.set(
+     LAYER_WORLD)`. Mais les couches ne filtrent PAS les lumières par objet dans
+     Three.js (voir setCharLayer) — elle éclairait donc le joueur à bout portant,
+     par le dessus, avec une atténuation quadratique qui à 2,4 unités lui envoie
+     un ordre de grandeur de plus qu'au sol. C'était ça, le reflet sur la tête.
+
+     Ramenée au ras du sol. Une flaque de lumière doit de toute façon naître du
+     sol : à cette hauteur elle éclaire le terrain en l'effleurant, ce qui donne
+     un bord plus doux, et elle ne peut plus prendre le personnage par le haut. */
+  playerLamp.position.set(me.leader.x, (me.leader.y || 0) + 0.35, me.leader.z);
+  /* Descendu de 22 à 9 : avec `decay` à 1, la même valeur portait bien plus
+     loin et bien plus fort. L'intensité d'une lampe ne se lit jamais seule, elle
+     ne veut rien dire sans sa décroissance ni sa distance. */
+  playerLamp.intensity = lamp * 9;
+  /* ---- Portée : le bord net du halo ----
+     `distance` n'est pas un rayon d'éclairage, c'est une COUPURE. Three.js
+     multiplie l'atténuation par `(1 - (d/distance)^4)²`, qui s'écrase très vite
+     à l'approche de la limite : la lumière ne s'éteint pas, elle est tranchée.
+     Sur un décor normal ça ne se remarque pas, la coupure tombant dans une zone
+     déjà sombre. Dans le monde des esprits, où la brume ramène tout à un aplat,
+     ce cercle devenait le trait le plus visible de l'image — le « halo
+     celshading ».
+
+     La portée est donc largement au-delà de ce que la caméra montre : la
+     décroissance quadratique naturelle fait tout le travail, et la coupure ne
+     tombe plus dans le champ. Ce n'est pas plus cher — `distance` ne borne rien
+     du calcul, elle ne fait qu'ajouter ce facteur. */
+  playerLamp.distance = 120;
 
   lampGlow.visible = lamp > 0.02;
   if (lampGlow.visible) {
     lampGlow.position.set(me.leader.x, (me.leader.y || 0) + 0.06, me.leader.z);
-    /* Le disque au sol fait le gros du travail : le rendu toon quantifie la
-       lumière en paliers durs, seul un dégradé peint donne un bord diffus. */
-    lampGlow.material.opacity = 0.1 + lamp * 0.75;
-    const s = 0.8 + lamp * 0.7;
+    /* Le disque au sol fait le gros du travail. La raison a changé depuis le
+       passage au PBR — ce n'est plus la quantification toon qu'il compense,
+       mais l'atténuation quadratique d'une lumière ponctuelle, qui décroît trop
+       vite pour dessiner une flaque lisible. Le dégradé peint, lui, a le bord
+       qu'on lui donne. */
+    lampGlow.material.opacity = LAMP_GLOW_MIN + lamp * 0.62;
+    /* Le rayon est le vrai réglage : à 0,8 la flaque tenait sous les pieds du
+       personnage et se lisait comme une ombre, pas comme une lumière. Il lui
+       faut déborder franchement pour que le sol autour paraisse éclairé — c'est
+       le débordement qui fait l'effet, pas l'intensité. */
+    const s = LAMP_GLOW_SIZE + lamp * 0.9;
     lampGlow.scale.set(s, 1, s);
   }
+
+  /* Traces de pas : le fondu se calcule après le déplacement de la caméra de
+     cette image, sinon les empreintes s'effaceraient d'après la position
+     précédente — visible dès qu'on se déplace vite. */
+  updateFootprints(camera);
 
   /* -- Le vide : éclats en suspension, brume et poussière lumineuse -- */
   updateVoid(dt, elapsed);
@@ -8463,7 +10813,7 @@ function syncCamDistUI() {
 function setCamDist(key) {
   if (!(key in CAM_DIST_MUL)) return false;
   currentCamDist = key;
-  camDistMul = CAM_DIST_MUL[key];
+  camDistMul = CAM_DIST_MUL[key] * CAM_FOV_COMP;
   localStorage.setItem(CAM_DIST_KEY, key);
   syncCamDistUI();
   return true;
@@ -8595,7 +10945,10 @@ function startGameInner() {
   buildMap(biomeKey, multiMode ? netSeed : null);
   soundEngine.startBiomeAmbient(biomeKey);
   captureDayBase();          // teinte de brouillard du biome = référence plein jour
-  applyDayCycle(0);          // la partie s'ouvre à l'aube
+  /* La partie s'ouvrait à l'aube (0) puis courait vers le soir. Depuis que
+     toutes les cartes se jouent à la brunante, une ouverture à l'aube ferait
+     démarrer chaque partie dans une ambiance qu'on ne reverra plus ensuite. */
+  applyDayCycle(DAY_FIXED);
   // ^ 0x9e3779b9 : décale la séquence pour que la foule ne rejoue pas celle du décor
   if (multiMode) withSeededRandom((netSeed ^ 0x9e3779b9) >>> 0, () => resetGame());
   else resetGame();
@@ -8744,6 +11097,14 @@ if (import.meta.env.DEV) {
   window.__dbg = () => ({ scene, camera, factions, teams, island, agents, shrines, houses });
   window.__foll = () => Object.fromEntries(Object.entries(followerMeshes).map(([k, v]) => [k, { count: v.mesh.count, cap: v.cap, freeSlots: v.freeSlots.length }]));
   window.__ag = () => agents.map((a) => ({ id: a.id, v: variantOf(a.id), foll: a._followerSlot, disc: a._followerKey })).filter((a) => a.foll != null || a.disc);
+  /* Âmes : __souls() remplit l'inventaire (donc l'escorte), __souls(0) le vide.
+     Sans ça, voir l'escorte ou l'éclat de mort demande de courir la carte pour
+     trouver quatre piliers, puis de se faire tuer. */
+  window.__souls = (n = SOULS.length) => {
+    resetSouls();
+    for (let i = 0; i < Math.min(n, SOULS.length); i++) addSoul(0, i);
+    return bagOf(0).held.slice();
+  };
   // inspection du multi : __net.getSlots(), __net.getLeaderList(), __net.state…
   window.__net = net;
   window.__ctl = () => ({ input, keys, multiMode, state, dir: playerDir(input, keys) });
@@ -8775,29 +11136,176 @@ if (import.meta.env.DEV) {
     lights(p = {}) {
       if (p.sun != null) TUNE.sun = p.sun;
       if (p.hemi != null) TUNE.hemi = p.hemi;
+      if (p.env != null) TUNE.env = p.env;
       if (p.charSun != null) charSun.intensity = p.charSun;
-      if (p.charHemi != null) charHemi.intensity = p.charHemi;
+      /* Facteurs et non valeurs absolues : le cycle du jour réécrit ces deux
+         intensités à chaque image, une valeur posée ici serait effacée à la
+         suivante. `charHemi: 0` éteint complètement l'ambiant des personnages —
+         c'est le test à faire si un « spot du dessus » persiste. */
+      if (p.charHemi != null) TUNE.charHemi = p.charHemi;
+      /* Facteur et non valeur absolue : le cycle du jour réécrit `charFill`
+         à chaque image, une valeur posée ici serait effacée à la suivante. */
+      if (p.charFill != null) TUNE.charFill = p.charFill;
       return {
-        sunMul: TUNE.sun, hemiMul: TUNE.hemi,
+        sunMul: TUNE.sun, hemiMul: TUNE.hemi, envMul: TUNE.env,
+        /* Le rapport qui décide de l'aspect de l'image. En dessous de 3, elle
+           devient laiteuse ; au-dessus de 6, les ombres se bouchent. */
+        keyToFill: +(
+          (sun.intensity) / Math.max(1e-3, hemi.intensity + scene.environmentIntensity)
+        ).toFixed(2),
         charSun: charSun.intensity, charHemi: charHemi.intensity,
       };
+    },
+    /* ---- Isoler ce qui éclaire les personnages ----
+       Éteint TOUTES les sources de la couche personnages sauf une, pour voir
+       laquelle produit un effet indésirable. Deviner à partir d'une capture ne
+       marche pas : plusieurs lampes produisent des dégradés qui se ressemblent,
+       et `scene.environment` n'est même pas une lampe — il n'apparaît dans
+       aucune liste de lumières.
+         __grade.solo('fill')  → ne garde que la lumière de face
+         __grade.solo('sun')   → ne garde que la clé
+         __grade.solo('hemi')  → ne garde que l'ambiant plat
+         __grade.solo('env')   → ne garde que l'éclairage par image
+         __grade.solo()        → tout rallumer */
+    solo(which) {
+      const on = (k) => (which == null || which === k) ? 1 : 0;
+      TUNE.sun = on('sun');
+      TUNE.charFill = on('fill');
+      TUNE.charHemi = on('hemi');
+      this.charEnv(which == null ? CHAR_ENVMAP_I : (which === 'env' ? 1 : 0));
+      return which == null ? 'tout rallumé' : 'seul actif : ' + which;
+    },
+    /* Éclairage par image SUR LES PERSONNAGES seulement. Il ignore les couches,
+       il faut donc l'éteindre matériau par matériau. */
+    charEnv(v) {
+      let n = 0;
+      scene.traverse((o) => {
+        if (!o.material || !o.layers.test(CHARS_MASK)) return;
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          if (m && m.isMeshStandardMaterial) { m.envMapIntensity = v; n++; }
+        }
+      });
+      return n + ' matériaux personnage à envMapIntensity=' + v;
+    },
+    /* Rugosité de tout le décor, en direct. C'est le second réglage de matière
+       après l'ambiant : trop bas, la roche prend un aspect plastique verni ;
+       à 1, toute réponse spéculaire disparaît et l'objet perd son liseré de
+       ciel sur les arêtes. Le sol est exclu — il doit rester à 1. */
+    roughness(v) {
+      if (v == null) return null;
+      scene.traverse((o) => {
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          if (m && m.isMeshStandardMaterial && !m.vertexColors) m.roughness = v;
+        }
+      });
+      return v;
+    },
+    /* Élévation du soleil en degrés — la LONGUEUR des ombres, indépendante de
+       l'heure. C'est l'autre moitié du réglage : __grade.time() décide de la
+       lumière, celui-ci décide des ombres.
+         __grade.sun(20)   → ombres très longues, rasantes
+         __grade.sun(45)   → ombre = hauteur de l'objet
+         __grade.sun()     → valeur courante */
+    sun(deg) {
+      if (deg == null) return SUN_ELEV_DEG;
+      SUN_ELEV_DEG = Math.min(85, Math.max(4, deg));
+      return SUN_ELEV_DEG;
+    },
+    /* Puissance de la lumière portée par les cercles de sanctuaire — ce qu'ils
+       font aux pierres autour, sans toucher au disque lui-même.
+         __grade.altar(2)   → deux fois plus, pierres franchement éclairées
+         __grade.altar(0)   → éteint, pour comparer */
+    altar(v) {
+      if (v == null) return TUNE.altar;
+      TUNE.altar = v;
+      return v;
+    },
+    /* Flaque de lumière au sol du joueur. `size` = rayon, `opacity` = plancher
+       de jour. Effet immédiat.
+         __grade.halo({ size: 2.2, opacity: 0.3 }) */
+    halo(p = {}) {
+      Object.assign(HALO, p);
+      return { ...HALO };
+    },
+    /* Heure de la vallée, de 0 (aube) à 1 (soir). Balaie DAY_KEYS : couleur et
+       intensité du soleil, exposition, ambiant, brouillard, ET l'élévation du
+       soleil — donc la longueur des ombres. Effet immédiat.
+         __grade.time(0.82)   → doré du soir, ombres très longues
+         __grade.time()       → l'heure courante */
+    time(t) {
+      if (t == null) return DAY_FIXED;
+      DAY_FIXED = Math.min(1, Math.max(0, t));
+      applyDayCycle(DAY_FIXED);
+      return DAY_FIXED;
+    },
+    /* Profondeur de champ. `blur` en px, `topEnd` / `bottomStart` en % de la
+       hauteur d'écran. Prend effet immédiatement, sans rechargement.
+         __grade.dof({ blur: 5, topEnd: 40 })
+         __grade.dof({ blur: 0 })   → désactivé de fait */
+    dof(p = {}) {
+      Object.assign(DOF, p);
+      applyDof();
+      return { ...DOF, actif: currentGraphics === 'high' };
+    },
+    /* Bornes du conditionnement d'albédo (voir biomes.js). Elles ne prennent
+       effet qu'à la CONSTRUCTION des couleurs : il faut donc recharger une
+       carte pour les voir — __play() ou un changement de biome. C'est le prix
+       de ne pas payer la projection à chaque image.
+         __grade.albedo({ sat: 0.5, maxL: 0.55 }) */
+    albedo(p = {}) {
+      Object.assign(ALBEDO, p);
+      return { ...ALBEDO };
+    },
+    /* Qui est trop sombre ? Liste les matériaux dont l'albédo est sous le seuil.
+       La rampe toon relevait tout à 34 % minimum ; le PBR ne le fait pas, et les
+       teintes choisies à l'œil sous l'ancien modèle peuvent s'effondrer au noir.
+       C'est le diagnostic à lancer quand un objet paraît éteint. */
+    darkest(threshold = 0.18) {
+      const seen = new Map();
+      scene.traverse((o) => {
+        if (!o.material || !o.visible) return;
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material])) {
+          if (!m || !m.color || seen.has(m.uuid)) continue;
+          const lum = 0.2126 * m.color.r + 0.7152 * m.color.g + 0.0722 * m.color.b;
+          if (lum < threshold) {
+            seen.set(m.uuid, {
+              objet: o.name || o.type, type: m.type,
+              couleur: '#' + m.color.getHexString(), luminance: +lum.toFixed(3),
+            });
+          }
+        }
+      });
+      const rows = [...seen.values()].sort((a, b) => a.luminance - b.luminance);
+      console.table(rows);
+      return rows;
     },
     /* Brouillard : couleur et distances. C'est lui qui donne la profondeur. */
     fog(p = {}) {
       if (!scene.fog) return null;
-      if (p.color != null) {
-        fogBase.set(p.color);
+      /* Écrit dans la SURCHARGE, pas seulement dans les valeurs vivantes : sans
+         ça le réglage tenait jusqu'au prochain chargement de carte, où le
+         brouillard du biome le remplaçait. C'est ce qui donnait l'impression
+         qu'il « ne fonctionnait pas ». */
+      if (p.color != null) FOG_OVR.color = p.color;
+      if (p.near != null) FOG_OVR.near = p.near;
+      if (p.far != null) FOG_OVR.far = p.far;
+      applyFogOverride();
+      if (scene.fog) {
         scene.fog.color.copy(fogBase);
+        scene.fog.near = fogBaseNear;
+        scene.fog.far = fogBaseFar;
       }
-      if (p.near != null) {
-        fogBaseNear = p.near;
-        scene.fog.near = p.near;
-      }
-      if (p.far != null) {
-        fogBaseFar = p.far;
-        scene.fog.far = p.far;
-      }
-      return { color: '#' + fogBase.getHexString(), near: fogBaseNear, far: fogBaseFar };
+      return {
+        color: '#' + fogBase.getHexString(), near: fogBaseNear, far: fogBaseFar,
+        surcharge: { ...FOG_OVR },
+      };
+    },
+    /* Rend le brouillard au biome : chaque carte reprend sa propre teinte et ses
+       propres distances. */
+    fogRelease() {
+      FOG_OVR.color = FOG_OVR.near = FOG_OVR.far = null;
+      captureDayBase();
+      return 'brouillard rendu aux biomes';
     },
     /* Bascule le tone mapping pour comparer côte à côte. */
     TONES: {
@@ -8831,6 +11339,13 @@ if (import.meta.env.DEV) {
         exposureMul: +TUNE.exposure.toFixed(3),
         sunMul: +TUNE.sun.toFixed(3),
         hemiMul: +TUNE.hemi.toFixed(3),
+        /* À répercuter dans ENV_IBL_SCALE / HEMI_IBL_SCALE. */
+        envMul: +TUNE.env.toFixed(3),
+        envIntensity: +scene.environmentIntensity.toFixed(3),
+        /* Les deux moitiés désormais indépendantes : l'heure fait la lumière,
+           l'élévation fait les ombres. */
+        dayFixed: +DAY_FIXED.toFixed(3),
+        sunElevDeg: +SUN_ELEV_DEG.toFixed(1),
         lights: {
           charSun: +charSun.intensity.toFixed(2), charHemi: +charHemi.intensity.toFixed(2),
         },
@@ -8844,8 +11359,162 @@ if (import.meta.env.DEV) {
     },
   };
 
-  /* Panneau DEV retiré de l'UI : les raccourcis console (`__grade`, `__play`…)
-     restent disponibles en mode développement sans bandeau à l'écran. */
+  /* ---- Panneau DEV ----
+     `src/devpanel.js` existait déjà, complet et générique, mais n'était importé
+     nulle part : il n'a donc jamais été affiché. Il est branché ici.
+
+     Import DYNAMIQUE et non statique : sous `import.meta.env.DEV`, un import
+     statique serait quand même analysé par le bundler et le module partirait
+     dans le build de production. En dynamique, Vite le sort en morceau séparé
+     que rien ne charge jamais en prod.
+
+     Le panneau ne sait rien du jeu : on lui décrit des groupes de contrôles
+     (libellé, bornes, un lecteur, un écrivain) et il se construit seul. Ajouter
+     un réglage ne demande donc que d'ajouter une ligne ici.
+
+     F9 pour l'ouvrir/fermer. Les valeurs sont retenues d'un rechargement à
+     l'autre. */
+  let _roughLive = 0.85;   // miroir de DECOR_ROUGHNESS, voir la glissière
+  import('./devpanel.js').then(({ createDevPanel }) => {
+    const G = window.__grade;
+    createDevPanel({
+      storageKey: 'cultio_devpanel_rendu',
+      hotkey: 'F9',
+      groups: [
+        {
+          title: 'Soleil & heure',
+          controls: [
+            /* Les deux moitiés du réglage, volontairement côte à côte : l'heure
+               fait la LUMIÈRE, l'élévation fait les OMBRES, et elles ne
+               dépendent plus l'une de l'autre. */
+            { key: 'time', label: 'Heure', min: 0, max: 1, step: 0.01,
+              get: () => DAY_FIXED, set: (v) => G.time(v) },
+            { key: 'sunElev', label: 'Élévation °', min: 4, max: 85, step: 1,
+              get: () => SUN_ELEV_DEG, set: (v) => G.sun(v) },
+            { key: 'exposure', label: 'Exposition ×', min: 0.2, max: 2.5, step: 0.01,
+              get: () => TUNE.exposure, set: (v) => G.exposure(v) },
+            { key: 'sunMul', label: 'Soleil ×', min: 0, max: 3, step: 0.01,
+              get: () => TUNE.sun, set: (v) => G.lights({ sun: v }) },
+            /* Lumière de face des personnages : le remède au « spot au-dessus »
+               et au devant dans l'ombre. Elle suit la caméra. */
+            { key: 'charFill', label: 'Face perso ×', min: 0, max: 3, step: 0.01,
+              get: () => TUNE.charFill, set: (v) => G.lights({ charFill: v }) },
+            /* À zéro, plus aucun ambiant sur les personnages : c'est le test
+               qui isole d'où vient une lumière indésirable sur eux. */
+            { key: 'charHemi', label: 'Ambiant perso ×', min: 0, max: 2, step: 0.01,
+              get: () => TUNE.charHemi, set: (v) => G.lights({ charHemi: v }) },
+          ],
+        },
+        {
+          title: 'Ambiant (IBL)',
+          controls: [
+            { key: 'envMul', label: 'Ciel ×', min: 0, max: 3, step: 0.01,
+              get: () => TUNE.env, set: (v) => G.lights({ env: v }) },
+            { key: 'hemiMul', label: 'Hémisph. ×', min: 0, max: 3, step: 0.01,
+              get: () => TUNE.hemi, set: (v) => G.lights({ hemi: v }) },
+            /* `roughness()` écrit dans tous les matériaux mais n'a rien à
+               relire : la valeur est retenue ici pour que la glissière
+               retrouve sa position au rechargement. */
+            { key: 'rough', label: 'Rugosité', min: 0.2, max: 1, step: 0.01,
+              get: () => _roughLive,
+              set: (v) => { _roughLive = v; G.roughness(v); } },
+          ],
+        },
+        {
+          title: 'Palette (recharge la carte)',
+          controls: [
+            /* Ces trois-là n'agissent qu'à la CONSTRUCTION des couleurs : le
+               bouton « Recharger la carte » plus bas est ce qui les rend
+               visibles. */
+            { key: 'albSat', label: 'Saturation', min: 0.1, max: 1.2, step: 0.01,
+              get: () => ALBEDO.sat, set: (v) => G.albedo({ sat: v }) },
+            { key: 'albMaxL', label: 'Clarté max', min: 0.2, max: 1, step: 0.01,
+              get: () => ALBEDO.maxL, set: (v) => G.albedo({ maxL: v }) },
+            { key: 'albMinL', label: 'Clarté min', min: 0, max: 0.4, step: 0.01,
+              get: () => ALBEDO.minL, set: (v) => G.albedo({ minL: v }) },
+          ],
+        },
+        {
+          title: 'Étalonnage',
+          controls: [
+            { key: 'sat', label: 'Saturation', min: 0.3, max: 2, step: 0.01,
+              get: () => GRADE.saturation, set: (v) => G.set({ saturation: v }) },
+            { key: 'con', label: 'Contraste', min: 0.5, max: 2, step: 0.01,
+              get: () => GRADE.contrast, set: (v) => G.set({ contrast: v }) },
+            { key: 'hue', label: 'Teinte °', min: -30, max: 30, step: 1,
+              get: () => GRADE.hue, set: (v) => G.set({ hue: v }) },
+            { key: 'tone', label: 'Tone map',
+              options: Object.keys(G.TONES),
+              get: () => G.toneName(), set: (v) => G.tone(v) },
+          ],
+        },
+        {
+          title: 'Brouillard (global, tous biomes)',
+          controls: [
+            /* Ces trois-là écrivent dans FOG_OVR et survivent donc au
+               changement de carte — sans quoi le biome suivant les effacerait. */
+            { key: 'fogCol', label: 'Couleur', color: true,
+              get: () => '#' + fogBase.getHexString(),
+              set: (v) => G.fog({ color: v }) },
+            { key: 'fogNear', label: 'Début', min: 0, max: 200, step: 1,
+              get: () => fogBaseNear, set: (v) => G.fog({ near: v }) },
+            { key: 'fogFar', label: 'Fin', min: 10, max: 500, step: 1,
+              get: () => fogBaseFar, set: (v) => G.fog({ far: v }) },
+          ],
+        },
+        {
+          title: 'Profondeur de champ',
+          controls: [
+            { key: 'dofBlur', label: 'Flou px', min: 0, max: 12, step: 0.1,
+              get: () => DOF.blur, set: (v) => G.dof({ blur: v }) },
+            { key: 'dofTop', label: 'Haut %', min: 0, max: 60, step: 1,
+              get: () => DOF.topEnd, set: (v) => G.dof({ topEnd: v }) },
+            { key: 'dofBot', label: 'Bas %', min: 60, max: 100, step: 1,
+              get: () => DOF.bottomStart, set: (v) => G.dof({ bottomStart: v }) },
+          ],
+        },
+        {
+          title: 'Sanctuaire',
+          controls: [
+            /* Ce que la lueur du cercle FAIT aux pierres, indépendamment de ce
+               qu'on voit du cercle lui-même. */
+            { key: 'altar', label: 'Lumière ×', min: 0, max: 4, step: 0.05,
+              get: () => TUNE.altar, set: (v) => G.altar(v) },
+          ],
+        },
+        {
+          title: 'Halo du joueur',
+          controls: [
+            { key: 'haloSize', label: 'Rayon', min: 0.3, max: 5, step: 0.05,
+              get: () => HALO.size, set: (v) => G.halo({ size: v }) },
+            { key: 'haloOp', label: 'Opacité', min: 0, max: 1, step: 0.01,
+              get: () => HALO.opacity, set: (v) => G.halo({ opacity: v }) },
+          ],
+        },
+      ],
+      actions: [
+        /* Les réglages de palette n'agissent qu'à la construction des couleurs.
+           Rebâtir la carte AVEC LA MÊME GRAINE est ce qui les rend visibles sans
+           changer le décor — on compare deux palettes sur le même terrain, ce
+           qui est la seule façon de juger. */
+        { label: 'Rebâtir la carte (même graine)', wide: true,
+          run: () => buildMap(currentBiomeKey, currentMapSeed) },
+        { label: 'Brouillard → biome', run: (refresh) => { G.fogRelease(); refresh(); } },
+        /* ---- Le piège de la persistance ----
+           Le panneau réécrit ses valeurs enregistrées PAR-DESSUS celles du code
+           au chargement. C'est ce qu'on veut quand on règle — mais dès qu'une
+           valeur est modifiée ici, toute nouvelle valeur posée dans le code
+           devient invisible, sans que rien ne le signale. On croit alors que le
+           code n'a pas changé. Ce bouton rend la main au code. */
+        { label: 'Défauts du code', wide: true, run: () => {
+          localStorage.removeItem('cultio_devpanel_rendu');
+          location.reload();
+        } },
+        { label: 'Trop sombres', run: () => G.darkest() },
+        { label: 'dump()', run: () => G.dump() },
+      ],
+    });
+  }).catch((e) => console.warn('[dev] panneau indisponible', e));
 
   // inspecte le canvas d'encre : histogramme grossier des pixels non vides
   window.__paintInfo = () => {
@@ -9039,8 +11708,10 @@ function openLobbyPicker(kind) {
       b.type = 'button';
       b.className = 'lobby-biome-tile' + (key === pick ? ' is-selected' : '');
       b.disabled = !canEdit;
-      b.innerHTML = `<span class="lobby-biome-ico">${LOBBY_BIOME_ICONS[key] || '🌍'}</span>`
-        + `<span class="lobby-biome-name">${lobbyBiomeLabel(key)}</span>`;
+      const tileImg = LOBBY_BIOME_IMAGES[key] || LOBBY_BIOME_IMAGES[''];
+      const tileName = lobbyBiomeLabel(key);
+      b.innerHTML = `<div class="lobby-biome-thumb"><img src="${tileImg}" alt="${tileName}" draggable="false" /></div>`
+        + `<span class="lobby-biome-name">${tileName}</span>`;
       if (canEdit) {
         b.addEventListener('click', () => { net.setBiomePick(key); closeLobbyPicker(); });
       }
@@ -9131,10 +11802,15 @@ function persistSave(patch) {
 }
 
 /* Vignettes de terrain du salon. Le libellé vient de BIOMES pour rester en phase
-   avec le jeu ; seule l'icône est propre au salon. '' = laisser au hasard. */
-const LOBBY_BIOME_ICONS = {
-  '': '🎲', temperate: '🌳', desert: '🏜️', nordic: '❄️',
-  tropical: '🌴', savanna: '🦁', volcanic: '🌋',
+   avec le jeu. '' = laisser au hasard. */
+const LOBBY_BIOME_IMAGES = {
+  '': 'assets/ground/biome_random.jpg',
+  temperate: 'assets/ground/biome_temperate.jpg',
+  desert: 'assets/ground/biome_desert.jpg',
+  nordic: 'assets/ground/biome_nordic.jpg',
+  tropical: 'assets/ground/biome_tropical.jpg',
+  savanna: 'assets/ground/biome_savanna.jpg',
+  volcanic: 'assets/ground/biome_volcanic.jpg',
 };
 function lobbyBiomeLabel(key) {
   return key ? (BIOMES[key]?.name || key) : 'Aléatoire';
@@ -9151,19 +11827,17 @@ function renderLobbyBiomes() {
   const grid = $('lobby-biome-grid');
   const panel = $('lobby-biome-panel');
   if (!btn) return;
-  /* Le terrain ne se change que dans un salon au repos. Un hôte qui a quitté la
-     manche est de retour ici alors que la partie tourne encore : le choix est
-     déjà figé. Les invités lisent aussi — savoir sur quel terrain on part fait
-     partie de l'attente. */
   const canEdit = net.isHost() && net.state.phase === 'lobby';
   const pick = net.getBiomePick();
   const label = lobbyBiomeLabel(pick);
-  const ico = LOBBY_BIOME_ICONS[pick] || '🌍';
+  const imgPath = LOBBY_BIOME_IMAGES[pick] || LOBBY_BIOME_IMAGES[''];
   for (const el of document.querySelectorAll('.lobby-biome-cur')) {
     el.textContent = label;
   }
   const icoEl = $('lobby-biome-ico');
-  if (icoEl) icoEl.textContent = ico;
+  if (icoEl) {
+    icoEl.innerHTML = `<img src="${imgPath}" alt="${label}" class="lobby-biome-card-img" draggable="false" />`;
+  }
   btn.classList.toggle('is-readonly', !canEdit);
   panel?.classList.toggle('is-readonly', !canEdit);
 
@@ -9176,8 +11850,10 @@ function renderLobbyBiomes() {
       b.disabled = !canEdit;
       b.setAttribute('role', 'option');
       b.setAttribute('aria-selected', key === pick ? 'true' : 'false');
-      b.innerHTML = `<span class="lobby-biome-ico">${LOBBY_BIOME_ICONS[key] || '🌍'}</span>`
-        + `<span class="lobby-biome-name">${lobbyBiomeLabel(key)}</span>`;
+      const tileImg = LOBBY_BIOME_IMAGES[key] || LOBBY_BIOME_IMAGES[''];
+      const tileName = lobbyBiomeLabel(key);
+      b.innerHTML = `<div class="lobby-biome-thumb"><img src="${tileImg}" alt="${tileName}" draggable="false" /></div>`
+        + `<span class="lobby-biome-name">${tileName}</span>`;
       if (canEdit) {
         b.addEventListener('click', () => net.setBiomePick(key));
       }
@@ -9185,6 +11861,7 @@ function renderLobbyBiomes() {
     }
   }
 }
+
 
 /* ---------------------------- Salon en 3D ----------------------------
    Les joueurs se tiennent sur des socles dans la scène du jeu, et leurs noms
@@ -9841,7 +12518,11 @@ $('retry').addEventListener('click', () => {
       // Zone conquise : on la rend à la carte, qui la repeint aux couleurs du culte.
       const c = conquest; conquest = null;
       $('end').classList.add('hidden');
-      c.onResult({ win: true, conversions: Math.round(stats.conv / DENSITY) });
+      c.onResult({
+        win: true,
+        conversions: Math.round(stats.conv / DENSITY),
+        grade: lastRankGrade,
+      });
     } else {
       // Défaite : on rejoue la zone. Rien n'est concédé tant qu'on réessaie.
       $('end').classList.add('hidden');
@@ -10088,15 +12769,15 @@ function frame(now) {
        posés devant leur propre rideau (voir lobbyStage.js). La vallée du menu
        reste rendue derrière, mais le décor la masque — c'est lui qui garantit
        le contraste, quel que soit le biome affiché. */
-    applyDayCycle(0.42);
+    applyDayCycle(DAY_FIXED);
     lobbyStage.update(dt);
     lobbyStage.applyCamera(camera, lobbyFreeRect(), innerWidth, innerHeight);
   } else {
     // Vue d'attente du menu : magnifique orbite cinématographique au-dessus de la vallée
-    applyDayCycle(0.42);
+    applyDayCycle(DAY_FIXED);
     menuOrbit += dt * 0.085;
-    const radius = 42;
-    const camY = 24 + Math.sin(menuOrbit * 0.5) * 3.5;
+    const radius = 42 * CAM_FOV_COMP;
+    const camY = (24 + Math.sin(menuOrbit * 0.5) * 3.5) * CAM_FOV_COMP;
     camera.position.set(Math.sin(menuOrbit) * radius, camY, Math.cos(menuOrbit) * radius);
     camera.lookAt(0, 1.2, 0);
   }
@@ -10149,7 +12830,7 @@ onNatureReady(() => {
 });
 buildMap('temperate');
 captureDayBase();
-camera.position.set(0, 34, 42);
+camera.position.set(0, 34 * CAM_FOV_COMP, 42 * CAM_FOV_COMP);
 camera.lookAt(0, 0, 0);
 
 /* Installation des effets — la sim appelle effects.*(...) au lieu des fonctions

@@ -734,6 +734,19 @@ function tickPlay(g, isHub) {
   }
 
   if (justPressed(g, BTN.X) || justPressed(g, BTN.RT)) { if (hooks.onAttack()) rumble(g, 80, 0.5, 0.25); }
+
+  /* Y = bascule Chair <-> Esprit (GDD §10.2). Libre en partie, et sous le
+     pouce sans lâcher le stick de déplacement. */
+  if (justPressed(g, BTN.Y) && hooks.onSpirit) { hooks.onSpirit(); rumble(g, 90, 0.25, 0.3); }
+
+  /* Croix directionnelle = les quatre emplacements d'âme (§10.5). Une direction
+     par type, dans l'ordre de la barre : haut, droite, bas, gauche. */
+  if (hooks.onSoulSlot) {
+    if (justPressed(g, BTN.UP)) hooks.onSoulSlot(0);
+    else if (justPressed(g, BTN.RIGHT)) hooks.onSoulSlot(1);
+    else if (justPressed(g, BTN.DOWN)) hooks.onSoulSlot(2);
+    else if (justPressed(g, BTN.LEFT)) hooks.onSoulSlot(3);
+  }
 }
 
 /* ---------- API ---------- */
@@ -746,6 +759,8 @@ function tickPlay(g, isHub) {
  *   onBoost      () => void
  *   onAttack     () => bool  — vrai si le tir est parti
  *   onInteract   () => void  — valider le portail / l'autel du Hub
+ *   onSpirit     () => void  — basculer Chair <-> Esprit (optionnel)
+ *   onSoulSlot   (i) => void — sélectionner l'emplacement d'âme i (croix)
  */
 export function initGamepad(h) {
   hooks = h;

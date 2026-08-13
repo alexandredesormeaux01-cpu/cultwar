@@ -34,6 +34,17 @@ const SRC = 'public/assets/models';
 const LO = path.join(SRC, 'lo');
 const DRY = process.argv.includes('--dry');
 
+/* ---- --only=<fichier.glb> ----
+   Ce script travaille EN PLACE, et le dossier models/ est sa propre source :
+   il n'existe nulle part de version non compressée où repartir. Chaque
+   exécution relit donc des données déjà quantifiées et les requantifie. L'écart
+   est infime (16 bits sur ~2 unités), mais il s'accumule à chaque passage.
+
+   Après une opération sur UN modèle — une cuisson d'occlusion, par exemple —
+   on veut recompresser celui-là et seulement lui. Sans cette option, il
+   faudrait refaire passer les vingt autres dans la moulinette pour rien. */
+const ONLY = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7);
+
 /* Ratio de simplification de la variante mobile, par modèle.
    Les props statiques sont vus de loin et très denses → on coupe fort.
    Les personnages sont proches de la caméra → on reste conservateur pour
@@ -101,7 +112,13 @@ if (!DRY) fs.mkdirSync(LO, { recursive: true });
 
 let hiBefore = 0, hiAfter = 0, loAfter = 0;
 
-for (const file of MODELS) {
+const TARGETS = ONLY ? MODELS.filter((f) => f === ONLY) : MODELS;
+if (ONLY && !TARGETS.length) {
+  console.error(`--only=${ONLY} : absent de la liste MODELS`);
+  process.exit(1);
+}
+
+for (const file of TARGETS) {
   const src = path.join(SRC, file);
   if (!fs.existsSync(src)) { console.warn(`  ⚠ absent : ${file}`); continue; }
   const before = fs.statSync(src).size;

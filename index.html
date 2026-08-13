@@ -16,6 +16,20 @@
 <body>
   <div id="app"></div>
 
+  <!-- Profondeur de champ (tilt-shift).
+       Le lointain se dissout pendant que le personnage reste net : le regard
+       sait alors où se poser, et la vallée gagne une échelle.
+
+       Fait par le COMPOSITEUR du navigateur, pas par WebGL. Une vraie passe de
+       profondeur de champ demanderait une cible de rendu plein écran plus une
+       ou deux passes de flou — le doublement de bande passante qu'on évite déjà
+       pour l'étalonnage. Ici `backdrop-filter` floute ce qui est derrière le
+       calque, et un masque en dégradé décide d'où à où. Coût WebGL : nul.
+
+       Placé entre le canvas et le HUD : l'interface doit rester parfaitement
+       nette, la flouter la rendrait illisible. -->
+  <div id="dof" aria-hidden="true"></div>
+
   <!-- Panneau d'erreur : sans console sur mobile, une exception silencieuse
        laisse le jeu figé sans explication. Ici elle s'affiche. -->
   <div id="crash" class="hidden"><pre id="crash-msg"></pre></div>
@@ -65,8 +79,13 @@
     <!-- Actions buttons under the bandoulière -->
     <div id="hud-actions-bar">
       <button id="boost-btn" title="Sprint (Espace ou double-clic sur l'écran)">
-        <span class="ico">⚡</span><span class="lbl">Boost</span>
-        <div id="boost-cooldown-overlay" style="--cooldown-deg: 360deg;"></div>
+        <div id="boost-cooldown-overlay" class="action-gauge" style="--cooldown-deg: 360deg;"></div>
+        <span class="ico boost-ico"></span>
+      </button>
+      <!-- Bascule Chair <-> Esprit (GDD §10.2) -->
+      <button id="spirit-btn" title="Passer en esprit (Maj)">
+        <div id="spirit-cooldown-overlay" class="action-gauge" style="--spirit-deg: 360deg;"></div>
+        <span class="ico spirit-ico"></span>
       </button>
     </div>
 

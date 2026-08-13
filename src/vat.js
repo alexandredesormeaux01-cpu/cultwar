@@ -203,6 +203,27 @@ function patchVATVertex(shader, vat, timeU, thickness = 0) {
    @param vat     retour de bakeVAT
    @param timeU   uniforme de temps partagé { value } (avancé par la boucle)
    @param key     clé unique par variante (force une compilation séparée du shader) */
+/* ---- Lumière de face des personnages ----
+   Elle a d'abord été tentée comme une DirectionalLight posée sur la caméra et
+   restreinte à la couche personnages. Ça ne pouvait pas marcher : Three.js ne
+   filtre pas les lumières par objet. `light.layers` décide seulement si une
+   lampe participe au rendu — le test se fait contre la CAMÉRA — après quoi la
+   liste obtenue éclaire tout ce qui est dessiné. Une lampe « pour les
+   personnages » éclaire donc aussi toute la carte.
+
+   Elle vit maintenant DANS le shader des personnages, où la question ne se pose
+   plus : seuls les matériaux VAT la portent, et rien d'autre au monde ne peut la
+   recevoir. C'est aussi moins cher qu'une lumière — pas de lampe de plus à
+   évaluer sur chaque fragment du sol, juste un produit scalaire ici.
+
+   Le terme est `N · V` : la face tournée vers l'observateur reçoit le maximum,
+   les bords rien. C'est exactement le rôle d'une lumière de face — ouvrir
+   l'ombre du côté qu'on regarde — et comme elle est calculée par rapport à la
+   vue, elle suit la caméra sans qu'on ait à la déplacer.
+   `uFillI` est piloté depuis main.js (__grade.lights({ charFill })). */
+export const CHAR_FILL_U = { value: 0.55 };
+const CHAR_FILL_COL = new THREE.Color(0xbcd2f0);
+
 export function makeVATMaterial(tex, vat, timeU, key = 'vat', opts = {}) {
   const { wildHalo = false, golden = false } = opts;
   const mat = toonMaterial({ map: tex || null });
@@ -210,6 +231,22 @@ export function makeVATMaterial(tex, vat, timeU, key = 'vat', opts = {}) {
   mat.onBeforeCompile = (shader) => {
     patchVATVertex(shader, vat, timeU, 0);
     patchToonOutline(shader);
+    shader.uniforms.uFillI = CHAR_FILL_U;
+    shader.uniforms.uFillCol = { value: CHAR_FILL_COL };
+    /* Greffé sur `opaque_fragment`, donc APRÈS que l'éclairage a produit
+       `outgoingLight` : on ajoute à un résultat, on ne perturbe pas le calcul.
+       Multiplié par `diffuseColor` pour que la lumière prenne la couleur du
+       personnage — un ajout blanc pur délaverait la texture au lieu de
+       l'éclairer. */
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uFillI;\nuniform vec3 uFillCol;')
+      .replace('#include <opaque_fragment>', [
+        '{',
+        '  float facing = max(dot(normalize(vNormal), normalize(vViewPosition)), 0.0);',
+        '  outgoingLight += diffuseColor.rgb * uFillCol * (uFillI * facing);',
+        '}',
+        '#include <opaque_fragment>',
+      ].join('\n'));
     /* Teinte d'Or céleste éclatant pour tous les esprits élémentaires neutres */
     if (golden || wildHalo) {
       shader.fragmentShader = shader.fragmentShader

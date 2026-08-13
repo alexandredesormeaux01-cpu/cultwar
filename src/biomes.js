@@ -25,16 +25,41 @@ import { IS_MOBILE as _isCoarse } from './device.js';
 const GRASS_DENSITY_MOBILE = 0.35;
 
 /* ---------------------------------------------------------------------------
-   Gradient map toon partagé (3 crans) — la recette standard Three.js.
+   Rampe toon partagée
+   ---------------------------------------------------------------------------
+   La « recette standard » à 3 crans durs (90/160/255, filtrage au plus proche)
+   est faite pour un objet isolé, où la bande se lit comme un parti pris
+   graphique. Étalée sur un décor entier, elle supprime le modelé : chaque
+   rocher, chaque touffe devient un aplat, et c'est de là que vient l'aspect
+   « maquette ».
+
+   On garde le principe — une réponse à la lumière décidée à la main plutôt que
+   physique — mais sur une rampe CONTINUE :
+     · `floor` empêche l'ombre de tomber à zéro. Une ombre toon doit rester une
+       valeur colorée, jamais un noir ; c'est ce qui garde la matière lisible du
+       côté sombre ;
+     · la courbe en S (smoothstep) tasse les extrêmes et laisse une « terrasse »
+       dans les demi-tons. Une droite pure donnerait l'équivalent d'un lambert :
+       correct, mais sans caractère.
 --------------------------------------------------------------------------- */
+export function makeToonRamp(floor = 0.34, steps = 64) {
+  const data = new Uint8Array(steps);
+  for (let i = 0; i < steps; i++) {
+    const t = i / (steps - 1);
+    const s = t * t * (3 - 2 * t);
+    data[i] = Math.round(255 * (floor + (1 - floor) * s));
+  }
+  const tex = new THREE.DataTexture(data, steps, 1, THREE.RedFormat);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 let _gradientMap = null;
 export function getToonGradient() {
   if (_gradientMap) return _gradientMap;
-  const data = new Uint8Array([90, 160, 255]);
-  _gradientMap = new THREE.DataTexture(data, 3, 1, THREE.RedFormat);
-  _gradientMap.minFilter = THREE.NearestFilter;
-  _gradientMap.magFilter = THREE.NearestFilter;
-  _gradientMap.needsUpdate = true;
+  _gradientMap = makeToonRamp(0.34);
   return _gradientMap;
 }
 
@@ -150,8 +175,129 @@ export function attachCartoonOutline(object, thickness = 0.038, color = 0x080a12
   return object;
 }
 
+/* ---------------------------------------------------------------------------
+   Conditionnement d'albédo
+   ---------------------------------------------------------------------------
+   Toute la palette du projet a été composée sous le modèle toon, où la sortie
+   valait albédo × rampe avec une rampe bornée à 1 : une couleur ne pouvait
+   jamais dépasser elle-même, et l'écrire directement à la valeur voulue à
+   l'écran était donc la bonne méthode.
+
+   En PBR ces mêmes constantes deviennent des ALBÉDOS, multipliés par une
+   irradiance qui, en plein soleil, dépasse largement 1. Un vert d'herbe noté
+   0x8EF05A — luminance 0,75, saturation quasi maximale — se retrouve poussé
+   hors du gamut : le canal vert clippe, et comme le tone mapping neutre ne
+   compresse que les hautes lumières sans toucher la teinte, il reste un néon.
+   Aucun albédo naturel ne ressemble à ça : l'herbe réelle est autour de 0,20 de
+   luminance pour une saturation modérée.
+
+   Plutôt que de réécrire à la main les quelques centaines de constantes de
+   biome — long, et surtout irréversible si la direction change — on les fait
+   passer par une projection : plafond et plancher de luminance, saturation
+   ramenée. Deux propriétés valent d'être notées :
+
+     · le PLANCHER compte autant que le plafond. La rampe toon relevait toute
+       face à l'ombre à 34 % ; le PBR ne le fait pas, et les teintes déjà
+       sombres s'effondrent au noir — c'est ce qui transforme les arbres en
+       silhouettes découpées ;
+     · c'est une projection, pas un écrasement : l'ordre relatif des teintes est
+       conservé, la palette garde sa lecture, elle rentre seulement dans un
+       domaine où l'éclairage sait la traiter.
+
+   Les trois bornes se règlent en direct par __grade.albedo().
+--------------------------------------------------------------------------- */
+export const ALBEDO = {
+  /* Un albédo diffus réel dépasse rarement 0,80 ; au-delà la surface renvoie
+     plus de lumière qu'elle n'en reçoit dès que l'ambiant s'y ajoute. */
+  maxL: 0.62,
+  /* Sous ce seuil, une surface éclairée seulement par l'ambiant est un trou
+     noir à l'écran. Le noir pur n'existe pas non plus dans la nature. */
+  minL: 0.09,
+  /* Facteur de saturation. Les teintes toon sont posées bien au-dessus de ce
+     qu'une matière réelle réfléchit ; les ramener est ce qui fait passer le
+     vert de « néon » à « prairie ». */
+  sat: 0.62,
+};
+
+const _hsl = { h: 0, s: 0, l: 0 };
+
+/**
+ * Projette une couleur composée pour le toon dans un domaine d'albédo PBR.
+ * Modifie la couleur EN PLACE et la retourne, pour pouvoir s'insérer dans les
+ * chaînes existantes sans allouer à chaque appel.
+ */
+export function conditionAlbedo(color) {
+  color.getHSL(_hsl);
+  const l = Math.min(ALBEDO.maxL, Math.max(ALBEDO.minL, _hsl.l));
+  color.setHSL(_hsl.h, _hsl.s * ALBEDO.sat, l);
+  return color;
+}
+
+/* Rugosité par défaut du décor. Très haute, et volontairement : à 1.0 la
+   spéculaire disparaît, à 0.85 il reste un voile large qui capte le ciel sur les
+   arêtes supérieures. C'est ce liseré qui détache une silhouette de son fond
+   sans avoir besoin d'un trait noir. Plus bas, la roche prendrait un aspect
+   plastique — le défaut classique quand on passe un décor stylisé en PBR. */
+const DECOR_ROUGHNESS = 0.85;
+
+/**
+ * Matériau standard du décor.
+ *
+ * Ex-`MeshToonMaterial`. Le toon était un plafond dur : pas de spéculaire, pas
+ * d'`envMap`, pas d'`aoMap` — sa seule variable est l'angle de la face au
+ * soleil. Un `scene.environment` n'a strictement aucun effet dessus, ce qui
+ * rendait la lumière indirecte inatteignable et donnait à tout le décor cet
+ * aspect d'aplat non éclairé.
+ *
+ * `MeshStandardMaterial` coûte plus cher par fragment, mais c'est lui qui ouvre
+ * l'éclairage par image : c'est de là que viennent le rebond chaud du sable dans
+ * les faces à l'ombre et les ombres bleutées par le ciel.
+ *
+ * Le nom est conservé : il est appelé depuis six fichiers, et le renommer
+ * mélangerait un changement de rendu avec un renommage dans le même diff.
+ */
+/**
+ * Matériau pour un maillage venu d'un .glb, en préservant ce qu'il porte.
+ *
+ * Les modèles chargés voient leur matériau REMPLACÉ : celui du fichier est un
+ * PBR d'exportateur qui ne correspond ni à la palette du jeu ni à sa rugosité.
+ * Mais le remplacer à la main perd tout ce que la géométrie transporte —
+ * en particulier COLOR_0, où `blender/bake_ao.py` cuit l'occlusion ambiante.
+ * Sans `vertexColors`, l'occlusion est présente dans le fichier, chargée en
+ * mémoire, et purement et simplement ignorée au rendu.
+ *
+ * D'où ce passage obligé : il lit ce que porte la géométrie au lieu de le
+ * supposer, donc cuire l'occlusion d'un nouveau modèle ne demande aucune
+ * modification du code.
+ */
+export function modelMaterial(child, extra = {}) {
+  const src = child.material;
+  return toonMaterial({
+    map: (src && src.map) || null,
+    vertexColors: !!(child.geometry && child.geometry.attributes.color),
+    ...extra,
+  });
+}
+
 export function toonMaterial(opts = {}) {
-  const mat = new THREE.MeshToonMaterial({ gradientMap: getToonGradient(), ...opts });
+  /* `gradientMap` n'existe pas sur le matériau standard. Les appelants n'en
+     passent pas, mais on le retire par sécurité : une propriété inconnue posée
+     sur un matériau Three.js est silencieusement ignorée, donc invisible au
+     débogage. */
+  const { gradientMap: _ignored, ...rest } = opts;
+  const mat = new THREE.MeshStandardMaterial({
+    roughness: DECOR_ROUGHNESS,
+    metalness: 0,
+    ...rest,
+  });
+  /* Les couleurs passées ici viennent des constantes de biome, composées pour
+     le toon : elles doivent traverser le conditionnement comme les autres.
+     Exception faite du blanc pur, qui n'est pas une teinte choisie mais le
+     neutre par défaut d'un matériau porteur de texture ou de vertexColors — le
+     conditionner assombrirait la texture qu'il ne fait que multiplier. */
+  if (rest.color !== undefined && !(mat.map || mat.vertexColors)) {
+    conditionAlbedo(mat.color);
+  }
   return mat;
 }
 
@@ -163,7 +309,10 @@ export function patchToonOutline(_shader) {}
 --------------------------------------------------------------------------- */
 /** Applique une couleur unie par vertex sur une géométrie. */
 function tint(geo, hex) {
-  const c = new THREE.Color(hex);
+  /* Ces teintes de sommet sont multipliées par le matériau puis par
+     l'éclairage : ce sont des albédos au même titre que `color`, et elles
+     traversent donc le même conditionnement. */
+  const c = conditionAlbedo(new THREE.Color(hex));
   const n = geo.attributes.position.count;
   const colors = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) {
@@ -792,6 +941,9 @@ export const BIOMES = {
   temperate: {
     name: 'Prairie',
     ground: [0x8ef05a, 0x5ed86a, 0xb4f06e],
+    /* Herbe : rien n'est chassé, la tige se couche puis se relève. Trace
+       basse et courte — c'est le sol qui retient le moins, après la roche. */
+    footprint: { kind: 'press', color: 0x2f4a22, opacity: 0.20, size: 0.60 },
     edge: 0x8fa07a,
     sky: 0x9fdcff, fogNear: 70, fogFar: 165,
     fogColor: 0x8ec3eb, fogDensity: 0.0072,
@@ -841,6 +993,9 @@ export const BIOMES = {
   desert: {
     name: 'Désert',
     ground: [0xf6d87a, 0xefc45c, 0xffe59a],
+    /* Sable : la matière la plus expressive du jeu. Elle se creuse et forme un
+       bourrelet clair, très lisible sous un soleil rasant. */
+    footprint: { kind: 'dimple', color: 0x8a6a30, opacity: 0.42, size: 0.66 },
     edge: 0xcfa45c,
     /* Pas de groundMatter : le désert garde l'aplat toon des autres biomes.
        La matière cuite (sable + terre craquelée) découpait chaque tuile en
@@ -879,6 +1034,9 @@ export const BIOMES = {
   nordic: {
     name: 'Toundra',
     ground: [0xf2f7fd, 0xdde9f5, 0xffffff],
+    /* Neige : creuse encore plus franchement que le sable, et l'ombre du creux
+       y vire au bleu — c'est le ciel qui l'éclaire, pas le soleil. */
+    footprint: { kind: 'dimple', color: 0x6f88ad, opacity: 0.50, size: 0.68 },
     edge: 0xc4d3e2,
     sky: 0xcfe4f7, fogNear: 60, fogFar: 150,
     fogColor: 0xb5d4ee, fogDensity: 0.0088,
@@ -912,6 +1070,8 @@ export const BIOMES = {
   tropical: {
     name: 'Jungle',
     ground: [0x48c86a, 0x36a852, 0x72e07e],
+    /* Sous-bois humide : la terre marque plus que l'herbe sèche. */
+    footprint: { kind: 'press', color: 0x24381c, opacity: 0.26, size: 0.62 },
     edge: 0x2c7a3e,
     sky: 0xa8ecd8, fogNear: 60, fogFar: 150,
     fogColor: 0x76d8ab, fogDensity: 0.0084,
@@ -947,6 +1107,8 @@ export const BIOMES = {
   savanna: {
     name: 'Savane',
     ground: [0xecd06e, 0xd9bc52, 0xf4e28a],
+    /* Herbe sèche sur terre battue : entre la prairie et le sable. */
+    footprint: { kind: 'press', color: 0x6a5426, opacity: 0.28, size: 0.62 },
     edge: 0xb59a4d,
     /* Pas de groundMatter, comme le désert (voir plus haut). La savane s'en
        distingue par sa palette de sol, plus verte et plus sourde, et par son
@@ -982,6 +1144,9 @@ export const BIOMES = {
   volcanic: {
     name: 'Terres de Cendre',
     ground: [0x5a4a44, 0x4a3c38, 0x6b5850],
+    /* Cendre sur roche nue : une poussière soulevée, presque rien. Un sol qui
+       ne garde pas la trace dit quelque chose de lui-même. */
+    footprint: { kind: 'press', color: 0x1c1512, opacity: 0.22, size: 0.58 },
     edge: 0x3a2f2c,
     sky: 0xffb08a, fogNear: 55, fogFar: 140,
     fogColor: 0x5a3e36, fogDensity: 0.0098,
@@ -1389,6 +1554,7 @@ export function buildBiomeNature(scene, biomeKey, mapR, placer = null) {
         /* Teinte finale : tint du biome × couleur du matériau source. Les
            modèles sans texture comptent sur cette couleur (sinon : blanc). */
         const color = new THREE.Color(spec.tint !== undefined ? spec.tint : 0xffffff);
+        if (spec.tint !== undefined) conditionAlbedo(color);
         if (part.color) color.multiply(part.color);
         /* Le prop suit le relief du sol. Il est placé sur le plan LOGIQUE de la
            tuile, qui reste plat : sans ce décalage un caillou posé sur une bosse
