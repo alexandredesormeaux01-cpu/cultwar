@@ -34,6 +34,11 @@ blender/assets/
 # version d'origine, que git conserve déjà dans son historique — les versionner
 # doublerait le poids du dépôt pour la même information.
 #
+# Elles vivent hors de public/ : ce dossier est copié tel quel par Vite dans
+# dist/, puis par Capacitor dans l'APK. Des sauvegardes posées à côté des
+# modèles y ont déjà été livrées — 4,9 Mo que personne ne charge.
+.model-backups/
+#
 # Conséquence à connaître : après un clone, ces .bak n'existent pas. Les deux
 # scripts repartent alors du .glb suivi, qui est déjà corrigé — relancer une
 # correction l'appliquerait donc une seconde fois. Pour repartir de l'original,

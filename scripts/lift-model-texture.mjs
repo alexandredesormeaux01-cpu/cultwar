@@ -46,6 +46,9 @@ import path from 'node:path';
 import sharp from 'sharp';
 
 const MODELS_DIR = 'public/assets/models';
+/* Voir le commentaire à la création des sauvegardes : hors de public/, sinon
+   elles partent dans le build web et dans l'APK. */
+const BACKUP_DIR = '.model-backups';
 const GLB_MAGIC = 0x46546c67;
 const CHUNK_JSON = 0x4e4f534a;
 const CHUNK_BIN = 0x004e4942;
@@ -265,8 +268,15 @@ const file = path.join(MODELS_DIR, name.endsWith('.glb') ? name : `${name}.glb`)
 if (!fs.existsSync(file)) { console.error(`introuvable : ${file}`); process.exit(1); }
 
 /* Sauvegarde AVANT toute écriture, et jamais écrasée : rejouer le script avec
-   d'autres réglages doit rester possible sans perdre la texture d'origine. */
-const bak = `${file}.bak`;
+   d'autres réglages doit rester possible sans perdre la texture d'origine.
+
+   HORS de public/, et c'est important : tout ce qui vit dans public/ est copié
+   tel quel par Vite dans dist/, puis par Capacitor dans l'APK. Des sauvegardes
+   posées à côté du modèle ont ainsi été livrées — 4,9 Mo de fichiers que
+   personne ne charge jamais. Un dossier à part, ignoré par git, ne peut pas
+   se retrouver dans un build. */
+const bak = path.join(BACKUP_DIR, `${name.replace(/[\\/]/g, '__').replace(/\.glb$/, '')}.glb.bak`);
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
 if (!fs.existsSync(bak)) {
   fs.copyFileSync(file, bak);
   console.log(`original sauvegardé → ${path.basename(bak)}`);

@@ -194,10 +194,17 @@ def main():
     print('bake_ao: plancher %.2f, force %.2f appliqués' % (floor, strength))
 
     if dst == src:
-        bak = src + '.bak'
+        # HORS de public/ : tout ce qui s'y trouve est copié tel quel par Vite
+        # dans dist/, puis par Capacitor dans l'APK. Une sauvegarde posée à côté
+        # du modèle se retrouve donc livrée aux joueurs — plusieurs mégaoctets
+        # que personne ne charge. Un dossier à part ne peut pas finir dans un
+        # build.
+        bak_dir = os.path.join(os.getcwd(), '.model-backups')
+        os.makedirs(bak_dir, exist_ok=True)
+        bak = os.path.join(bak_dir, os.path.basename(src) + '.bak')
         if not os.path.exists(bak):
             shutil.copyfile(src, bak)
-            print('bake_ao: original sauvegardé →', os.path.basename(bak))
+            print('bake_ao: original sauvegardé →', bak)
 
     opts = dict(
         filepath=dst,
